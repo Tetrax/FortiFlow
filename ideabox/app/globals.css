@@ -1,0 +1,29 @@
+@import "tailwindcss";
+
+/* Styles globaux */
+html {
+  scroll-behavior: smooth;
+}
+
+/* Thème sombre par défaut */
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background-color: #0A0A0A;
+  color: #FFFFFF;
+}
+
+/* Utilitaire pour tronquer sur plusieurs lignes */
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.line-clamp-3 {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
