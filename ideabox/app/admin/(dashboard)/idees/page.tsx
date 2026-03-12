@@ -1,9 +1,8 @@
 export const dynamic = 'force-dynamic'
 
-import { redirect } from 'next/navigation'
 import { auth } from '@/lib/auth'
+import { redirect } from 'next/navigation'
 import { prisma } from '@/lib/prisma'
-import AdminLayout from '@/components/AdminLayout'
 import StatusBadge from '@/components/StatusBadge'
 import AdminCategorySelect from '@/components/AdminCategorySelect'
 import Link from 'next/link'
@@ -51,7 +50,7 @@ export default async function AdminIdeasPage({ searchParams }: PageProps) {
   }
 
   return (
-    <AdminLayout adminName={session.user.name ?? undefined} adminRole={session.user.role ?? undefined}>
+    <>
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-[var(--text-primary)]">💡 Gestion des idées</h1>
         <span className="text-sm text-[var(--text-secondary)]">{total} idée{total > 1 ? 's' : ''}</span>
@@ -140,6 +139,6 @@ export default async function AdminIdeasPage({ searchParams }: PageProps) {
           )}
         </div>
       )}
-    </AdminLayout>
+    </>
   )
 }

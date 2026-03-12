@@ -1,11 +1,10 @@
 'use client'
 import { useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
-import { useSession } from 'next-auth/react'
-import AdminLayout from '@/components/AdminLayout'
 import StatusBadge from '@/components/StatusBadge'
 import { IdeaStatus } from '@prisma/client'
 import Link from 'next/link'
+import { inputClassSm } from '@/lib/styles'
 
 interface Category { name: string; icon: string }
 
@@ -35,7 +34,6 @@ const STATUS_OPTIONS: Array<{ value: IdeaStatus; label: string }> = [
 export default function AdminIdeaPage() {
   const params = useParams()
   const router = useRouter()
-  const { data: session } = useSession()
   const ideaId = params.id as string
 
   const [idea, setIdea] = useState<Idea | null>(null)
@@ -97,16 +95,11 @@ export default function AdminIdeaPage() {
     }
   }
 
-  const inputClass =
-    'w-full rounded-lg border border-[var(--border)] bg-[var(--bg-primary)] text-[var(--text-primary)] placeholder-gray-400 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B21E8]'
-
-  const adminRole = session?.user?.role ?? undefined
-
-  if (loading) return <AdminLayout adminRole={adminRole}><div className="text-center py-16 text-[var(--text-secondary)] animate-pulse">Chargement…</div></AdminLayout>
-  if (!idea) return <AdminLayout adminRole={adminRole}><div className="text-center py-16 text-[var(--text-secondary)]">Idée introuvable.</div></AdminLayout>
+  if (loading) return <div className="text-center py-16 text-[var(--text-secondary)] animate-pulse">Chargement…</div>
+  if (!idea) return <div className="text-center py-16 text-[var(--text-secondary)]">Idée introuvable.</div>
 
   return (
-    <AdminLayout adminRole={adminRole}>
+    <>
       <div className="flex items-center gap-2 text-sm text-[var(--text-secondary)] mb-6">
         <Link href="/admin" className="hover:text-[#6B21E8] transition-colors">Dashboard</Link>
         <span>›</span>
@@ -161,7 +154,7 @@ export default function AdminIdeaPage() {
 
             <div>
               <label className="block text-sm font-medium text-[var(--text-primary)] mb-1">Statut</label>
-              <select value={status} onChange={(e) => setStatus(e.target.value as IdeaStatus)} className={inputClass}>
+              <select value={status} onChange={(e) => setStatus(e.target.value as IdeaStatus)} className={inputClassSm}>
                 {STATUS_OPTIONS.map((opt) => (
                   <option key={opt.value} value={opt.value}>{opt.label}</option>
                 ))}
@@ -178,7 +171,7 @@ export default function AdminIdeaPage() {
                 rows={5}
                 maxLength={1000}
                 placeholder="Expliquez la décision, les prochaines étapes…"
-                className={`${inputClass} resize-none`}
+                className={`${inputClassSm} resize-none`}
               />
               <p className="text-xs text-[var(--text-secondary)] mt-1">{adminResponse.length}/1000</p>
             </div>
@@ -211,6 +204,6 @@ export default function AdminIdeaPage() {
           </form>
         </div>
       </div>
-    </AdminLayout>
+    </>
   )
 }

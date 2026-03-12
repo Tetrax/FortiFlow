@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react'
 import { useSession } from 'next-auth/react'
 import { useRouter } from 'next/navigation'
-import AdminLayout from '@/components/AdminLayout'
+import { inputClassSm } from '@/lib/styles'
 
 interface AdminAccount {
   id: string
@@ -12,9 +12,6 @@ interface AdminAccount {
   role: 'ADMIN' | 'MODERATOR'
   createdAt: string
 }
-
-const inputClass =
-  'w-full rounded-lg border border-[var(--border)] bg-[var(--bg-primary)] text-[var(--text-primary)] placeholder-gray-400 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B21E8]'
 
 export default function AdminComptesPage() {
   const { data: session, status } = useSession()
@@ -96,11 +93,11 @@ export default function AdminComptesPage() {
   }
 
   if (status === 'loading' || (status === 'authenticated' && session?.user?.role !== 'ADMIN')) {
-    return <AdminLayout adminRole="ADMIN"><div className="text-center py-16 text-[var(--text-secondary)] animate-pulse">Chargement…</div></AdminLayout>
+    return <div className="text-center py-16 text-[var(--text-secondary)] animate-pulse">Chargement…</div>
   }
 
   return (
-    <AdminLayout adminName={session?.user?.name ?? undefined} adminRole="ADMIN">
+    <>
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold text-[var(--text-primary)]">👥 Gestion des comptes</h1>
         <span className="text-sm text-[var(--text-secondary)]">{admins.length} compte{admins.length > 1 ? 's' : ''}</span>
@@ -190,7 +187,7 @@ export default function AdminComptesPage() {
                 value={form.username}
                 onChange={(e) => setForm((f) => ({ ...f, username: e.target.value }))}
                 placeholder="jean_dupont"
-                className={inputClass}
+                className={inputClassSm}
               />
               <p className="text-xs text-[var(--text-secondary)] mt-1">Lettres, chiffres, - et _ uniquement</p>
             </div>
@@ -203,7 +200,7 @@ export default function AdminComptesPage() {
                 value={form.name}
                 onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
                 placeholder="Jean Dupont"
-                className={inputClass}
+                className={inputClassSm}
               />
             </div>
 
@@ -214,7 +211,7 @@ export default function AdminComptesPage() {
                 value={form.email}
                 onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
                 placeholder="jean@entreprise.fr"
-                className={inputClass}
+                className={inputClassSm}
               />
             </div>
 
@@ -223,7 +220,7 @@ export default function AdminComptesPage() {
               <select
                 value={form.role}
                 onChange={(e) => setForm((f) => ({ ...f, role: e.target.value }))}
-                className={inputClass}
+                className={inputClassSm}
               >
                 <option value="MODERATOR">🛡️ Modérateur</option>
                 <option value="ADMIN">🔑 Administrateur</option>
@@ -238,7 +235,7 @@ export default function AdminComptesPage() {
                 value={form.password}
                 onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
                 placeholder="8 caractères minimum"
-                className={inputClass}
+                className={inputClassSm}
               />
             </div>
 
@@ -252,6 +249,6 @@ export default function AdminComptesPage() {
           </form>
         </div>
       </div>
-    </AdminLayout>
+    </>
   )
 }

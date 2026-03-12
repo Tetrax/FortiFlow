@@ -1,9 +1,5 @@
 'use client'
-interface Category {
-  id: string
-  name: string
-  icon: string
-}
+import type { Category } from '@/types'
 
 interface AdminCategorySelectProps {
   categories: Category[]

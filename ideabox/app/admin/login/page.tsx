@@ -4,6 +4,7 @@ import { signIn } from 'next-auth/react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { Suspense } from 'react'
 import Image from 'next/image'
+import { inputClass } from '@/lib/styles'
 
 function LoginForm() {
   const router = useRouter()
@@ -37,9 +38,6 @@ function LoginForm() {
       setLoading(false)
     }
   }
-
-  const inputClass =
-    'w-full rounded-lg border border-[var(--border)] bg-[var(--bg-primary)] text-[var(--text-primary)] placeholder-gray-400 px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B21E8]'
 
   return (
     <div className="min-h-screen bg-[var(--bg-primary)] flex items-center justify-center px-4">

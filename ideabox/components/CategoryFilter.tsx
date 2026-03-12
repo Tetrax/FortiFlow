@@ -1,11 +1,6 @@
 'use client'
 import { IdeaStatus } from '@prisma/client'
-
-interface Category {
-  id: string
-  name: string
-  icon: string
-}
+import type { Category } from '@/types'
 
 interface CategoryFilterProps {
   categories: Category[]

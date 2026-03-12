@@ -1,12 +1,8 @@
 'use client'
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
-
-interface Category {
-  id: string
-  name: string
-  icon: string
-}
+import { inputClass } from '@/lib/styles'
+import type { Category } from '@/types'
 
 interface IdeaFormProps {
   categories: Category[]
@@ -68,9 +64,6 @@ export default function IdeaForm({ categories }: IdeaFormProps) {
       setLoading(false)
     }
   }
-
-  const inputClass =
-    'w-full rounded-lg border border-[var(--border)] bg-[var(--bg-primary)] text-[var(--text-primary)] placeholder-gray-400 px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B21E8]'
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
