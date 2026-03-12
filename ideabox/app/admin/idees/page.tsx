@@ -6,6 +6,7 @@ import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/prisma'
 import AdminLayout from '@/components/AdminLayout'
 import StatusBadge from '@/components/StatusBadge'
+import AdminCategorySelect from '@/components/AdminCategorySelect'
 import Link from 'next/link'
 import { IdeaStatus } from '@prisma/client'
 
@@ -89,20 +90,11 @@ export default async function AdminIdeasPage({ searchParams }: PageProps) {
         </div>
 
         {/* Filtre catégorie */}
-        <select
+        <AdminCategorySelect
+          categories={categories}
           defaultValue={categoryFilter ?? ''}
-          onChange={(e) => {
-            window.location.href = buildUrl({ categoryId: e.target.value || undefined, page: undefined })
-          }}
-          className="rounded-lg border border-[#1F2937] px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B21E8] bg-[#111111] text-white"
-        >
-          <option value="">Toutes les catégories</option>
-          {categories.map((cat) => (
-            <option key={cat.id} value={cat.id}>
-              {cat.icon} {cat.name}
-            </option>
-          ))}
-        </select>
+          statusFilter={statusFilter}
+        />
       </div>
 
       {/* Table des idées */}

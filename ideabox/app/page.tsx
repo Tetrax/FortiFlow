@@ -42,11 +42,11 @@ export default function HomePage() {
             src="/panthere-sns.jpg"
             alt="SNS Security"
             fill
-            className="object-cover object-center opacity-20"
+            className="object-cover object-center opacity-45"
             priority
           />
           {/* Dégradé par-dessus */}
-          <div className="absolute inset-0 bg-gradient-to-b from-[#0A0A0A]/60 via-[#0A0A0A]/70 to-[#0A0A0A]" />
+          <div className="absolute inset-0 bg-gradient-to-b from-[#0A0A0A]/30 via-[#0A0A0A]/40 to-[#0A0A0A]" />
         </div>
 
         {/* Contenu hero */}
