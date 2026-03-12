@@ -48,7 +48,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Ce nom d\'utilisateur est déjà utilisé.' }, { status: 409 })
   }
 
-  const passwordHash = await bcrypt.hash(password, 10)
+  const passwordHash = await bcrypt.hash(password, 12)
   const admin = await prisma.admin.create({
     data: { username, email: email || null, name, role, passwordHash },
     select: { id: true, username: true, email: true, name: true, role: true, createdAt: true },

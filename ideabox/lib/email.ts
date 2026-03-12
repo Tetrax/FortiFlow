@@ -1,6 +1,15 @@
 // Service d'envoi d'emails via Resend
 // Si RESEND_API_KEY n'est pas défini, les emails sont simulés en console
 
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;')
+}
+
 interface EmailOptions {
   to: string
   subject: string
@@ -47,13 +56,15 @@ export async function sendEmail({ to, subject, html }: EmailOptions): Promise<bo
 // Template : confirmation de soumission d'idée
 export function buildSubmissionEmail(ideaTitle: string, ideaId: string): string {
   const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'
+  const safeTitle = escapeHtml(ideaTitle)
+  const safeId = encodeURIComponent(ideaId)
   return `
     <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
       <h2 style="color: #2563EB;">Votre idée a bien été reçue !</h2>
       <p>Merci pour votre contribution à la boîte à idées du CSE.</p>
-      <p>Votre idée <strong>"${ideaTitle}"</strong> est en cours d'examen par notre équipe.</p>
+      <p>Votre idée <strong>"${safeTitle}"</strong> est en cours d'examen par notre équipe.</p>
       <p>
-        <a href="${appUrl}/idees/${ideaId}" style="background: #2563EB; color: white; padding: 10px 20px; border-radius: 6px; text-decoration: none;">
+        <a href="${appUrl}/idees/${safeId}" style="background: #2563EB; color: white; padding: 10px 20px; border-radius: 6px; text-decoration: none;">
           Voir mon idée
         </a>
       </p>
@@ -81,14 +92,19 @@ export function buildStatusUpdateEmail(
     DONE: 'Réalisée',
   }
 
+  const safeTitle = escapeHtml(ideaTitle)
+  const safeId = encodeURIComponent(ideaId)
+  const safeStatus = escapeHtml(statusLabels[newStatus] ?? newStatus)
+  const safeResponse = adminResponse ? escapeHtml(adminResponse) : null
+
   return `
     <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
       <h2 style="color: #2563EB;">Mise à jour de votre idée</h2>
-      <p>Le statut de votre idée <strong>"${ideaTitle}"</strong> a été mis à jour.</p>
-      <p>Nouveau statut : <strong>${statusLabels[newStatus] ?? newStatus}</strong></p>
-      ${adminResponse ? `<p>Réponse du CSE : <em>${adminResponse}</em></p>` : ''}
+      <p>Le statut de votre idée <strong>"${safeTitle}"</strong> a été mis à jour.</p>
+      <p>Nouveau statut : <strong>${safeStatus}</strong></p>
+      ${safeResponse ? `<p>Réponse du CSE : <em>${safeResponse}</em></p>` : ''}
       <p>
-        <a href="${appUrl}/idees/${ideaId}" style="background: #2563EB; color: white; padding: 10px 20px; border-radius: 6px; text-decoration: none;">
+        <a href="${appUrl}/idees/${safeId}" style="background: #2563EB; color: white; padding: 10px 20px; border-radius: 6px; text-decoration: none;">
           Voir mon idée
         </a>
       </p>

@@ -23,6 +23,11 @@ export async function DELETE(_request: NextRequest, { params }: RouteParams) {
     return NextResponse.json({ error: 'Compte introuvable.' }, { status: 404 })
   }
 
+  const adminCount = await prisma.admin.count({ where: { role: 'ADMIN' } })
+  if (admin.role === 'ADMIN' && adminCount <= 1) {
+    return NextResponse.json({ error: 'Impossible de supprimer le dernier compte administrateur.' }, { status: 400 })
+  }
+
   await prisma.admin.delete({ where: { id } })
   return NextResponse.json({ ok: true })
 }
