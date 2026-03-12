@@ -4,6 +4,7 @@ export const dynamic = 'force-dynamic'
 
 import { notFound } from 'next/navigation'
 import Link from 'next/link'
+import Image from 'next/image'
 import { prisma } from '@/lib/prisma'
 import StatusBadge from '@/components/StatusBadge'
 import VoteButton from '@/components/VoteButton'
@@ -38,7 +39,9 @@ export default async function IdeaDetailPage({ params, searchParams }: PageProps
       {/* Barre de navigation */}
       <nav className="bg-[#111111] border-b border-[#1F2937]">
         <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 h-14 flex items-center gap-2 text-sm text-[#9CA3AF]">
-          <Link href="/" className="hover:text-[#6B21E8] transition-colors">Accueil</Link>
+          <Link href="/" className="hover:opacity-80 transition-opacity flex items-center">
+            <Image src="/logo-sns.svg" alt="SNS Security" width={60} height={32} className="h-5 w-auto" />
+          </Link>
           <span>›</span>
           <Link href="/idees" className="hover:text-[#6B21E8] transition-colors">Les idées</Link>
           <span>›</span>

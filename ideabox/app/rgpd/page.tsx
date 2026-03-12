@@ -1,5 +1,6 @@
 // Page RGPD - Politique de protection des données
 import Link from 'next/link'
+import Image from 'next/image'
 
 export default function RgpdPage() {
   return (
@@ -7,7 +8,9 @@ export default function RgpdPage() {
       {/* Navigation */}
       <nav className="bg-[#111111] border-b border-[#1F2937]">
         <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 h-14 flex items-center gap-2 text-sm text-[#9CA3AF]">
-          <Link href="/" className="hover:text-[#6B21E8] transition-colors">Accueil</Link>
+          <Link href="/" className="hover:opacity-80 transition-opacity flex items-center">
+            <Image src="/logo-sns.svg" alt="SNS Security" width={60} height={32} className="h-5 w-auto" />
+          </Link>
           <span>›</span>
           <span className="text-white">Politique RGPD</span>
         </div>

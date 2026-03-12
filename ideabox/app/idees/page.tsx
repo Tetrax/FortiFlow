@@ -2,6 +2,7 @@
 // Mur des idées avec filtres catégorie/statut
 import { useState, useEffect, useCallback } from 'react'
 import Link from 'next/link'
+import Image from 'next/image'
 import IdeaCard, { IdeaCardProps } from '@/components/IdeaCard'
 import CategoryFilter from '@/components/CategoryFilter'
 import { IdeaStatus } from '@prisma/client'
@@ -87,7 +88,9 @@ export default function IdeesPage() {
       <header className="bg-[#111111] border-b border-[#1F2937]">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
           <div className="flex items-center gap-2 text-sm text-[#9CA3AF] mb-2">
-            <Link href="/" className="hover:text-[#6B21E8] transition-colors">Accueil</Link>
+            <Link href="/" className="hover:text-[#6B21E8] transition-colors flex items-center">
+              <Image src="/logo-sns.svg" alt="SNS Security" width={60} height={32} className="h-5 w-auto" />
+            </Link>
             <span>›</span>
             <span>Les idées</span>
           </div>

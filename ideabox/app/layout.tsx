@@ -3,8 +3,8 @@ import type { Metadata } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'Boîte à Idées CSE',
-  description: 'Proposez vos idées pour améliorer votre entreprise. Votre voix compte !',
+  title: 'SNS Security — Boîte à Idées CSE',
+  description: 'La boîte à idées du CSE SNS Security. Proposez vos idées pour améliorer votre entreprise.',
 }
 
 export default function RootLayout({

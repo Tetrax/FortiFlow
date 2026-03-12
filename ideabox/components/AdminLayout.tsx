@@ -2,6 +2,7 @@
 // Layout commun pour les pages d'administration
 import { signOut } from 'next-auth/react'
 import Link from 'next/link'
+import Image from 'next/image'
 import { usePathname } from 'next/navigation'
 
 interface AdminLayoutProps {
@@ -30,13 +31,16 @@ export default function AdminLayout({ children, adminName }: AdminLayoutProps) {
         <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex items-center justify-between h-16">
             {/* Logo / titre */}
-            <div className="flex items-center gap-2">
-              <span className="text-xl">💡</span>
-              <span className="font-bold text-white">
-                SNSBox{' '}
-                <span className="bg-gradient-to-r from-[#6B21E8] to-[#2563EB] bg-clip-text text-transparent font-normal text-sm">
-                  Admin
-                </span>
+            <div className="flex items-center gap-3">
+              <Image
+                src="/logo-sns.svg"
+                alt="SNS Security"
+                width={80}
+                height={42}
+                className="h-7 w-auto"
+              />
+              <span className="bg-gradient-to-r from-[#6B21E8] to-[#2563EB] bg-clip-text text-transparent font-semibold text-sm">
+                Admin CSE
               </span>
             </div>
 
