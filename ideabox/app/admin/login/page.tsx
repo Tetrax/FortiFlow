@@ -1,9 +1,9 @@
 'use client'
-// Page de connexion administrateur
 import { useState } from 'react'
 import { signIn } from 'next-auth/react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { Suspense } from 'react'
+import Image from 'next/image'
 
 function LoginForm() {
   const router = useRouter()
@@ -24,11 +24,7 @@ function LoginForm() {
     setError(null)
 
     try {
-      const result = await signIn('credentials', {
-        email,
-        password,
-        redirect: false,
-      })
+      const result = await signIn('credentials', { email, password, redirect: false })
 
       if (result?.error) {
         setError('Email ou mot de passe incorrect.')
@@ -43,33 +39,29 @@ function LoginForm() {
   }
 
   const inputClass =
-    'w-full rounded-lg border border-[#1F2937] bg-[#0A0A0A] text-white placeholder-[#4B5563] px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B21E8]'
+    'w-full rounded-lg border border-[var(--border)] bg-[var(--bg-primary)] text-[var(--text-primary)] placeholder-gray-400 px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B21E8]'
 
   return (
-    <div className="min-h-screen bg-[#0A0A0A] flex items-center justify-center px-4">
+    <div className="min-h-screen bg-[var(--bg-primary)] flex items-center justify-center px-4">
       <div className="w-full max-w-sm">
-        {/* Logo */}
         <div className="text-center mb-8">
-          <span className="text-5xl">💡</span>
-          <h1 className="text-2xl font-bold text-white mt-3">Boîte à Idées</h1>
-          <p className="text-sm text-[#9CA3AF] mt-1">Espace administrateur</p>
+          <Image src="/logo-sns.svg" alt="SNS Security" width={160} height={84} className="h-12 w-auto mx-auto mb-4" />
+          <h1 className="text-2xl font-bold text-[var(--text-primary)]">Boîte à Idées</h1>
+          <p className="text-sm text-[var(--text-secondary)] mt-1">Espace administrateur</p>
         </div>
 
-        {/* Formulaire de connexion */}
-        <div className="bg-[#111111] rounded-2xl border border-[#1F2937] shadow-sm p-8">
-          <h2 className="text-lg font-semibold text-white mb-6">Connexion</h2>
+        <div className="bg-[var(--bg-card)] rounded-2xl border border-[var(--border)] shadow-sm p-8">
+          <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-6">Connexion</h2>
 
-          {/* Erreur */}
           {error && (
-            <div className="bg-red-900/20 border border-red-700/50 text-red-400 px-4 py-3 rounded-lg text-sm mb-4">
+            <div className="bg-red-50 border border-red-200 text-red-700 dark:bg-red-900/20 dark:border-red-700/50 dark:text-red-400 px-4 py-3 rounded-lg text-sm mb-4">
               {error}
             </div>
           )}
 
           <form onSubmit={handleSubmit} className="space-y-4">
-            {/* Email */}
             <div>
-              <label htmlFor="email" className="block text-sm font-medium text-white mb-1">
+              <label htmlFor="email" className="block text-sm font-medium text-[var(--text-primary)] mb-1">
                 Email
               </label>
               <input
@@ -84,9 +76,8 @@ function LoginForm() {
               />
             </div>
 
-            {/* Mot de passe */}
             <div>
-              <label htmlFor="password" className="block text-sm font-medium text-white mb-1">
+              <label htmlFor="password" className="block text-sm font-medium text-[var(--text-primary)] mb-1">
                 Mot de passe
               </label>
               <input
@@ -111,7 +102,7 @@ function LoginForm() {
           </form>
         </div>
 
-        <p className="text-xs text-center text-[#9CA3AF] mt-4">
+        <p className="text-xs text-center text-[var(--text-secondary)] mt-4">
           Accès réservé aux membres du CSE
         </p>
       </div>

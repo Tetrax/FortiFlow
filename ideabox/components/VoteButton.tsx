@@ -28,7 +28,6 @@ export default function VoteButton({ ideaId, initialCount }: VoteButtonProps) {
         setCount((c) => c + 1)
         setVoted(true)
       } else if (res.status === 409) {
-        // Déjà voté aujourd'hui
         setVoted(true)
         setError('Vous avez déjà voté pour cette idée aujourd\'hui.')
       } else {
@@ -48,7 +47,7 @@ export default function VoteButton({ ideaId, initialCount }: VoteButtonProps) {
         disabled={voted || loading}
         className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all duration-200 ${
           voted
-            ? 'bg-[#1e1040] text-purple-300 cursor-default'
+            ? 'bg-purple-100 text-purple-700 cursor-default dark:bg-[#1e1040] dark:text-purple-300'
             : 'bg-gradient-to-r from-[#6B21E8] to-[#2563EB] text-white hover:opacity-90 active:scale-95'
         } disabled:opacity-70`}
         aria-label={`Voter pour cette idée (${count} votes)`}
@@ -63,9 +62,8 @@ export default function VoteButton({ ideaId, initialCount }: VoteButtonProps) {
         <span>{count} vote{count !== 1 ? 's' : ''}</span>
       </button>
 
-      {/* Message d'erreur éventuel */}
       {error && (
-        <p className="text-xs text-red-400 mt-1">{error}</p>
+        <p className="text-xs text-red-500 dark:text-red-400 mt-1">{error}</p>
       )}
     </div>
   )

@@ -1,6 +1,7 @@
 // Layout racine de l'application
 import type { Metadata } from 'next'
 import './globals.css'
+import { Providers } from './providers'
 
 export const metadata: Metadata = {
   title: 'SNS Security — Boîte à Idées CSE',
@@ -13,9 +14,11 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   return (
-    <html lang="fr">
-      <body className="antialiased bg-[#0A0A0A] text-white">
-        {children}
+    <html lang="fr" suppressHydrationWarning>
+      <body className="antialiased bg-[var(--bg-primary)] text-[var(--text-primary)]">
+        <Providers>
+          {children}
+        </Providers>
       </body>
     </html>
   )

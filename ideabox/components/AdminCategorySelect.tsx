@@ -1,5 +1,4 @@
 'use client'
-// Select de filtre catégorie côté admin (client component pour le onChange)
 interface Category {
   id: string
   name: string
@@ -28,7 +27,7 @@ export default function AdminCategorySelect({
     <select
       defaultValue={defaultValue}
       onChange={handleChange}
-      className="rounded-lg border border-[#1F2937] px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B21E8] bg-[#111111] text-white"
+      className="rounded-lg border border-[var(--border)] px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B21E8] bg-[var(--bg-card)] text-[var(--text-primary)]"
     >
       <option value="">Toutes les catégories</option>
       {categories.map((cat) => (

@@ -1,5 +1,4 @@
 'use client'
-// Filtres par catégorie et statut pour le mur des idées
 import { IdeaStatus } from '@prisma/client'
 
 interface Category {
@@ -16,7 +15,6 @@ interface CategoryFilterProps {
   onStatusChange: (status: string) => void
 }
 
-// Libellés des statuts
 const STATUS_OPTIONS: Array<{ value: string; label: string }> = [
   { value: '', label: 'Tous les statuts' },
   { value: IdeaStatus.NEW, label: '🆕 Nouvelle' },
@@ -33,13 +31,15 @@ export default function CategoryFilter({
   onCategoryChange,
   onStatusChange,
 }: CategoryFilterProps) {
+  const selectClass =
+    'flex-1 rounded-lg border border-[var(--border)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B21E8] bg-[var(--bg-card)] text-[var(--text-primary)]'
+
   return (
     <div className="flex flex-col sm:flex-row gap-3">
-      {/* Filtre catégorie */}
       <select
         value={selectedCategory}
         onChange={(e) => onCategoryChange(e.target.value)}
-        className="flex-1 rounded-lg border border-[#1F2937] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B21E8] bg-[#111111] text-white"
+        className={selectClass}
         aria-label="Filtrer par catégorie"
       >
         <option value="">Toutes les catégories</option>
@@ -50,11 +50,10 @@ export default function CategoryFilter({
         ))}
       </select>
 
-      {/* Filtre statut */}
       <select
         value={selectedStatus}
         onChange={(e) => onStatusChange(e.target.value)}
-        className="flex-1 rounded-lg border border-[#1F2937] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B21E8] bg-[#111111] text-white"
+        className={selectClass}
         aria-label="Filtrer par statut"
       >
         {STATUS_OPTIONS.map((opt) => (

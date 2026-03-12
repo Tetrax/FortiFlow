@@ -5,27 +5,26 @@ interface StatusBadgeProps {
   status: IdeaStatus
 }
 
-// Mapping statut → libellé et couleur Tailwind (thème sombre)
 const STATUS_CONFIG: Record<IdeaStatus, { label: string; classes: string }> = {
   NEW: {
     label: 'Nouvelle',
-    classes: 'bg-[#1F2937] text-[#9CA3AF] border-[#374151]',
+    classes: 'bg-gray-100 text-gray-700 border-gray-200 dark:bg-[#1F2937] dark:text-[#9CA3AF] dark:border-[#374151]',
   },
   REVIEWING: {
     label: 'En examen',
-    classes: 'bg-yellow-900/30 text-yellow-400 border-yellow-700/50',
+    classes: 'bg-yellow-100 text-yellow-800 border-yellow-200 dark:bg-yellow-900/30 dark:text-yellow-400 dark:border-yellow-700/50',
   },
   ACCEPTED: {
     label: 'Acceptée',
-    classes: 'bg-green-900/30 text-green-400 border-green-700/50',
+    classes: 'bg-green-100 text-green-800 border-green-200 dark:bg-green-900/30 dark:text-green-400 dark:border-green-700/50',
   },
   REJECTED: {
     label: 'Refusée',
-    classes: 'bg-red-900/30 text-red-400 border-red-700/50',
+    classes: 'bg-red-100 text-red-800 border-red-200 dark:bg-red-900/30 dark:text-red-400 dark:border-red-700/50',
   },
   DONE: {
     label: 'Réalisée',
-    classes: 'bg-purple-900/30 text-purple-400 border-purple-700/50',
+    classes: 'bg-purple-100 text-purple-800 border-purple-200 dark:bg-purple-900/30 dark:text-purple-400 dark:border-purple-700/50',
   },
 }
 

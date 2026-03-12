@@ -1,5 +1,4 @@
 'use client'
-// Mur des idées avec filtres catégorie/statut
 import { useState, useEffect, useCallback } from 'react'
 import Link from 'next/link'
 import Image from 'next/image'
@@ -33,7 +32,6 @@ export default function IdeesPage() {
   const [totalPages, setTotalPages] = useState(1)
   const [total, setTotal] = useState(0)
 
-  // Charger les catégories au montage
   useEffect(() => {
     fetch('/api/categories')
       .then((r) => r.json())
@@ -41,15 +39,11 @@ export default function IdeesPage() {
       .catch(() => console.error('Erreur chargement catégories'))
   }, [])
 
-  // Charger les idées selon les filtres
   const loadIdeas = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      const params = new URLSearchParams({
-        page: String(page),
-        limit: '12',
-      })
+      const params = new URLSearchParams({ page: String(page), limit: '12' })
       if (selectedCategory) params.set('categoryId', selectedCategory)
       if (selectedStatus) params.set('status', selectedStatus)
 
@@ -67,28 +61,17 @@ export default function IdeesPage() {
     }
   }, [page, selectedCategory, selectedStatus])
 
-  useEffect(() => {
-    void loadIdeas()
-  }, [loadIdeas])
+  useEffect(() => { void loadIdeas() }, [loadIdeas])
 
-  // Réinitialiser la page lors d'un changement de filtre
-  function handleCategoryChange(id: string) {
-    setSelectedCategory(id)
-    setPage(1)
-  }
-
-  function handleStatusChange(status: string) {
-    setSelectedStatus(status as IdeaStatus | '')
-    setPage(1)
-  }
+  function handleCategoryChange(id: string) { setSelectedCategory(id); setPage(1) }
+  function handleStatusChange(status: string) { setSelectedStatus(status as IdeaStatus | ''); setPage(1) }
 
   return (
-    <div className="min-h-screen bg-[#0A0A0A]">
-      {/* En-tête */}
-      <header className="bg-[#111111] border-b border-[#1F2937]">
+    <div className="min-h-screen bg-[var(--bg-primary)]">
+      <header className="bg-[var(--bg-card)] border-b border-[var(--border)]">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-          <div className="flex items-center gap-2 text-sm text-[#9CA3AF] mb-2">
-            <Link href="/" className="hover:text-[#6B21E8] transition-colors flex items-center">
+          <div className="flex items-center gap-2 text-sm text-[var(--text-secondary)] mb-2">
+            <Link href="/" className="hover:opacity-80 transition-opacity flex items-center">
               <Image src="/logo-sns.svg" alt="SNS Security" width={60} height={32} className="h-5 w-auto" />
             </Link>
             <span>›</span>
@@ -96,8 +79,8 @@ export default function IdeesPage() {
           </div>
           <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
             <div>
-              <h1 className="text-3xl font-bold text-white">💡 Les idées</h1>
-              <p className="text-[#9CA3AF] mt-1">
+              <h1 className="text-3xl font-bold text-[var(--text-primary)]">💡 Les idées</h1>
+              <p className="text-[var(--text-secondary)] mt-1">
                 {total > 0 ? `${total} idée${total > 1 ? 's' : ''} soumise${total > 1 ? 's' : ''}` : 'Aucune idée pour le moment'}
               </p>
             </div>
@@ -112,7 +95,6 @@ export default function IdeesPage() {
       </header>
 
       <main className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Filtres */}
         <div className="mb-8">
           <CategoryFilter
             categories={categories}
@@ -123,26 +105,24 @@ export default function IdeesPage() {
           />
         </div>
 
-        {/* États de chargement / erreur */}
         {loading && (
-          <div className="text-center py-16 text-[#9CA3AF]">
+          <div className="text-center py-16 text-[var(--text-secondary)]">
             <p className="animate-pulse text-lg">Chargement des idées…</p>
           </div>
         )}
 
         {error && (
-          <div className="bg-red-900/20 border border-red-700/50 text-red-400 rounded-lg p-4 text-sm mb-6">
+          <div className="bg-red-50 border border-red-200 text-red-700 dark:bg-red-900/20 dark:border-red-700/50 dark:text-red-400 rounded-lg p-4 text-sm mb-6">
             {error}
           </div>
         )}
 
-        {/* Grille des idées */}
         {!loading && !error && (
           <>
             {ideas.length === 0 ? (
-              <div className="text-center py-16 text-[#9CA3AF]">
+              <div className="text-center py-16 text-[var(--text-secondary)]">
                 <p className="text-5xl mb-4">🔍</p>
-                <p className="text-lg font-medium text-white">Aucune idée ne correspond à vos filtres.</p>
+                <p className="text-lg font-medium text-[var(--text-primary)]">Aucune idée ne correspond à vos filtres.</p>
                 <p className="text-sm mt-2">Essayez de modifier les filtres ou soumettez la première idée !</p>
               </div>
             ) : (
@@ -158,23 +138,22 @@ export default function IdeesPage() {
               </div>
             )}
 
-            {/* Pagination */}
             {totalPages > 1 && (
               <div className="flex justify-center items-center gap-3 mt-10">
                 <button
                   onClick={() => setPage((p) => Math.max(1, p - 1))}
                   disabled={page <= 1}
-                  className="px-4 py-2 rounded-lg border border-[#1F2937] text-sm text-white hover:bg-[#1F2937] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  className="px-4 py-2 rounded-lg border border-[var(--border)] text-sm text-[var(--text-primary)] hover:bg-[var(--bg-hover)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                 >
                   ← Précédent
                 </button>
-                <span className="text-sm text-[#9CA3AF]">
+                <span className="text-sm text-[var(--text-secondary)]">
                   Page {page} / {totalPages}
                 </span>
                 <button
                   onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                   disabled={page >= totalPages}
-                  className="px-4 py-2 rounded-lg border border-[#1F2937] text-sm text-white hover:bg-[#1F2937] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  className="px-4 py-2 rounded-lg border border-[var(--border)] text-sm text-[var(--text-primary)] hover:bg-[var(--bg-hover)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                 >
                   Suivant →
                 </button>
