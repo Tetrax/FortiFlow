@@ -11,11 +11,11 @@ function LoginForm() {
   const callbackUrl = searchParams.get('callbackUrl') ?? '/admin'
   const errorParam = searchParams.get('error')
 
-  const [email, setEmail] = useState('')
+  const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(
-    errorParam ? 'Email ou mot de passe incorrect.' : null
+    errorParam ? 'Nom d\'utilisateur ou mot de passe incorrect.' : null
   )
 
   async function handleSubmit(e: React.FormEvent) {
@@ -24,10 +24,10 @@ function LoginForm() {
     setError(null)
 
     try {
-      const result = await signIn('credentials', { email, password, redirect: false })
+      const result = await signIn('credentials', { username, password, redirect: false })
 
       if (result?.error) {
-        setError('Email ou mot de passe incorrect.')
+        setError('Nom d\'utilisateur ou mot de passe incorrect.')
       } else {
         router.push(callbackUrl)
       }
@@ -61,18 +61,18 @@ function LoginForm() {
 
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
-              <label htmlFor="email" className="block text-sm font-medium text-[var(--text-primary)] mb-1">
-                Email
+              <label htmlFor="username" className="block text-sm font-medium text-[var(--text-primary)] mb-1">
+                Nom d'utilisateur
               </label>
               <input
-                id="email"
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                autoComplete="email"
+                id="username"
+                type="text"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                autoComplete="username"
                 required
                 className={inputClass}
-                placeholder="admin@snsbox.fr"
+                placeholder="admin"
               />
             </div>
 

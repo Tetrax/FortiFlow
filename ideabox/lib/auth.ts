@@ -7,7 +7,7 @@ import { z } from 'zod'
 
 // Schéma de validation des credentials
 const loginSchema = z.object({
-  email: z.string().email('Email invalide'),
+  username: z.string().min(1, 'Nom d\'utilisateur requis'),
   password: z.string().min(1, 'Mot de passe requis'),
 })
 
@@ -16,7 +16,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     Credentials({
       name: 'Credentials',
       credentials: {
-        email: { label: 'Email', type: 'email' },
+        username: { label: 'Nom d\'utilisateur', type: 'text' },
         password: { label: 'Mot de passe', type: 'password' },
       },
       async authorize(credentials) {
@@ -24,11 +24,11 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         const parsed = loginSchema.safeParse(credentials)
         if (!parsed.success) return null
 
-        const { email, password } = parsed.data
+        const { username, password } = parsed.data
 
         // Recherche de l'admin en base
         const admin = await prisma.admin.findUnique({
-          where: { email },
+          where: { username },
         })
 
         if (!admin) return null

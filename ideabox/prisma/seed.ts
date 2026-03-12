@@ -32,16 +32,17 @@ async function main() {
   const passwordHash = await bcrypt.hash('Admin1234!', 12)
 
   await prisma.admin.upsert({
-    where: { email: 'admin@snsbox.fr' },
+    where: { username: 'admin' },
     update: {},
     create: {
+      username: 'admin',
       email: 'admin@snsbox.fr',
       name: 'Administrateur',
       role: AdminRole.ADMIN,
       passwordHash,
     },
   })
-  console.log('✅ Admin démo prêt : admin@snsbox.fr / Admin1234!')
+  console.log('✅ Admin démo prêt : admin / Admin1234!')
 
   console.log('🎉 Seed terminé !')
 }

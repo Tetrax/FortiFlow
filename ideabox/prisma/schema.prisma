@@ -1,12 +1,12 @@
 // Schéma Prisma pour la Boîte à Idées CSE
-// Compatible PostgreSQL / Supabase
+// Compatible MariaDB / MySQL
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "mysql"
   url      = env("DATABASE_URL")
 }
 
@@ -40,14 +40,14 @@ model Category {
 model Idea {
   id            String          @id @default(cuid())
   title         String
-  description   String
+  description   String          @db.Text
   categoryId    String
   category      Category        @relation(fields: [categoryId], references: [id])
   isAnonymous   Boolean         @default(true)
   authorName    String?
   authorEmail   String?
   status        IdeaStatus      @default(NEW)
-  adminResponse String?
+  adminResponse String?         @db.Text
   votesCount    Int             @default(0)
   isVisible     Boolean         @default(true)
   createdAt     DateTime        @default(now())
@@ -73,10 +73,11 @@ model Vote {
 // Administrateur / modérateur
 model Admin {
   id            String          @id @default(cuid())
-  email         String          @unique
+  username      String          @unique
+  email         String?
   name          String
   role          AdminRole       @default(MODERATOR)
-  passwordHash  String
+  passwordHash  String          @db.Text
   createdAt     DateTime        @default(now())
   statusChanges StatusHistory[]
 

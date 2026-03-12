@@ -8,14 +8,16 @@ import ThemeToggle from './ThemeToggle'
 interface AdminLayoutProps {
   children: React.ReactNode
   adminName?: string
+  adminRole?: string
 }
 
 const NAV_ITEMS = [
-  { href: '/admin', label: '📊 Tableau de bord', exact: true },
-  { href: '/admin/idees', label: '💡 Idées', exact: false },
+  { href: '/admin', label: '📊 Tableau de bord', exact: true, adminOnly: false },
+  { href: '/admin/idees', label: '💡 Idées', exact: false, adminOnly: false },
+  { href: '/admin/comptes', label: '👥 Comptes', exact: false, adminOnly: true },
 ]
 
-export default function AdminLayout({ children, adminName }: AdminLayoutProps) {
+export default function AdminLayout({ children, adminName, adminRole }: AdminLayoutProps) {
   const pathname = usePathname()
 
   function isActive(href: string, exact: boolean) {
@@ -42,7 +44,7 @@ export default function AdminLayout({ children, adminName }: AdminLayoutProps) {
             </div>
 
             <div className="hidden sm:flex items-center gap-1">
-              {NAV_ITEMS.map((item) => (
+              {NAV_ITEMS.filter((item) => !item.adminOnly || adminRole === 'ADMIN').map((item) => (
                 <Link
                   key={item.href}
                   href={item.href}
@@ -75,7 +77,7 @@ export default function AdminLayout({ children, adminName }: AdminLayoutProps) {
         </div>
 
         <div className="sm:hidden border-t border-[var(--border)] flex">
-          {NAV_ITEMS.map((item) => (
+          {NAV_ITEMS.filter((item) => !item.adminOnly || adminRole === 'ADMIN').map((item) => (
             <Link
               key={item.href}
               href={item.href}

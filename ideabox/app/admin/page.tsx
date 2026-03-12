@@ -35,7 +35,7 @@ export default async function AdminDashboard() {
   ]
 
   return (
-    <AdminLayout adminName={session.user.name ?? undefined}>
+    <AdminLayout adminName={session.user.name ?? undefined} adminRole={session.user.role ?? undefined}>
       <h1 className="text-2xl font-bold text-[var(--text-primary)] mb-8">📊 Tableau de bord</h1>
 
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 mb-10">

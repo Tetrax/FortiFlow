@@ -1,6 +1,7 @@
 'use client'
 import { useEffect, useState } from 'react'
 import { useParams, useRouter } from 'next/navigation'
+import { useSession } from 'next-auth/react'
 import AdminLayout from '@/components/AdminLayout'
 import StatusBadge from '@/components/StatusBadge'
 import { IdeaStatus } from '@prisma/client'
@@ -34,6 +35,7 @@ const STATUS_OPTIONS: Array<{ value: IdeaStatus; label: string }> = [
 export default function AdminIdeaPage() {
   const params = useParams()
   const router = useRouter()
+  const { data: session } = useSession()
   const ideaId = params.id as string
 
   const [idea, setIdea] = useState<Idea | null>(null)
@@ -98,11 +100,13 @@ export default function AdminIdeaPage() {
   const inputClass =
     'w-full rounded-lg border border-[var(--border)] bg-[var(--bg-primary)] text-[var(--text-primary)] placeholder-gray-400 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B21E8]'
 
-  if (loading) return <AdminLayout><div className="text-center py-16 text-[var(--text-secondary)] animate-pulse">Chargement…</div></AdminLayout>
-  if (!idea) return <AdminLayout><div className="text-center py-16 text-[var(--text-secondary)]">Idée introuvable.</div></AdminLayout>
+  const adminRole = session?.user?.role ?? undefined
+
+  if (loading) return <AdminLayout adminRole={adminRole}><div className="text-center py-16 text-[var(--text-secondary)] animate-pulse">Chargement…</div></AdminLayout>
+  if (!idea) return <AdminLayout adminRole={adminRole}><div className="text-center py-16 text-[var(--text-secondary)]">Idée introuvable.</div></AdminLayout>
 
   return (
-    <AdminLayout>
+    <AdminLayout adminRole={adminRole}>
       <div className="flex items-center gap-2 text-sm text-[var(--text-secondary)] mb-6">
         <Link href="/admin" className="hover:text-[#6B21E8] transition-colors">Dashboard</Link>
         <span>›</span>
