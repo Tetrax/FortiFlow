@@ -39,6 +39,8 @@ export default function AdminIdeaPage() {
   const [idea, setIdea] = useState<Idea | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState(false)
   const [status, setStatus] = useState<IdeaStatus>(IdeaStatus.NEW)
@@ -63,6 +65,28 @@ export default function AdminIdeaPage() {
     }
     void load()
   }, [ideaId, router])
+
+  async function handleDelete() {
+    setDeleting(true)
+    setError(null)
+    try {
+      const res = await fetch(`/api/admin/ideas/${ideaId}`, { method: 'DELETE' })
+      if (res.ok) {
+        router.push('/admin/idees')
+      } else if (res.status === 401) {
+        router.push('/admin/login')
+      } else {
+        const data = (await res.json()) as { error?: string }
+        setError(data.error ?? 'Erreur lors de la suppression.')
+        setConfirmDelete(false)
+      }
+    } catch {
+      setError('Erreur réseau. Réessayez.')
+      setConfirmDelete(false)
+    } finally {
+      setDeleting(false)
+    }
+  }
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault()
@@ -201,6 +225,41 @@ export default function AdminIdeaPage() {
             >
               Voir la vue publique ↗
             </Link>
+
+            <div className="border-t border-[var(--border)] pt-4">
+              {!confirmDelete ? (
+                <button
+                  type="button"
+                  onClick={() => setConfirmDelete(true)}
+                  className="w-full text-sm text-red-500 hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 py-2 rounded-lg transition-colors"
+                >
+                  🗑️ Supprimer cette idée
+                </button>
+              ) : (
+                <div className="space-y-2">
+                  <p className="text-sm text-red-500 text-center font-medium">Supprimer définitivement ?</p>
+                  <p className="text-xs text-[var(--text-secondary)] text-center">Cette action est irréversible.</p>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDelete(false)}
+                      disabled={deleting}
+                      className="flex-1 text-sm py-2 rounded-lg border border-[var(--border)] text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] transition-colors disabled:opacity-60"
+                    >
+                      Annuler
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleDelete}
+                      disabled={deleting}
+                      className="flex-1 text-sm py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 transition-colors disabled:opacity-60"
+                    >
+                      {deleting ? 'Suppression…' : 'Confirmer'}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           </form>
         </div>
       </div>

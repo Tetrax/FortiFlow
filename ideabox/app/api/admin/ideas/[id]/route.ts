@@ -99,3 +99,30 @@ export async function PATCH(request: NextRequest, { params }: RouteParams) {
     )
   }
 }
+
+// DELETE : supprimer définitivement une idée (admin uniquement)
+export async function DELETE(_request: NextRequest, { params }: RouteParams) {
+  try {
+    const session = await auth()
+    if (!session?.user?.id) {
+      return NextResponse.json({ error: 'Non autorisé.' }, { status: 401 })
+    }
+
+    const { id: ideaId } = await params
+
+    const existing = await prisma.idea.findUnique({ where: { id: ideaId } })
+    if (!existing) {
+      return NextResponse.json({ error: 'Idée introuvable.' }, { status: 404 })
+    }
+
+    await prisma.idea.delete({ where: { id: ideaId } })
+
+    return NextResponse.json({ success: true })
+  } catch (error) {
+    console.error('Erreur DELETE /api/admin/ideas/[id] :', error)
+    return NextResponse.json(
+      { error: 'Erreur serveur lors de la suppression.' },
+      { status: 500 }
+    )
+  }
+}
