@@ -219,7 +219,7 @@ const BLOCKED_WORDS: string[] = [
   'glory hole', 'gloryhole',
   'creampie',
   'milf',
-  'twink',
+  'twink','paf','monstre','moonstre','mooonstre','moooonstre','mooooonstre','mooooooonstre','paaf','paaaf','paaaaf',
 
   // -----------------------------------------------------------------------
   // PROSTITUTION / PROXÉNÉTISME
