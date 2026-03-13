@@ -4,6 +4,7 @@ import { prisma } from '@/lib/prisma'
 import { z } from 'zod'
 import { sendEmail, buildSubmissionEmail } from '@/lib/email'
 import { IdeaStatus } from '@prisma/client'
+import { checkModeration } from '@/lib/moderation'
 
 // Schéma de validation pour la soumission d'une idée
 const createIdeaSchema = z.object({
@@ -84,6 +85,12 @@ export async function POST(request: NextRequest) {
     }
 
     const data = parsed.data
+
+    // Vérifier le contenu (modération)
+    const moderationError = checkModeration(data.title, data.description)
+    if (moderationError) {
+      return NextResponse.json({ error: moderationError }, { status: 422 })
+    }
 
     // Vérifier que la catégorie existe et est active
     const category = await prisma.category.findFirst({
