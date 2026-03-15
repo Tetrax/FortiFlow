@@ -2044,7 +2044,20 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     const srcAddrExists = p.srcAddrExists;
     const dstAddrExists = p.dstAddrExists;
 
-    const srcAddrCell = addrCell(p.analysis?.srcAddr, p._srcAddrName, idx, '_srcAddrName');
+    // Pour les policies multi-src : afficher le groupe d'adresses (existant ou à créer)
+    let srcAddrCell;
+    if (p.srcSubnets && p.srcSubnets.length > 1) {
+      if (p._srcAddrGrpFound) {
+        srcAddrCell = `<span class="match-ok" title="Groupe existant contenant les ${p.srcSubnets.length} subnets">✓ ${escHtml(p._srcAddrName)}</span>`;
+      } else {
+        srcAddrCell = `<span style="display:inline-flex;align-items:center;gap:4px">
+          <span class="match-miss" title="Aucun groupe existant — à créer">grp</span>
+          <input class="deploy-name-input" data-idx="${idx}" data-field="_srcAddrName" value="${escHtml(p._srcAddrName)}" placeholder="FF_GRP_..." title="Nom du groupe d'adresses à créer (${p.srcSubnets.length} membres)">
+        </span>`;
+      }
+    } else {
+      srcAddrCell = addrCell(p.analysis?.srcAddr, p._srcAddrName, idx, '_srcAddrName');
+    }
     const dstAddrCell = addrCell(p.analysis?.dstAddr, p._dstAddrName, idx, '_dstAddrName');
 
     const svcList = p.analysis?.services || [];

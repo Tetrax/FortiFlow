@@ -689,23 +689,30 @@ function generateConfig(selectedPolicies, opts = {}) {
     logTraffic     = 'all',
   } = opts;
 
-  const newAddresses = new Map();  // cidr → name
-  const newServices  = new Map();  // "port/proto" → {name, port, proto}
-  const policyBlocks = [];
+  const newAddresses  = new Map();  // cidr → name
+  const newAddrGroups = new Map();  // grpName → [memberNames]
+  const newServices   = new Map();  // "port/proto" → {name, port, proto}
+  const policyBlocks  = [];
 
   for (const p of selectedPolicies) {
     const { analysis } = p;
 
     // Source address(es) — peut être multiple si policy-grouped merge
-    let srcAddrName, srcAddrNames;
+    let srcAddrName, srcAddrNames, srcAddrGrpName;
     if (p.srcAddrNames && p.srcAddrNames.length > 1) {
-      // Multi-src : enregistrer chaque adresse
+      // Multi-src : enregistrer chaque adresse + créer un groupe
       srcAddrNames = p.srcAddrNames;
       const subnets = p.srcSubnets || [p.srcSubnet];
       subnets.forEach((cidr, i) => {
         const name = p.srcAddrNames[i] || suggestAddrName(cidr);
         newAddresses.set(cidr, name);
       });
+      // Créer un groupe d'adresses
+      srcAddrGrpName = p.srcAddrName || p.policyName || `FF_GRP_${suggestAddrName(subnets[0])}`;
+      newAddrGroups.set(srcAddrGrpName, srcAddrNames);
+    } else if (p._srcAddrGrpFound) {
+      // Groupe existant trouvé → l'utiliser directement
+      srcAddrName = p.srcAddrName || p._srcAddrName;
     } else if (analysis.srcAddr.found) {
       srcAddrName = analysis.srcAddr.name;
     } else {
@@ -745,7 +752,7 @@ function generateConfig(selectedPolicies, opts = {}) {
 
     policyBlocks.push({
       name:        p.policyName || `FF-${String(p.id).padStart(3, '0')}`,
-      srcintf, dstintf, srcAddrName, srcAddrNames, dstAddrName,
+      srcintf, dstintf, srcAddrName: srcAddrGrpName || srcAddrName, srcAddrNames: srcAddrGrpName ? null : srcAddrNames, dstAddrName,
       serviceNames, nat: useNat,
       srcSubnet:   p.srcSubnets ? p.srcSubnets.join(', ') : p.srcSubnet,
       dstTarget:   p.dstTarget,
@@ -757,7 +764,7 @@ function generateConfig(selectedPolicies, opts = {}) {
   const L = [];
   const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
   L.push(`# FortiFlow Policy Export — ${ts}`);
-  L.push(`# Policies: ${policyBlocks.length}  |  Nouvelles adresses: ${newAddresses.size}  |  Nouveaux services: ${newServices.size}`);
+  L.push(`# Policies: ${policyBlocks.length}  |  Adresses: ${newAddresses.size}  |  Groupes: ${newAddrGroups.size}  |  Services: ${newServices.size}`);
   L.push('');
 
   if (newAddresses.size > 0) {
@@ -772,6 +779,22 @@ function generateConfig(selectedPolicies, opts = {}) {
       L.push(`    edit "${name}"`);
       L.push(`        set type ipmask`);
       L.push(`        set subnet ${ip} ${mask}`);
+      L.push(`        set comment "Created by FortiFlow"`);
+      L.push(`    next`);
+    }
+    L.push('end');
+    L.push('');
+  }
+
+  if (newAddrGroups.size > 0) {
+    L.push('# ══════════════════════════════════════════════════');
+    L.push('# Groupes d\'adresses');
+    L.push('# ══════════════════════════════════════════════════');
+    L.push('config firewall addrgrp');
+    for (const [grpName, members] of newAddrGroups) {
+      const memberStr = members.map(m => `"${m}"`).join(' ');
+      L.push(`    edit "${grpName}"`);
+      L.push(`        set member ${memberStr}`);
       L.push(`        set comment "Created by FortiFlow"`);
       L.push(`    next`);
     }
