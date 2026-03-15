@@ -1862,17 +1862,24 @@ async function analyzeDeployPolicies() {
   } catch (err) { resetAnalyzeBtn(); alert(err.message); return; }
 
   const ifaces = deployState.interfaces?.interfaces || [];
+  const zones  = deployState.interfaces?.zones || [];
+  // Interface → zone lookup pour afficher la zone au lieu de l'interface
+  const _ifToZone = {};
+  for (const z of zones) { for (const m of z.members) _ifToZone[m] = z.name; }
+  const resolveZone = (ifName) => _ifToZone[ifName] || ifName || '';
 
   // Enrich with frontend display fields
   analyzed = analyzed.map(p => {
     const isWan = p.dstType === 'public' || p.dstTarget === 'all';
+    const rawSrcIntf = p.analysis?.srcIface || ifaces.find(i => i.name === p.srcintf)?.name || '';
+    const rawDstIntf = p.analysis?.dstIface || ifaces.find(i => i.name === p.dstintf)?.name || '';
     return {
       ...p,
       srcAddrExists: p.analysis?.srcAddr?.found ?? false,
       dstAddrExists: p.analysis?.dstAddr?.found ?? false,
-      _srcintf:          p.analysis?.srcIface || ifaces.find(i => i.name === p.srcintf)?.name || '',
+      _srcintf:          resolveZone(rawSrcIntf),
       _srcIfaceSource:   p.analysis?.srcIfaceSource || 'auto',
-      _dstintf:          p.analysis?.dstIface || ifaces.find(i => i.name === p.dstintf)?.name || '',
+      _dstintf:          resolveZone(rawDstIntf),
       _dstIfaceSource:   p.analysis?.dstIfaceSource || 'auto',
       _srcAddrName:  p.analysis?.srcAddr?.name || suggestAddrNameFE(p.srcSubnet),
       _dstAddrName:  p.analysis?.dstAddr?.name || suggestAddrNameFE(p.dstTarget),
@@ -1995,7 +2002,17 @@ function renderDeployPolicies(analyzed, resetPage = true) {
   const pageSlice = analyzed.slice(start, start + pageSize);
 
   const ifaces   = (deployState.interfaces?.interfaces || []).map(i => i.name);
-  const ifOpts   = ifaces.map(n => `<option value="${escHtml(n)}">${escHtml(n)}</option>`).join('');
+  const zones    = (deployState.interfaces?.zones || []);
+  const zoneNames = zones.map(z => z.name);
+  // Build interface→zone lookup
+  const ifaceToZone = {};
+  for (const z of zones) { for (const m of z.members) ifaceToZone[m] = z.name; }
+  // Dropdown: zones first, then interfaces not in any zone
+  const ifaceNotInZone = ifaces.filter(n => !ifaceToZone[n]);
+  const allIfOpts = [
+    ...zoneNames.map(n => `<option value="${escHtml(n)}">${escHtml(n)} (zone)</option>`),
+    ...ifaceNotInZone.map(n => `<option value="${escHtml(n)}">${escHtml(n)}</option>`),
+  ].join('');
 
   // rows use global index (start + local index) so state arrays stay consistent
   const rows = pageSlice.map((p, localIdx) => {
@@ -2019,7 +2036,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
       ? `<span class="intf-src-badge ${p._srcIfaceSource}" title="Détecté via : ${srcLabels[p._srcIfaceSource] || p._srcIfaceSource}">${srcLabels[p._srcIfaceSource]}</span>`
       : '';
     const srcSel = `<span style="display:inline-flex;align-items:center;gap:4px">${srcSrcBadge}<select class="deploy-iface-sel" data-idx="${idx}" data-field="_srcintf">
-      <option value="">— auto —</option>${ifOpts}
+      <option value="">— auto —</option>${allIfOpts}
     </select></span>`;
     // Badge dstintf
     const dstSrcBadge = p._dstIfaceSource && p._dstIfaceSource !== 'auto' && p._dstintf
@@ -2027,7 +2044,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
       : '';
 
     const dstSel = `<span style="display:inline-flex;align-items:center;gap:4px">${dstSrcBadge}<select class="deploy-iface-sel" data-idx="${idx}" data-field="_dstintf">
-      <option value="">— auto —</option>${ifOpts}
+      <option value="">— auto —</option>${allIfOpts}
     </select></span>`;
 
     const dirBadge = p._isWan
