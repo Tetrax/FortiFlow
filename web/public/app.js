@@ -1468,6 +1468,19 @@ async function deploy() {
 
   // Generate
   el('btn-generate')?.addEventListener('click', generateDeployConf);
+
+  // Restore analyzed policies if already present (tab switch preservation)
+  if (deployState.analyzed && deployState.analyzed.length > 0) {
+    el('deploy-merge-bar').style.display = '';
+    renderDeployPolicies(deployState.analyzed, false);
+    // Restore CLI preview if generated
+    if (deployState.generatedCli) {
+      const wrap = el('deploy-cli-wrap');
+      const pre  = el('deploy-cli-pre');
+      if (pre)  pre.textContent = deployState.generatedCli;
+      if (wrap) wrap.style.display = '';
+    }
+  }
 }
 
 function renderConfSummary(cfg) {
