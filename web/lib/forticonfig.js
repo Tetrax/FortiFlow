@@ -275,7 +275,8 @@ function parseFortiConfig(text) {
 
   // ── BGP ──
   const bgpNeighborIntfs = parseBgpNeighborIntfs(text);
-  const hasBgp = bgpNeighborIntfs.size > 0 || /config router bgp\b/.test(text);
+  // BGP actif seulement si des voisins avec remote-as sont configurés
+  const hasBgp = bgpNeighborIntfs.size > 0 || hasBgpNeighbors(text);
 
   // Ajouter les voisins BGP comme pseudo-routes /32 (host routes)
   for (const [ip, intf] of bgpNeighborIntfs) {
@@ -335,6 +336,14 @@ function sortRoutes(routes) {
     const bLen = parseInt(b.dst.split('/')[1] || '0', 10);
     return bLen !== aLen ? bLen - aLen : a.distance - b.distance;
   });
+}
+
+// Vérifie si des voisins BGP avec remote-as sont réellement configurés
+function hasBgpNeighbors(text) {
+  const bgpSection = text.match(/config router bgp([\s\S]*?)^end\b/m);
+  if (!bgpSection) return false;
+  // Cherche un bloc neighbor avec un set remote-as (preuve d'un voisin réel)
+  return /edit\s+"?\d+\.\d+\.\d+\.\d+"?[\s\S]*?set remote-as\s+\d+/m.test(bgpSection[1]);
 }
 
 // Extrait les interfaces des voisins BGP → Map<neighborIp, interfaceName>

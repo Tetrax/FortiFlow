@@ -1479,7 +1479,7 @@ function renderConfSummary(cfg) {
     ${cfg.routes > 0 ? `<div class="conf-stat" title="Routes statiques parsées pour l'auto-détection des interfaces"><span class="conf-stat-val">${cfg.routes}</span><span class="conf-stat-lbl">routes statiques</span></div>` : ''}
     ${cfg.sdwan   ? '<div class="conf-stat"><span class="conf-stat-val">⚡</span><span class="conf-stat-lbl">SD-WAN actif</span></div>' : ''}
     ${cfg.bgp     ? '<div class="conf-stat" title="Voisins BGP utilisés comme routes hôtes /32"><span class="conf-stat-val">BGP</span><span class="conf-stat-lbl">actif</span></div>' : ''}
-    ${cfg.vdom    ? '<div class="conf-stat conf-stat-warn" title="Configs multi-VDOM : seul le premier VDOM est parsé"><span class="conf-stat-val">⚠</span><span class="conf-stat-lbl">VDOM détecté</span></div>' : ''}
+    <div class="conf-stat ${cfg.vdom ? 'conf-stat-warn' : ''}" title="${cfg.vdom ? 'Configs multi-VDOM : seul le premier VDOM est parsé' : 'Pas de multi-VDOM détecté'}"><span class="conf-stat-val">${cfg.vdom ? 'ON' : 'OFF'}</span><span class="conf-stat-lbl">VDOM</span></div>
     <button class="btn-sm" id="btn-reload-conf" style="margin-left:auto;align-self:center">↺ Recharger</button>
   </div>`;
 }
@@ -1678,7 +1678,17 @@ function dstTargetCell(p, idx) {
     </div>`;
 }
 
-// Regroupe les policies ayant le même policyId (même si subnets / intfs différents)
+// Clé de service normalisée pour comparer les ensembles de services entre policies
+function serviceSetKey(p) {
+  return (p.analysis?.services || [])
+    .map(s => `${s.port}/${s.proto}`)
+    .sort()
+    .join(',');
+}
+
+// Regroupe les policies ayant le même policyId, en sous-groupant par ensemble de services.
+// Entries avec les mêmes services → fusionnées en une règle multi-src.
+// Entries avec des services différents → règles séparées.
 function mergeByPolicyId(policies) {
   const groups    = new Map(); // firstPolicyId → [policies]
   const ungrouped = [];
@@ -1696,40 +1706,57 @@ function mergeByPolicyId(policies) {
   for (const [policyId, group] of groups) {
     if (group.length === 1) { merged.push({ ...group[0] }); continue; }
 
-    const base         = group[0];
-    const allServices  = mergeServices(group);
-    const totalSessions = group.reduce((s, p) => s + (p.sessions || 0), 0);
-    const srcSubnets   = [...new Set(group.map(p => p.srcSubnet).filter(Boolean))].sort();
-    const allPolicyIds = [...new Set(group.flatMap(p => p.policyIds || []))].sort((a, b) => Number(a) - Number(b));
-    const isWan        = group.some(p => p._isWan || p.dstType === 'public');
-    const dstTarget    = isWan ? 'all' : base.dstTarget;
-    const allDstIPs    = [...new Set(group.flatMap(p => p.dstIPs || (p.dstType === 'public' ? [p.dstTarget] : [])).filter(t => t && t !== 'all'))];
-    const multiSrc     = srcSubnets.length > 1;
+    // Sous-grouper par ensemble de services identiques
+    const svcSubGroups = new Map(); // serviceSetKey → [policies]
+    for (const p of group) {
+      const sk = serviceSetKey(p);
+      if (!svcSubGroups.has(sk)) svcSubGroups.set(sk, []);
+      svcSubGroups.get(sk).push(p);
+    }
 
-    merged.push({
-      ...base,
-      srcSubnet:    srcSubnets[0],
-      srcSubnets,
-      dstTarget,
-      dstType:      isWan ? 'public' : base.dstType,
-      sessions:     totalSessions,
-      serviceDesc:  allServices.map(s => s.label).join(', '),
-      policyIds:    allPolicyIds,
-      dstIPs:       allDstIPs,
-      _dstIPs:      allDstIPs,
-      _mergedCount: group.length,
-      _isWan:       isWan,
-      _nat:         isWan,
-      _srcAddrName: multiSrc ? `FF_POLICY_${policyId}_SRC` : (base._srcAddrName || suggestAddrNameFE(srcSubnets[0])),
-      _dstAddrName: isWan ? 'all' : base._dstAddrName,
-      _policyName:  `FF_POLICY_${policyId}`,
-      srcAddrNames: multiSrc ? srcSubnets.map(s => `FF_${escSlug(s)}`) : null,
-      analysis: {
-        ...base.analysis,
-        services:  allServices,
-        needsWork: allServices.some(s => !s.found),
-      },
-    });
+    for (const [, subGroup] of svcSubGroups) {
+      if (subGroup.length === 1) {
+        // Service unique à ce subnet → garder tel quel
+        merged.push({ ...subGroup[0] });
+        continue;
+      }
+
+      // Même ensemble de services → fusionner en multi-src
+      const base          = subGroup[0];
+      const allServices   = mergeServices(subGroup);
+      const totalSessions = subGroup.reduce((s, p) => s + (p.sessions || 0), 0);
+      const srcSubnets    = [...new Set(subGroup.map(p => p.srcSubnet).filter(Boolean))].sort();
+      const allPolicyIds  = [...new Set(subGroup.flatMap(p => p.policyIds || []))].sort((a, b) => Number(a) - Number(b));
+      const isWan         = subGroup.some(p => p._isWan || p.dstType === 'public');
+      const dstTarget     = isWan ? 'all' : base.dstTarget;
+      const allDstIPs     = [...new Set(subGroup.flatMap(p => p.dstIPs || (p.dstType === 'public' ? [p.dstTarget] : [])).filter(t => t && t !== 'all'))];
+      const multiSrc      = srcSubnets.length > 1;
+
+      merged.push({
+        ...base,
+        srcSubnet:    srcSubnets[0],
+        srcSubnets,
+        dstTarget,
+        dstType:      isWan ? 'public' : base.dstType,
+        sessions:     totalSessions,
+        serviceDesc:  allServices.map(s => s.label).join(', '),
+        policyIds:    allPolicyIds,
+        dstIPs:       allDstIPs,
+        _dstIPs:      allDstIPs,
+        _mergedCount: subGroup.length,
+        _isWan:       isWan,
+        _nat:         isWan,
+        _srcAddrName: multiSrc ? `FF_POLICY_${policyId}_SRC` : (base._srcAddrName || suggestAddrNameFE(srcSubnets[0])),
+        _dstAddrName: isWan ? 'all' : base._dstAddrName,
+        _policyName:  `FF_POLICY_${policyId}`,
+        srcAddrNames: multiSrc ? srcSubnets.map(s => `FF_${escSlug(s)}`) : null,
+        analysis: {
+          ...base.analysis,
+          services:  allServices,
+          needsWork: allServices.some(s => !s.found),
+        },
+      });
+    }
   }
 
   return merged;
