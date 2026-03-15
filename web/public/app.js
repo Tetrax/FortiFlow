@@ -1870,7 +1870,8 @@ async function analyzeDeployPolicies() {
       ...p,
       srcAddrExists: p.analysis?.srcAddr?.found ?? false,
       dstAddrExists: p.analysis?.dstAddr?.found ?? false,
-      _srcintf:          p.analysis?.srcIface || ifaces.find(i => i.name === p.srcintf)?.name || '',
+      _srcintf:          p.analysis?.srcZone || p.analysis?.srcIface || ifaces.find(i => i.name === p.srcintf)?.name || '',
+      _srcIfaceSource:   p.analysis?.srcIfaceSource || 'auto',
       _dstintf:          p.analysis?.dstIface || ifaces.find(i => i.name === p.dstintf)?.name || '',
       _dstIfaceSource:   p.analysis?.dstIfaceSource || 'auto',
       _srcAddrName:  p.analysis?.srcAddr?.name || suggestAddrNameFE(p.srcSubnet),
@@ -2012,11 +2013,15 @@ function renderDeployPolicies(analyzed, resetPage = true) {
       return `<span data-tip="${escHtml(tip)}" style="display:inline-flex;align-items:center;gap:2px"><span class="match-miss">✗</span><input class="deploy-name-input sm" data-idx="${idx}" data-field="svc_${svc.port}_${svc.proto}" value="${escHtml(svc.suggestedName || '')}" placeholder="FF_SVC_..."></span>`;
     }).join(' ');
 
-    const srcSel = `<select class="deploy-iface-sel" data-idx="${idx}" data-field="_srcintf">
-      <option value="">— auto —</option>${ifOpts}
-    </select>`;
-    // Badge indiquant la source de la détection dstintf
+    // Badge indiquant la source de la détection des interfaces
     const srcLabels = { route: '🛣 route', sdwan: '⚡ sdwan', subnet: '🔗 subnet', 'wan-candidate': '📡 wan', auto: '' };
+    const srcSrcBadge = p._srcIfaceSource && p._srcIfaceSource !== 'auto' && p._srcintf
+      ? `<span class="intf-src-badge ${p._srcIfaceSource}" title="Détecté via : ${srcLabels[p._srcIfaceSource] || p._srcIfaceSource}">${srcLabels[p._srcIfaceSource]}</span>`
+      : '';
+    const srcSel = `<span style="display:inline-flex;align-items:center;gap:4px">${srcSrcBadge}<select class="deploy-iface-sel" data-idx="${idx}" data-field="_srcintf">
+      <option value="">— auto —</option>${ifOpts}
+    </select></span>`;
+    // Badge dstintf
     const dstSrcBadge = p._dstIfaceSource && p._dstIfaceSource !== 'auto' && p._dstintf
       ? `<span class="intf-src-badge ${p._dstIfaceSource}" title="Détecté via : ${srcLabels[p._dstIfaceSource] || p._dstIfaceSource}">${srcLabels[p._dstIfaceSource]}</span>`
       : '';

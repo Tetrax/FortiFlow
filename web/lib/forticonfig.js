@@ -540,8 +540,22 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
       }
     }
 
-    // Auto-detect interfaces
-    const srcIface = findInterfaceForSubnet(p.srcSubnet, interfaces);
+    // Auto-detect source interface (route lookup first, then subnet match)
+    let srcIfaceName   = null;
+    let srcIfaceSource = 'auto'; // 'route' | 'subnet'
+    const srcRouteDevice = findInterfaceByRoute(p.srcSubnet, fortiConfig.staticRoutes);
+    if (srcRouteDevice) {
+      srcIfaceName   = srcRouteDevice;
+      srcIfaceSource = 'route';
+    } else {
+      const srcIface = findInterfaceForSubnet(p.srcSubnet, interfaces);
+      if (srcIface) {
+        srcIfaceName   = srcIface.name;
+        srcIfaceSource = 'subnet';
+      }
+    }
+
+    // Auto-detect destination interface
     let dstIface = null;
     let dstIfaceName = null;
     let dstIfaceSource = 'auto'; // 'route' | 'sdwan' | 'subnet' | 'wan-candidate'
@@ -588,7 +602,7 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
     }
 
     // Zone match for src/dst
-    const srcZone = Object.values(zones).find(z => z.members.includes(srcIface?.name)) || null;
+    const srcZone = Object.values(zones).find(z => z.members.includes(srcIfaceName)) || null;
     const dstZone = Object.values(zones).find(z => z.members.includes(dstIfaceName)) || null;
 
     const needsWork = !srcAddrMatch.found
@@ -601,7 +615,8 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
         srcAddr:    { ...srcAddrMatch,  cidr: p.srcSubnet, suggestedName: suggestAddrName(p.srcSubnet) },
         dstAddr:    { ...dstAddrMatch,  cidr: p.dstTarget, suggestedName: suggestAddrName(p.dstTarget) },
         services:   serviceItems,
-        srcIface:       srcIface?.name || null,
+        srcIface:       srcIfaceName   || null,
+        srcIfaceSource: srcIfaceSource,
         srcZone:        srcZone?.name  || null,
         dstIface:       dstIfaceName   || null,
         dstIfaceSource: dstIfaceSource,
