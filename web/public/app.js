@@ -1870,7 +1870,7 @@ async function analyzeDeployPolicies() {
       ...p,
       srcAddrExists: p.analysis?.srcAddr?.found ?? false,
       dstAddrExists: p.analysis?.dstAddr?.found ?? false,
-      _srcintf:          p.analysis?.srcZone || p.analysis?.srcIface || ifaces.find(i => i.name === p.srcintf)?.name || '',
+      _srcintf:          p.analysis?.srcIface || ifaces.find(i => i.name === p.srcintf)?.name || '',
       _srcIfaceSource:   p.analysis?.srcIfaceSource || 'auto',
       _dstintf:          p.analysis?.dstIface || ifaces.find(i => i.name === p.dstintf)?.name || '',
       _dstIfaceSource:   p.analysis?.dstIfaceSource || 'auto',
