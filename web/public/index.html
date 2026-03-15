@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FortiFlow — Analyseur de logs FortiGate</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="app">
+  <!-- Sidebar -->
+  <nav id="sidebar">
+    <div class="sidebar-logo">
+      <div class="logo-text">FortiFlow</div>
+      <div class="logo-sub">Traffic Log Analyzer</div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Navigation</div>
+      <div class="nav-item active" data-view="dashboard">
+        <span class="nav-icon">◈</span> Dashboard
+      </div>
+      <div class="nav-item" data-view="flows">
+        <span class="nav-icon">≡</span> Flux
+        <span class="nav-badge" id="badge-flows">–</span>
+      </div>
+      <div class="nav-item" data-view="matrix">
+        <span class="nav-icon">⊞</span> Matrice
+      </div>
+      <div class="nav-item" data-view="groups">
+        <span class="nav-icon">⊕</span> Groupes
+        <span class="nav-badge" id="badge-groups">–</span>
+      </div>
+      <div class="nav-item" data-view="policies">
+        <span class="nav-icon">◎</span> Policies
+        <span class="nav-badge" id="badge-policies">–</span>
+      </div>
+      <div class="nav-item" data-view="ports">
+        <span class="nav-icon">◫</span> Ports
+      </div>
+      <div class="nav-item" data-view="consilpolicies">
+        <span class="nav-icon">⚡</span> Conseils
+        <span class="nav-badge accent" id="badge-consilpolicies">–</span>
+      </div>
+      <div class="nav-item" data-view="deploy">
+        <span class="nav-icon">⊙</span> Déploiement
+      </div>
+    </div>
+
+    <div id="sidebar-session" class="sidebar-session" style="display:none">
+      <div>Session active</div>
+      <div class="session-file" id="session-filename"></div>
+      <div class="session-clear" id="btn-clear-session">✕ Fermer la session</div>
+    </div>
+  </nav>
+
+  <!-- Main -->
+  <div id="main">
+    <div id="topbar">
+      <div>
+        <div class="topbar-title" id="view-title">FortiFlow</div>
+        <div class="topbar-sub"  id="view-sub">Chargez un fichier de log pour commencer</div>
+      </div>
+      <div style="display:flex;gap:8px;" id="topbar-actions"></div>
+    </div>
+    <div id="content"></div>
+  </div>
+</div>
+
+<!-- Progress overlay -->
+<div id="progress-overlay">
+  <div class="progress-spinner"></div>
+  <div class="progress-text" id="progress-text">Analyse en cours…</div>
+  <div class="progress-bar-track"><div id="progress-bar-fill"></div></div>
+  <div class="progress-sub" id="progress-detail">Parsing du fichier, merci de patienter</div>
+</div>
+
+<!-- Matrix tooltip -->
+<div id="matrix-tooltip"></div>
+
+<!-- Hidden file input -->
+<input type="file" id="file-input" accept=".log,.txt,.csv,.gz,.zip,.xlsx,.xls">
+
+<script src="app.js"></script>
+</body>
+</html>
