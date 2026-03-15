@@ -284,13 +284,16 @@ function parseFortiConfig(text) {
   }
   sortRoutes(staticRoutes);
 
+  // Table de routes unifiée : statiques + connected (depuis les interfaces)
+  const fullRoutes = buildFullRouteTable(staticRoutes, interfaces);
+
   // Effective SD-WAN interface name to use in policies
   const sdwanIntfName = sdwanEnabled ? (sdwanZoneName || 'virtual-wan-link') : null;
 
   // VDOM detection (multi-VDOM FortiGate) — parseur partiel, warning UI seulement
   const hasVdom = /^config vdom\s*$/m.test(text);
 
-  return { addresses, customServices, interfaces, zones, sdwanMembers, sdwanEnabled, sdwanIntfName, hasVdom, staticRoutes, hasBgp };
+  return { addresses, customServices, interfaces, zones, sdwanMembers, sdwanEnabled, sdwanIntfName, hasVdom, staticRoutes, fullRoutes, hasBgp };
 }
 
 // ─── Static routes + BGP parser ──────────────────────────────────────────────
@@ -358,16 +361,38 @@ function parseBgpNeighborIntfs(text) {
   return map;
 }
 
-// Longest-prefix match dans la table de routes statiques
-// Pour la destination dstCidr (IP ou CIDR), retourne le nom de l'interface de sortie
-function findInterfaceByRoute(dstCidr, staticRoutes) {
-  if (!staticRoutes || staticRoutes.length === 0) return null;
+// Génère des pseudo-routes "connected" depuis les interfaces (subnet → interface)
+function buildConnectedRoutes(interfaces) {
+  const routes = [];
+  for (const [name, iface] of Object.entries(interfaces)) {
+    if (!iface.cidr) continue;
+    const [ifIp, pfxStr] = iface.cidr.split('/');
+    const pfx = parseInt(pfxStr, 10);
+    if (pfx <= 0 || pfx > 30) continue; // skip /0, /31, /32
+    const net = networkAddress(ifIp, pfx);
+    routes.push({ dst: `${net}/${pfx}`, device: name, gateway: '', distance: 0, priority: 0, source: 'connected' });
+  }
+  return routes;
+}
+
+// Construit la table de routes unifiée : statiques + connected (interfaces)
+function buildFullRouteTable(staticRoutes, interfaces) {
+  const connected = buildConnectedRoutes(interfaces);
+  const all = [...staticRoutes, ...connected];
+  sortRoutes(all);
+  return all;
+}
+
+// Longest-prefix match dans la table de routes
+// skipDefault=true pour les recherches srcintf (pas de fallback 0.0.0.0/0)
+function findInterfaceByRoute(dstCidr, routes, skipDefault) {
+  if (!routes || routes.length === 0) return null;
   let targetIp = (dstCidr || '').split('/')[0];
   let targetInt;
   try { targetInt = ip2int(targetIp); } catch { return null; }
 
   // Passe 1 : routes spécifiques (préfixe > 0)
-  for (const route of staticRoutes) {
+  for (const route of routes) {
     if (route.dst === '0.0.0.0/0') continue;
     const [routeIp, pfxStr] = route.dst.split('/');
     const pfx  = parseInt(pfxStr, 10);
@@ -377,8 +402,9 @@ function findInterfaceByRoute(dstCidr, staticRoutes) {
     } catch { continue; }
   }
 
-  // Passe 2 : route par défaut
-  const def = staticRoutes.find(r => r.dst === '0.0.0.0/0');
+  // Passe 2 : route par défaut (sauf pour srcintf)
+  if (skipDefault) return null;
+  const def = routes.find(r => r.dst === '0.0.0.0/0');
   return def?.device || null;
 }
 
@@ -540,19 +566,14 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
       }
     }
 
-    // Auto-detect source interface (route lookup first, then subnet match)
+    // Auto-detect source interface (full route table: static + connected, no default route fallback)
+    const routes = fortiConfig.fullRoutes || fortiConfig.staticRoutes || [];
     let srcIfaceName   = null;
-    let srcIfaceSource = 'auto'; // 'route' | 'subnet'
-    const srcRouteDevice = findInterfaceByRoute(p.srcSubnet, fortiConfig.staticRoutes);
+    let srcIfaceSource = 'auto'; // 'route' | 'connected' | 'subnet'
+    const srcRouteDevice = findInterfaceByRoute(p.srcSubnet, routes, true);
     if (srcRouteDevice) {
       srcIfaceName   = srcRouteDevice;
       srcIfaceSource = 'route';
-    } else {
-      const srcIface = findInterfaceForSubnet(p.srcSubnet, interfaces);
-      if (srcIface) {
-        srcIfaceName   = srcIface.name;
-        srcIfaceSource = 'subnet';
-      }
     }
 
     // Auto-detect destination interface
@@ -567,7 +588,7 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
         dstIfaceSource = 'sdwan';
       } else {
         // 2. Route lookup (default route ou route spécifique)
-        const routeDevice = findInterfaceByRoute(p.dstTarget || '0.0.0.0', fortiConfig.staticRoutes);
+        const routeDevice = findInterfaceByRoute(p.dstTarget || '0.0.0.0', routes);
         if (routeDevice) {
           // Si SD-WAN actif et que la route pointe vers un membre SD-WAN → utiliser l'interface virtuelle
           if (fortiConfig.sdwanEnabled && fortiConfig.sdwanMembers.includes(routeDevice)) {
@@ -589,7 +610,7 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
       }
     } else {
       // 1. Route lookup (plus précis que le matching par subnet)
-      const routeDevice = findInterfaceByRoute(p.dstTarget, fortiConfig.staticRoutes);
+      const routeDevice = findInterfaceByRoute(p.dstTarget, routes);
       if (routeDevice) {
         dstIfaceName   = routeDevice;
         dstIfaceSource = 'route';

@@ -400,7 +400,7 @@ app.post('/api/deploy/config-upload', upload.single('conffile'), (req, res) => {
       zones:      Object.keys(fortiConfig.zones).length,
       sdwan:      fortiConfig.sdwanMembers.length > 0,
       vdom:       fortiConfig.hasVdom  || false,
-      routes:     fortiConfig.staticRoutes.length,
+      routes:     (fortiConfig.fullRoutes || fortiConfig.staticRoutes).length,
       bgp:        fortiConfig.hasBgp   || false,
     });
   } catch (err) {
