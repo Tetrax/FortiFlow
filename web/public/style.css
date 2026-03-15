@@ -912,6 +912,15 @@ td.mono { font-family: var(--mono); }
 .conf-stat-off { opacity: 0.45; }
 .conf-stat-off .conf-stat-val { color: var(--text2) !important; }
 
+/* Deploy search input */
+.deploy-search-input {
+  background: var(--bg0); border: 1px solid var(--border); color: var(--text1);
+  border-radius: 4px; padding: 3px 8px; font-size: 11px; width: 220px;
+  outline: none; transition: border-color .15s;
+}
+.deploy-search-input:focus { border-color: var(--accent1); }
+.deploy-search-input::placeholder { color: var(--text2); }
+
 /* Interface source badge (route / sdwan / subnet) */
 .intf-src-badge {
   font-size: 9px;

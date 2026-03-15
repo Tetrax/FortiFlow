@@ -680,9 +680,17 @@ function renderMatrix(data, mode = 'accept') {
     if (si >= 0 && di >= 0 && si < srcSubnets.length && di < dstSubnets.length) {
       const c = cellMap.get(`${si},${di}`);
       if (c) {
-        state.flows.filters = { srcip: c.src.replace('.0/24',''), dstip: c.dst.replace('.0/24','') };
-        state.flows.page = 1;
-        navigateTo('flows');
+        // Navigate to deploy tab with src/dst pre-filtered
+        if (deployState.analyzed && deployState.analyzed.length > 0) {
+          deployState.searchFilter = `${c.src} ${c.dst}`.replace(/\.0\/24/g, '');
+          deployState.page = 1;
+          navigateTo('deploy');
+        } else {
+          // Fallback: navigate to flows if deploy not yet analyzed
+          state.flows.filters = { srcip: c.src.replace('.0/24',''), dstip: c.dst.replace('.0/24','') };
+          state.flows.page = 1;
+          navigateTo('flows');
+        }
       }
     }
   });
@@ -1313,6 +1321,7 @@ const deployState = {
   fortiConfig:   null,
   interfaces:    null,
   analyzed:      null,
+  searchFilter:  '',
   selected:      new Set(),
   page:          1,
   pageSize:      100,
@@ -1384,6 +1393,8 @@ async function deploy() {
           <button class="btn-sm" data-merge="all"      title="Les deux fusions simultanément">⚡ Tout fusionner</button>
           <button class="btn-sm" data-merge="policy"   title="Une policy par ID FortiGate — regroupe tous les subnets sources de la même policy">⚡ Fusionner par Policy</button>
           <button class="btn-sm" data-merge="reset"    title="Revenir aux policies originales">↺ Reset</button>
+          <span style="margin-left:auto"></span>
+          <input type="text" id="deploy-search" class="deploy-search-input" placeholder="Rechercher (IP, subnet, service, policy...)" value="${escHtml(deployState.searchFilter || '')}" title="Filtrer les policies par texte libre">
         </div>
         <div class="deploy-step-body" id="deploy-policy-body">
           <div class="empty-state" style="padding:24px">Cliquez sur <strong>Analyser les policies</strong> pour commencer</div>
@@ -1466,13 +1477,20 @@ async function deploy() {
     if (mode) applyMerge(mode);
   });
 
+  // Search bar
+  el('deploy-search')?.addEventListener('input', e => {
+    deployState.searchFilter = e.target.value;
+    deployState.page = 1;
+    if (deployState.analyzed) renderDeployPolicies(filterDeployPolicies(), true);
+  });
+
   // Generate
   el('btn-generate')?.addEventListener('click', generateDeployConf);
 
   // Restore analyzed policies if already present (tab switch preservation)
   if (deployState.analyzed && deployState.analyzed.length > 0) {
     el('deploy-merge-bar').style.display = '';
-    renderDeployPolicies(deployState.analyzed, false);
+    renderDeployPolicies(filterDeployPolicies(), false);
     // Restore CLI preview if generated
     if (deployState.generatedCli) {
       const wrap = el('deploy-cli-wrap');
@@ -1679,6 +1697,25 @@ function mergeServices(group) {
   return [...seen.values()];
 }
 
+// Filtre les policies analysées selon le texte de recherche
+function filterDeployPolicies() {
+  const q = (deployState.searchFilter || '').toLowerCase().trim();
+  if (!q || !deployState.analyzed) return deployState.analyzed || [];
+  const terms = q.split(/\s+/);
+  return deployState.analyzed.filter(p => {
+    const haystack = [
+      p.srcSubnet, ...(p.srcSubnets || []),
+      p.dstTarget, p._srcAddrName, p._dstAddrName,
+      p._srcintf, p._dstintf, p._policyName,
+      ...(p.policyIds || []).map(String),
+      p.serviceDesc || '',
+      ...(p.analysis?.services || []).map(s => s.label || s.name || ''),
+      ...(p._dstIPs || []),
+    ].join(' ').toLowerCase();
+    return terms.every(t => haystack.includes(t));
+  });
+}
+
 // Cellule dstTarget avec bouton détails pour les targets fusionnés (all + liste IPs)
 function dstTargetCell(p, idx) {
   const label = p.dstTarget === 'all' ? 'all (internet)' : p.dstTarget;
@@ -1835,7 +1872,7 @@ function applyMerge(mode) {
 
   // Reset selection to all
   deployState.selected = new Set(deployState.analyzed.map((_, i) => i));
-  renderDeployPolicies(deployState.analyzed);
+  renderDeployPolicies(filterDeployPolicies());
 
   const info = el('deploy-merge-info');
   if (info) {
@@ -2168,7 +2205,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
   // Wire pagination buttons (both top and bottom bars)
   const goPage = (p) => {
     deployState.page = p;
-    renderDeployPolicies(deployState.analyzed, false);
+    renderDeployPolicies(filterDeployPolicies(), false);
   };
   document.querySelectorAll('.pg-first').forEach(b => b.addEventListener('click', () => goPage(1)));
   document.querySelectorAll('.pg-prev') .forEach(b => b.addEventListener('click', () => goPage(Math.max(1, page - 1))));
