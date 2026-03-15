@@ -395,6 +395,7 @@ app.post('/api/deploy/config-upload', upload.single('conffile'), (req, res) => {
 
     res.json({
       addresses:  Object.keys(fortiConfig.addresses).length,
+      addrGroups: Object.keys(fortiConfig.addressGroups || {}).length,
       services:   Object.keys(fortiConfig.customServices).length,
       interfaces: Object.keys(fortiConfig.interfaces).length,
       zones:      Object.keys(fortiConfig.zones).length,
@@ -402,6 +403,7 @@ app.post('/api/deploy/config-upload', upload.single('conffile'), (req, res) => {
       vdom:       fortiConfig.hasVdom  || false,
       routes:     (fortiConfig.fullRoutes || fortiConfig.staticRoutes).length,
       bgp:        fortiConfig.hasBgp   || false,
+      ospf:       fortiConfig.hasOspf  || false,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -463,7 +465,7 @@ app.post('/api/deploy/generate', (req, res) => {
     if (download) {
       res.send(cli);
     } else {
-      res.json({ cli, analyzed });
+      res.json({ cli, analyzed, addrGroups: s.fortiConfig.addressGroups || {} });
     }
   } catch (err) {
     res.status(500).json({ error: err.message });

@@ -908,6 +908,9 @@ td.mono { font-family: var(--mono); }
 
 /* VDOM warning stat */
 .conf-stat-warn .conf-stat-val, .conf-stat-warn .conf-stat-lbl { color: var(--error) !important; }
+/* Inactive protocol/feature stat */
+.conf-stat-off { opacity: 0.45; }
+.conf-stat-off .conf-stat-val { color: var(--text2) !important; }
 
 /* Interface source badge (route / sdwan / subnet) */
 .intf-src-badge {

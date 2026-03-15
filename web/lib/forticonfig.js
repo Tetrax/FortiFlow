@@ -223,6 +223,17 @@ function parseFortiConfig(text) {
     addresses[name] = { name, type: props.type || 'ipmask', cidr, fqdn: props.fqdn || '' };
   }
 
+  // ── Address groups ──
+  const rawAddrGroups = extractSection(lines, 'firewall addrgrp');
+  const addressGroups = {};
+  for (const [name, props] of Object.entries(rawAddrGroups)) {
+    const members = (props.member || '').split(/\s+/)
+      .map(m => m.replace(/^"|"$/g, '')).filter(Boolean);
+    // Resolve member CIDRs from addresses
+    const memberCidrs = members.map(m => addresses[m]?.cidr).filter(Boolean);
+    addressGroups[name] = { name, members, memberCidrs };
+  }
+
   // ── Custom services ──
   const customServices = {};
   for (const [name, props] of Object.entries(rawCustomSvcs)) {
@@ -293,7 +304,10 @@ function parseFortiConfig(text) {
   // VDOM detection (multi-VDOM FortiGate) — parseur partiel, warning UI seulement
   const hasVdom = /^config vdom\s*$/m.test(text);
 
-  return { addresses, customServices, interfaces, zones, sdwanMembers, sdwanEnabled, sdwanIntfName, hasVdom, staticRoutes, fullRoutes, hasBgp };
+  // OSPF detection — vérifie la présence de networks configurés
+  const hasOspf = /config router ospf[\s\S]*?set router-id\s+\d/m.test(text);
+
+  return { addresses, addressGroups, customServices, interfaces, zones, sdwanMembers, sdwanEnabled, sdwanIntfName, hasVdom, staticRoutes, fullRoutes, hasBgp, hasOspf };
 }
 
 // ─── Static routes + BGP parser ──────────────────────────────────────────────
@@ -474,6 +488,22 @@ function findAddress(cidr, addresses) {
   }
   if (matches.length === 0) return { found: false };
   return { found: true, name: matches[0].name, allMatches: matches };
+}
+
+// Cherche un groupe d'adresses existant contenant exactement les CIDRs donnés
+function findAddressGroup(cidrs, addressGroups, addresses) {
+  if (!cidrs || cidrs.length < 2 || !addressGroups) return null;
+  const sortedCidrs = [...cidrs].sort();
+  for (const [name, grp] of Object.entries(addressGroups)) {
+    const grpCidrs = grp.members
+      .map(m => addresses[m]?.cidr)
+      .filter(Boolean)
+      .sort();
+    if (grpCidrs.length === sortedCidrs.length && grpCidrs.every((c, i) => c === sortedCidrs[i])) {
+      return { name, members: grp.members };
+    }
+  }
+  return null;
 }
 
 function findService(port, protoName, customServices) {
@@ -803,6 +833,7 @@ module.exports = {
   findInterfaceForSubnet,
   detectWanCandidates,
   findAddress,
+  findAddressGroup,
   findService,
   PREDEFINED,
 };

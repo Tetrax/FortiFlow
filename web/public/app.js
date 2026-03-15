@@ -1473,13 +1473,15 @@ async function deploy() {
 function renderConfSummary(cfg) {
   return `<div class="conf-summary-grid">
     <div class="conf-stat"><span class="conf-stat-val">${cfg.addresses}</span><span class="conf-stat-lbl">adresses</span></div>
+    ${cfg.addrGroups > 0 ? `<div class="conf-stat"><span class="conf-stat-val">${cfg.addrGroups}</span><span class="conf-stat-lbl">groupes addr</span></div>` : ''}
     <div class="conf-stat"><span class="conf-stat-val">${cfg.services}</span><span class="conf-stat-lbl">services custom</span></div>
     <div class="conf-stat"><span class="conf-stat-val">${cfg.interfaces}</span><span class="conf-stat-lbl">interfaces</span></div>
     <div class="conf-stat"><span class="conf-stat-val">${cfg.zones}</span><span class="conf-stat-lbl">zones</span></div>
-    ${cfg.routes > 0 ? `<div class="conf-stat" title="Routes statiques parsées pour l'auto-détection des interfaces"><span class="conf-stat-val">${cfg.routes}</span><span class="conf-stat-lbl">routes statiques</span></div>` : ''}
-    ${cfg.sdwan   ? '<div class="conf-stat"><span class="conf-stat-val">⚡</span><span class="conf-stat-lbl">SD-WAN actif</span></div>' : ''}
-    ${cfg.bgp     ? '<div class="conf-stat" title="Voisins BGP utilisés comme routes hôtes /32"><span class="conf-stat-val">BGP</span><span class="conf-stat-lbl">actif</span></div>' : ''}
-    <div class="conf-stat ${cfg.vdom ? 'conf-stat-warn' : ''}" title="${cfg.vdom ? 'Configs multi-VDOM : seul le premier VDOM est parsé' : 'Pas de multi-VDOM détecté'}"><span class="conf-stat-val">${cfg.vdom ? 'ON' : 'OFF'}</span><span class="conf-stat-lbl">VDOM</span></div>
+    ${cfg.routes > 0 ? `<div class="conf-stat" title="Routes (statiques + connected) pour l'auto-détection"><span class="conf-stat-val">${cfg.routes}</span><span class="conf-stat-lbl">routes</span></div>` : ''}
+    ${cfg.sdwan ? '<div class="conf-stat"><span class="conf-stat-val">⚡</span><span class="conf-stat-lbl">SD-WAN actif</span></div>' : ''}
+    <div class="conf-stat ${cfg.bgp ? '' : 'conf-stat-off'}" title="${cfg.bgp ? 'Voisins BGP utilisés comme routes hôtes /32' : 'Pas de BGP détecté'}"><span class="conf-stat-val">${cfg.bgp ? 'ON' : 'OFF'}</span><span class="conf-stat-lbl">BGP</span></div>
+    <div class="conf-stat ${cfg.ospf ? '' : 'conf-stat-off'}" title="${cfg.ospf ? 'OSPF actif' : 'Pas d\'OSPF détecté'}"><span class="conf-stat-val">${cfg.ospf ? 'ON' : 'OFF'}</span><span class="conf-stat-lbl">OSPF</span></div>
+    <div class="conf-stat ${cfg.vdom ? 'conf-stat-warn' : 'conf-stat-off'}" title="${cfg.vdom ? 'Configs multi-VDOM : seul le premier VDOM est parsé' : 'Pas de multi-VDOM détecté'}"><span class="conf-stat-val">${cfg.vdom ? 'ON' : 'OFF'}</span><span class="conf-stat-lbl">VDOM</span></div>
     <button class="btn-sm" id="btn-reload-conf" style="margin-left:auto;align-self:center">↺ Recharger</button>
   </div>`;
 }
@@ -1732,6 +1734,26 @@ function mergeByPolicyId(policies) {
       const allDstIPs     = [...new Set(subGroup.flatMap(p => p.dstIPs || (p.dstType === 'public' ? [p.dstTarget] : [])).filter(t => t && t !== 'all'))];
       const multiSrc      = srcSubnets.length > 1;
 
+      // Chercher un groupe d'adresses existant contenant ces subnets
+      let existingGrp = null;
+      if (multiSrc && deployState.addrGroups) {
+        const addrGroups = deployState.addrGroups;
+        // Build a reverse lookup: cidr → address name
+        // We need the analyzed srcAddr names for each subnet
+        const subnetAddrNames = subGroup.map(p => p.analysis?.srcAddr?.found ? p.analysis.srcAddr.name : null);
+        const allFound = subnetAddrNames.every(Boolean);
+        if (allFound) {
+          const memberNames = new Set(subnetAddrNames);
+          for (const [grpName, grp] of Object.entries(addrGroups)) {
+            const grpMembers = new Set(grp.members);
+            if (grpMembers.size === memberNames.size && [...memberNames].every(m => grpMembers.has(m))) {
+              existingGrp = grpName;
+              break;
+            }
+          }
+        }
+      }
+
       merged.push({
         ...base,
         srcSubnet:    srcSubnets[0],
@@ -1746,10 +1768,11 @@ function mergeByPolicyId(policies) {
         _mergedCount: subGroup.length,
         _isWan:       isWan,
         _nat:         isWan,
-        _srcAddrName: multiSrc ? `FF_POLICY_${policyId}_SRC` : (base._srcAddrName || suggestAddrNameFE(srcSubnets[0])),
+        _srcAddrName: existingGrp || (multiSrc ? `FF_POLICY_${policyId}_SRC` : (base._srcAddrName || suggestAddrNameFE(srcSubnets[0]))),
+        _srcAddrGrpFound: !!existingGrp,
         _dstAddrName: isWan ? 'all' : base._dstAddrName,
         _policyName:  `FF_POLICY_${policyId}`,
-        srcAddrNames: multiSrc ? srcSubnets.map(s => `FF_${escSlug(s)}`) : null,
+        srcAddrNames: existingGrp ? null : (multiSrc ? srcSubnets.map(s => `FF_${escSlug(s)}`) : null),
         analysis: {
           ...base.analysis,
           services:  allServices,
@@ -1855,8 +1878,9 @@ async function analyzeDeployPolicies() {
       const msg  = (() => { try { return JSON.parse(text).error; } catch { return `HTTP ${r.status}`; } })();
       resetAnalyzeBtn(); alert('Erreur analyse : ' + msg); return;
     }
-    const { analyzed: serverAnalyzed } = await r.json();
-    analyzed = serverAnalyzed;
+    const respData = await r.json();
+    analyzed = respData.analyzed;
+    deployState.addrGroups = respData.addrGroups || {};
     setLoadingPct(95);
     setLoadingText('Enrichissement des données…');
   } catch (err) { resetAnalyzeBtn(); alert(err.message); return; }
@@ -2078,12 +2102,12 @@ function renderDeployPolicies(analyzed, resetPage = true) {
   const hasMerge = analyzed.some(p => p._mergedCount > 1);
 
   const paginationBar = pages > 1 ? `
-    <div class="deploy-pagination" id="deploy-pagination">
-      <button class="deploy-pg-btn" id="pg-first" ${page === 1 ? 'disabled' : ''}>«</button>
-      <button class="deploy-pg-btn" id="pg-prev"  ${page === 1 ? 'disabled' : ''}>‹</button>
+    <div class="deploy-pagination">
+      <button class="deploy-pg-btn pg-first" ${page === 1 ? 'disabled' : ''}>«</button>
+      <button class="deploy-pg-btn pg-prev"  ${page === 1 ? 'disabled' : ''}>‹</button>
       <span class="deploy-pg-info">Page <strong>${page}</strong> / ${pages} &nbsp;·&nbsp; ${start + 1}–${Math.min(start + pageSize, total)} sur ${total}</span>
-      <button class="deploy-pg-btn" id="pg-next"  ${page === pages ? 'disabled' : ''}>›</button>
-      <button class="deploy-pg-btn" id="pg-last"  ${page === pages ? 'disabled' : ''}>»</button>
+      <button class="deploy-pg-btn pg-next"  ${page === pages ? 'disabled' : ''}>›</button>
+      <button class="deploy-pg-btn pg-last"  ${page === pages ? 'disabled' : ''}>»</button>
     </div>` : '';
 
   const { addrs: missingAddrs, svcs: missingSvcs } = countMissingObjects(analyzed);
@@ -2115,15 +2139,15 @@ function renderDeployPolicies(analyzed, resetPage = true) {
 
   el('deploy-step3-footer').style.display = '';
 
-  // Wire pagination buttons
+  // Wire pagination buttons (both top and bottom bars)
   const goPage = (p) => {
     deployState.page = p;
     renderDeployPolicies(deployState.analyzed, false);
   };
-  el('pg-first')?.addEventListener('click', () => goPage(1));
-  el('pg-prev') ?.addEventListener('click', () => goPage(Math.max(1, page - 1)));
-  el('pg-next') ?.addEventListener('click', () => goPage(Math.min(pages, page + 1)));
-  el('pg-last') ?.addEventListener('click', () => goPage(pages));
+  document.querySelectorAll('.pg-first').forEach(b => b.addEventListener('click', () => goPage(1)));
+  document.querySelectorAll('.pg-prev') .forEach(b => b.addEventListener('click', () => goPage(Math.max(1, page - 1))));
+  document.querySelectorAll('.pg-next') .forEach(b => b.addEventListener('click', () => goPage(Math.min(pages, page + 1))));
+  document.querySelectorAll('.pg-last') .forEach(b => b.addEventListener('click', () => goPage(pages)));
 
   // Wire select-all (current page only)
   const chkAll = el('chk-all-deploy');
