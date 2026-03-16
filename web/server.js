@@ -10,7 +10,8 @@ const { buildAnalysis, consolidatePolicies }             = require('./lib/analyz
 const { createSession, getSession, setSessionData,
         setSessionError, deleteSession }                 = require('./lib/store');
 const { parseFortiConfig, analyzePolicies,
-        generateConfig, detectWanCandidates }            = require('./lib/forticonfig');
+        generateConfig, validateAgainstExisting,
+        detectWanCandidates }                            = require('./lib/forticonfig');
 
 const app  = express();
 const PORT = process.env.PORT || 3737;
@@ -375,6 +376,36 @@ app.delete('/api/session/:session', (req, res) => {
   res.json({ ok: true });
 });
 
+// GET /api/denied-flows — denied/dropped flows grouped by subnet pair
+app.get('/api/denied-flows', (req, res) => {
+  const s = requireSession(req, res);
+  if (!s) return;
+
+  const denyFlows = s.data.flows.filter(f => f.action === 'deny' || f.action === 'drop');
+  // Group by srcSubnet|dstSubnet
+  const groups = new Map();
+  for (const f of denyFlows) {
+    const src = f.srcSubnet || (f.srcip ? f.srcip.split('.').slice(0, 3).join('.') + '.0/24' : 'unknown');
+    const dst = f.dstSubnet || f.dstip || 'unknown';
+    const dstType = f.dstType || 'private';
+    const k = `${src}|${dst}`;
+    if (!groups.has(k)) {
+      groups.set(k, { srcSubnet: src, dstTarget: dst, dstType, services: new Set(), ports: new Set(), sessions: 0, bytes: 0 });
+    }
+    const g = groups.get(k);
+    g.sessions += f.count || 1;
+    g.bytes    += f.totalBytes || 0;
+    if (f.service) g.services.add(f.service);
+    if (f.dstport) g.ports.add(String(f.dstport));
+  }
+
+  const result = [...groups.values()]
+    .map(g => ({ ...g, services: [...g.services], ports: [...g.ports] }))
+    .sort((a, b) => b.sessions - a.sessions);
+
+  res.json(result);
+});
+
 // ─── Deploy routes ────────────────────────────────────────────────────────────
 
 // POST /api/deploy/config-upload — parse a FortiGate .conf and store in session
@@ -394,16 +425,18 @@ app.post('/api/deploy/config-upload', upload.single('conffile'), (req, res) => {
     s.wanNames = new Set(wanInfo.interfaces.map(i => i.name));
 
     res.json({
-      addresses:  Object.keys(fortiConfig.addresses).length,
-      addrGroups: Object.keys(fortiConfig.addressGroups || {}).length,
-      services:   Object.keys(fortiConfig.customServices).length,
-      interfaces: Object.keys(fortiConfig.interfaces).length,
-      zones:      Object.keys(fortiConfig.zones).length,
-      sdwan:      fortiConfig.sdwanMembers.length > 0,
-      vdom:       fortiConfig.hasVdom  || false,
-      routes:     (fortiConfig.fullRoutes || fortiConfig.staticRoutes).length,
-      bgp:        fortiConfig.hasBgp   || false,
-      ospf:       fortiConfig.hasOspf  || false,
+      addresses:        Object.keys(fortiConfig.addresses).length,
+      addrGroups:       Object.keys(fortiConfig.addressGroups || {}).length,
+      services:         Object.keys(fortiConfig.customServices).length,
+      serviceGroups:    Object.keys(fortiConfig.serviceGroups || {}).length,
+      interfaces:       Object.keys(fortiConfig.interfaces).length,
+      zones:            Object.keys(fortiConfig.zones).length,
+      sdwan:            fortiConfig.sdwanMembers.length > 0,
+      vdom:             fortiConfig.hasVdom  || false,
+      routes:           (fortiConfig.fullRoutes || fortiConfig.staticRoutes).length,
+      bgp:              fortiConfig.hasBgp   || false,
+      ospf:             fortiConfig.hasOspf  || false,
+      existingPolicies: (fortiConfig.existingPolicies || []).length,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -418,7 +451,7 @@ app.get('/api/deploy/interfaces', (req, res) => {
   if (!s) return;
   if (!s.fortiConfig) return res.status(404).json({ error: 'Aucune config FortiGate chargée' });
 
-  const { interfaces, zones, sdwanMembers, sdwanEnabled, sdwanIntfName } = s.fortiConfig;
+  const { interfaces, zones, sdwanMembers, sdwanZoneNames, sdwanEnabled, sdwanIntfName } = s.fortiConfig;
   const wanNames = s.wanNames || new Set();
 
   res.json({
@@ -428,6 +461,7 @@ app.get('/api/deploy/interfaces', (req, res) => {
     })),
     zones: Object.values(zones).map(z => ({ name: z.name, members: z.members })),
     sdwanMembers,
+    sdwanZoneNames: sdwanZoneNames || [],
     sdwanEnabled: sdwanEnabled || false,
     sdwanIntfName: sdwanIntfName || null,
   });
@@ -448,11 +482,17 @@ app.post('/api/deploy/generate', (req, res) => {
     const o = opts || {};
     const analyzed = analyzePolicies(selectedPolicies, s.fortiConfig, o.preferredWanIntf || null);
     const genOpts = {
-      natEnabled:  o.nat     || false,
-      actionVerb:  o.action  || 'accept',
-      logTraffic:  o.log     || 'all',
+      natEnabled:     o.nat     || false,
+      actionVerb:     o.action  || 'accept',
+      logTraffic:     o.log     || 'all',
+      serviceGroups:  s.fortiConfig.serviceGroups || {},
+      addresses:      s.fortiConfig.addresses || {},
+      zones:          s.fortiConfig.zones || {},
     };
     const cli = generateConfig(analyzed, genOpts);
+
+    // Validation against existing policies
+    const warnings = validateAgainstExisting(analyzed, s.fortiConfig.existingPolicies || []);
 
     const download = req.query.download === '1';
     if (download) {
@@ -465,7 +505,7 @@ app.post('/api/deploy/generate', (req, res) => {
     if (download) {
       res.send(cli);
     } else {
-      res.json({ cli, analyzed, addrGroups: s.fortiConfig.addressGroups || {} });
+      res.json({ cli, analyzed, addrGroups: s.fortiConfig.addressGroups || {}, warnings });
     }
   } catch (err) {
     res.status(500).json({ error: err.message });

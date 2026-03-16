@@ -12,7 +12,11 @@ const state = {
   flows:    { page: 1, filters: {}, sort: 'count', order: 'desc', total: 0 },
   policies: { dst_type: '' },
   matrix:   { action: 'accept' },
+  subView:  { analyse: 'flows', polices: 'policies' },
+  expertMode: localStorage.getItem('ff-expert') === '1',
 };
+
+let _renderTarget = null;
 
 // ═══════════════════════════════════════════════════════════════
 // Helpers
@@ -127,7 +131,7 @@ async function handleUpload(file) {
 }
 
 function showError(msg) {
-  el('content').innerHTML = `<div class="alert alert-error">⚠ ${msg}</div>`;
+  el(_renderTarget || 'content').innerHTML = `<div class="alert alert-error">⚠ ${msg}</div>`;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -140,13 +144,35 @@ function updateSidebar() {
 
   el('sidebar-session').style.display = 'block';
   el('session-filename').textContent  = state.meta?.filename || '';
+  // Update hidden badges (for backward compat)
   el('badge-flows').textContent           = fmtNum(s?.uniqueFlows);
   el('badge-groups').textContent          = fmtNum(s?.srcSubnets);
   el('badge-policies').textContent        = '…';
   el('badge-consilpolicies').textContent  = '…';
+  // Update visible nav badges
+  const analyseEl = el('badge-analyse');
+  if (analyseEl) analyseEl.textContent = fmtNum(s?.uniqueFlows);
+  const policesEl = el('badge-polices');
+  if (policesEl) policesEl.textContent = '…';
 }
 
 function navigateTo(view) {
+  // Backward compat: map old sub-view names to parent tabs
+  const subViewMap = {
+    flows:          ['analyse', 'flows'],
+    matrix:         ['analyse', 'matrix'],
+    groups:         ['analyse', 'groups'],
+    ports:          ['analyse', 'ports'],
+    policies:       ['polices', 'policies'],
+    consilpolicies: ['polices', 'consilpolicies'],
+    denied:         ['polices', 'denied'],
+  };
+  if (subViewMap[view]) {
+    const [parent, sub] = subViewMap[view];
+    state.subView[parent] = sub;
+    view = parent;
+  }
+
   state.view = view;
 
   document.querySelectorAll('.nav-item').forEach(n => {
@@ -154,14 +180,10 @@ function navigateTo(view) {
   });
 
   const titles = {
-    dashboard:      ['Dashboard',              'Vue globale de l\'activité réseau'],
-    flows:          ['Flux réseau',            'Tous les flux agrégés, filtrables'],
-    matrix:         ['Matrice inter-VLAN',     'Heatmap des communications LAN→LAN'],
-    groups:         ['Groupes Subnets',        'Sources RFC1918 et leurs destinations'],
-    policies:       ['Policies suggérées',     'Règles brutes à créer sur le FortiGate'],
-    ports:          ['Top Ports',              'Top 25 ports destination TCP et UDP'],
-    consilpolicies: ['Conseils Policies ⚡',   'Règles optimisées : multi-source, multi-destination, multi-service'],
-    deploy:         ['Déploiement FortiGate ⊙', 'Générer la config CLI à injecter sur le firewall'],
+    dashboard: ['Dashboard',              'Vue globale de l\'activité réseau'],
+    analyse:   ['Analyse',                'Exploration du trafic réseau'],
+    polices:   ['Policies',               'Règles firewall suggérées et optimisées'],
+    deploy:    ['Déploiement FortiGate',   'Générer la config CLI à injecter sur le firewall'],
   };
 
   const [title, sub] = titles[view] || ['FortiFlow', ''];
@@ -174,7 +196,7 @@ function navigateTo(view) {
     return;
   }
 
-  const renders = { dashboard, flows, matrix, groups, policies, ports, consilpolicies, deploy };
+  const renders = { dashboard, analyse, polices, deploy };
   (renders[view] || renderUpload)();
 }
 
@@ -183,7 +205,7 @@ function navigateTo(view) {
 // ═══════════════════════════════════════════════════════════════
 
 function renderUpload() {
-  el('content').innerHTML = `
+  el(_renderTarget || 'content').innerHTML = `
     <div id="upload-zone">
       <div class="drop-area" id="drop-area">
         <div class="drop-icon">📂</div>
@@ -221,7 +243,7 @@ async function dashboard() {
   const m  = state.meta;
   const pct = s.totalSessions ? Math.round(s.acceptSessions / s.totalSessions * 100) : 0;
 
-  el('content').innerHTML = `
+  el(_renderTarget || 'content').innerHTML = `
     <div class="stat-grid">
       <div class="stat-card">
         <div class="stat-value">${fmtNum(s.totalSessions)}</div>
@@ -295,7 +317,7 @@ async function dashboard() {
 // ═══════════════════════════════════════════════════════════════
 
 async function flows() {
-  el('content').innerHTML = `
+  el(_renderTarget || 'content').innerHTML = `
     <div class="filter-bar">
       <input class="filter-input" id="f-srcip"   placeholder="Source IP…">
       <input class="filter-input" id="f-dstip"   placeholder="Dest IP…">
@@ -468,7 +490,7 @@ function renderPagination(data) {
 // ═══════════════════════════════════════════════════════════════
 
 async function matrix() {
-  el('content').innerHTML = `
+  el(_renderTarget || 'content').innerHTML = `
     <div class="section-header">
       <div>
         <div class="section-title">Heatmap LAN → LAN</div>
@@ -703,13 +725,13 @@ function renderMatrix(data, mode = 'accept') {
 // ═══════════════════════════════════════════════════════════════
 
 async function groups() {
-  el('content').innerHTML = '<div class="empty-state"><div class="progress-spinner" style="margin:0 auto"></div></div>';
+  el(_renderTarget || 'content').innerHTML = '<div class="empty-state"><div class="progress-spinner" style="margin:0 auto"></div></div>';
 
   try {
     const data = await api('/api/subnets');
     renderGroups(data);
   } catch (e) {
-    el('content').innerHTML = `<div class="alert alert-error">${e.message}</div>`;
+    el(_renderTarget || 'content').innerHTML = `<div class="alert alert-error">${e.message}</div>`;
   }
 }
 
@@ -721,7 +743,7 @@ function renderGroups(subnets) {
   });
 
   if (!entries.length) {
-    el('content').innerHTML = '<div class="empty-state"><div class="empty-icon">⊕</div><div class="empty-msg">Aucun subnet RFC1918 trouvé</div></div>';
+    el(_renderTarget || 'content').innerHTML = '<div class="empty-state"><div class="empty-icon">⊕</div><div class="empty-msg">Aucun subnet RFC1918 trouvé</div></div>';
     return;
   }
 
@@ -770,7 +792,7 @@ function renderGroups(subnets) {
       </div>`;
   }).join('');
 
-  el('content').innerHTML = cards;
+  el(_renderTarget || 'content').innerHTML = cards;
 }
 
 function toggleCard(header) {
@@ -847,7 +869,7 @@ window.filterFlowsByHost = filterFlowsByHost;
 // ═══════════════════════════════════════════════════════════════
 
 async function policies() {
-  el('content').innerHTML = `
+  el(_renderTarget || 'content').innerHTML = `
     <div class="filter-bar">
       <select class="filter-select" id="p-dst-type">
         <option value="">Toutes destinations</option>
@@ -884,6 +906,8 @@ async function loadPolicies() {
     const q    = state.policies.dst_type ? `dst_type=${state.policies.dst_type}` : '';
     const data = await api(`/api/policies${q ? '?' + q : ''}`);
     el('badge-policies').textContent = fmtNum(data.length);
+    const policesEl = el('badge-polices');
+    if (policesEl) policesEl.textContent = fmtNum(data.length);
     renderPoliciesTable(data);
   } catch (e) {
     wrap.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
@@ -1023,12 +1047,12 @@ function renderPolicyDrillTable(flows, srcSubnet, dstTarget) {
 // ═══════════════════════════════════════════════════════════════
 
 async function ports() {
-  el('content').innerHTML = '<div class="empty-state"><div class="progress-spinner" style="margin:0 auto"></div></div>';
+  el(_renderTarget || 'content').innerHTML = '<div class="empty-state"><div class="progress-spinner" style="margin:0 auto"></div></div>';
   try {
     const data = await api('/api/ports');
     renderPorts(data);
   } catch (e) {
-    el('content').innerHTML = `<div class="alert alert-error">${e.message}</div>`;
+    el(_renderTarget || 'content').innerHTML = `<div class="alert alert-error">${e.message}</div>`;
   }
 }
 
@@ -1055,7 +1079,7 @@ function renderPorts({ tcp = [], udp = [] }) {
     }).join('');
   }
 
-  el('content').innerHTML = `
+  el(_renderTarget || 'content').innerHTML = `
     <div class="ports-grid">
       <div class="ports-col">
         <div class="ports-col-header" style="color:var(--accent)">Top 25 TCP — Ports destination</div>
@@ -1073,7 +1097,7 @@ function renderPorts({ tcp = [], udp = [] }) {
 // ═══════════════════════════════════════════════════════════════
 
 async function consilpolicies() {
-  el('content').innerHTML = `
+  el(_renderTarget || 'content').innerHTML = `
     <div class="filter-bar">
       <select class="filter-select" id="cp-dst-type">
         <option value="">Toutes destinations</option>
@@ -1313,6 +1337,108 @@ function renderCpDrillTable(flows, srcSubnets, dstTargets) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Denied flows view
+// ═══════════════════════════════════════════════════════════════
+
+async function denied() {
+  el(_renderTarget || 'content').innerHTML = '<div class="empty-state"><div class="progress-spinner"></div></div>';
+  try {
+    const data = await api('/api/denied-flows');
+    el('badge-denied').textContent = data.length;
+
+    if (data.length === 0) {
+      el(_renderTarget || 'content').innerHTML = '<div class="empty-state" style="padding:40px"><div style="font-size:16px;margin-bottom:8px">Aucun flux refusé</div><div style="color:var(--text2)">Aucun trafic deny/drop trouvé dans les logs</div></div>';
+      return;
+    }
+
+    const totalSessions = data.reduce((s, d) => s + d.sessions, 0);
+
+    const rows = data.map((d, i) => {
+      const svcTags = d.services.slice(0, 5).map(s => `<span class="tag">${escHtml(s)}</span>`).join('');
+      const portTags = d.ports.slice(0, 8).map(p => `<span class="tag port-tag">${escHtml(p)}</span>`).join('');
+      const barW = Math.round((d.sessions / data[0].sessions) * 100);
+      return `<tr>
+        <td><input type="checkbox" class="denied-chk" data-idx="${i}"></td>
+        <td class="mono">${escHtml(d.srcSubnet)}</td>
+        <td class="mono">${escHtml(d.dstTarget)}</td>
+        <td>${typeTag(d.dstType)}</td>
+        <td>${svcTags}${portTags}</td>
+        <td class="impact-cell"><div class="impact-bar" style="width:${barW}%;background:color-mix(in srgb, var(--danger) 25%, transparent)"></div><span class="impact-val">${fmtNum(d.sessions)}</span></td>
+        <td style="font-size:11px;color:var(--text2)">${fmtBytes(d.bytes)}</td>
+      </tr>`;
+    }).join('');
+
+    el(_renderTarget || 'content').innerHTML = `
+      <div style="padding:24px;max-width:1400px">
+        <div style="margin-bottom:12px;display:flex;align-items:center;gap:12px">
+          <span style="font-size:13px;color:var(--text2)">${data.length} flux refusés · ${fmtNum(totalSessions)} sessions bloquées</span>
+          <button class="btn-accent" id="btn-denied-to-deploy" disabled>Envoyer au déploiement</button>
+        </div>
+        <div style="overflow-x:auto">
+          <table>
+            <thead><tr>
+              <th><input type="checkbox" id="chk-all-denied"></th>
+              <th>Source</th><th>Destination</th><th>Type</th>
+              <th>Services / Ports</th><th>Sessions</th><th>Volume</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>`;
+
+    // Wire select-all
+    const chkAll = el('chk-all-denied');
+    const deniedSelected = new Set();
+    const updateBtn = () => {
+      const btn = el('btn-denied-to-deploy');
+      btn.disabled = deniedSelected.size === 0;
+      btn.textContent = deniedSelected.size > 0
+        ? `Envoyer ${deniedSelected.size} flux au déploiement`
+        : 'Envoyer au déploiement';
+    };
+
+    chkAll.addEventListener('change', e => {
+      document.querySelectorAll('.denied-chk').forEach(chk => {
+        chk.checked = e.target.checked;
+        e.target.checked ? deniedSelected.add(+chk.dataset.idx) : deniedSelected.delete(+chk.dataset.idx);
+      });
+      updateBtn();
+    });
+
+    document.querySelectorAll('.denied-chk').forEach(chk => {
+      chk.addEventListener('change', e => {
+        e.target.checked ? deniedSelected.add(+chk.dataset.idx) : deniedSelected.delete(+chk.dataset.idx);
+        updateBtn();
+      });
+    });
+
+    el('btn-denied-to-deploy').addEventListener('click', () => {
+      if (deniedSelected.size === 0) return;
+      // Convert selected denied flows to policy format and push to deploy
+      const selectedDenied = [...deniedSelected].map(i => data[i]).filter(Boolean);
+      // Store as pending denied policies for the deploy tab
+      deployState._pendingDenied = selectedDenied.map(d => ({
+        srcSubnet:   d.srcSubnet,
+        dstTarget:   d.dstTarget,
+        dstType:     d.dstType,
+        sessions:    d.sessions,
+        services:    d.services,
+        ports:       d.ports,
+        protos:      ['TCP'],
+        serviceDesc: [...d.services, ...d.ports.map(p => `${p}/TCP`)].join(', '),
+        policyIds:   [],
+        action:      'deny',
+        _fromDenied: true,
+      }));
+      navigateTo('deploy');
+    });
+
+  } catch (err) {
+    el(_renderTarget || 'content').innerHTML = `<div class="empty-state" style="padding:40px;color:var(--danger)">${err.message}</div>`;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Deploy view
 // ═══════════════════════════════════════════════════════════════
 
@@ -1326,13 +1452,361 @@ const deployState = {
   page:          1,
   pageSize:      100,
   selectedSdwan: null,  // user-selected SD-WAN priority interface
+  warnings:      [],
+  viewMode:      'flat',           // 'flat' | 'interface-pair' | 'sequence'
+  collapsedGroups: new Set(),      // collapsed group keys for interface-pair view
+  wizardStep:    1,                // 1: config upload, 2: interfaces, 3: policies
+  use32Global:   false,            // global /32 mode (use real hosts instead of /24)
 };
 
+// ── F6: Export/Import session ──
+function exportSession() {
+  const data = {
+    version: 1, timestamp: new Date().toISOString(),
+    deployState: {
+      fortiConfig:   deployState.fortiConfig,
+      analyzed:      deployState.analyzed,
+      selected:      [...deployState.selected],
+      searchFilter:  deployState.searchFilter,
+      interfaces:    deployState.interfaces,
+      selectedSdwan: deployState.selectedSdwan,
+      generatedCli:  deployState.generatedCli,
+      addrGroups:    deployState.addrGroups,
+      warnings:      deployState.warnings,
+      viewMode:      deployState.viewMode,
+    },
+  };
+  const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `fortiflow_session_${Date.now()}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function importSession(file) {
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const data = JSON.parse(e.target.result);
+      if (data.version !== 1 || !data.deployState) { alert('Fichier de session invalide'); return; }
+      const ds = data.deployState;
+      deployState.fortiConfig   = ds.fortiConfig;
+      deployState.analyzed      = ds.analyzed;
+      deployState.selected      = new Set(ds.selected || []);
+      deployState.searchFilter  = ds.searchFilter || '';
+      deployState.interfaces    = ds.interfaces;
+      deployState.selectedSdwan = ds.selectedSdwan;
+      deployState.generatedCli  = ds.generatedCli;
+      deployState.addrGroups    = ds.addrGroups;
+      deployState.warnings      = ds.warnings || [];
+      deployState.viewMode      = ds.viewMode || 'flat';
+      deploy();
+    } catch { alert('Erreur de lecture du fichier'); }
+  };
+  reader.readAsText(file);
+}
+
+// ── F9: Merge diff modal ──
+function showMergeDiff(mode) {
+  const original = deployState._analyzedOriginal || deployState.analyzed;
+  if (!original) return;
+  let preview;
+  if (mode === 'policy') preview = mergeByPolicyId(original.map(p => ({ ...p })));
+  else preview = mergeAnalyzedPolicies(original.map(p => ({ ...p })), mode);
+
+  const beforeCount = original.length;
+  const afterCount  = preview.length;
+  const mergedGroups = preview.filter(p => (p._mergedCount || 1) > 1);
+
+  const groupRows = mergedGroups.slice(0, 20).map(g => {
+    const src = g.srcSubnets ? g.srcSubnets.join(', ') : g.srcSubnet;
+    return `<div style="display:flex;gap:8px;align-items:center;padding:4px 0;border-bottom:1px solid var(--border)">
+      <span class="mono" style="font-size:11px;min-width:120px">${escHtml(src)}</span>
+      <span style="color:var(--text2)">→</span>
+      <span class="mono" style="font-size:11px">${escHtml(g.dstTarget)}</span>
+      <span class="merge-badge" style="margin-left:auto">×${g._mergedCount}</span>
+    </div>`;
+  }).join('');
+
+  const modal = document.createElement('div');
+  modal.className = 'merge-modal-overlay';
+  modal.innerHTML = `
+    <div class="merge-modal">
+      <div style="font-size:14px;font-weight:600;margin-bottom:12px">Aperçu fusion : ${mode}</div>
+      <div style="display:flex;gap:20px;margin-bottom:16px">
+        <div class="stat-card" style="flex:1;padding:12px"><div class="stat-value">${beforeCount}</div><div class="stat-label">avant</div></div>
+        <div class="stat-card" style="flex:1;padding:12px"><div class="stat-value" style="color:var(--accent)">${afterCount}</div><div class="stat-label">après</div></div>
+        <div class="stat-card" style="flex:1;padding:12px"><div class="stat-value" style="color:var(--accent2)">-${beforeCount - afterCount}</div><div class="stat-label">économie</div></div>
+      </div>
+      ${mergedGroups.length > 0 ? `<div style="font-size:12px;font-weight:600;margin-bottom:8px">${mergedGroups.length} groupes fusionnés :</div>
+      <div style="max-height:250px;overflow-y:auto;margin-bottom:16px">${groupRows}${mergedGroups.length > 20 ? `<div style="color:var(--text2);font-size:11px;padding:4px">+${mergedGroups.length - 20} autres…</div>` : ''}</div>` : ''}
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn-sm" id="merge-cancel">Annuler</button>
+        <button class="btn-accent" id="merge-confirm">Appliquer</button>
+      </div>
+    </div>`;
+
+  document.body.appendChild(modal);
+  modal.querySelector('#merge-cancel').addEventListener('click', () => modal.remove());
+  modal.querySelector('#merge-confirm').addEventListener('click', () => { modal.remove(); applyMerge(mode); });
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+}
+
+// ── Inventaire des objets manquants ──────────────────────────────────────────
+
+function collectMissingObjects() {
+  if (!deployState.analyzed) return { addresses: [], hosts: [], services: [], total: 0 };
+
+  const addresses = new Map(); // cidr → { cidr, name, policyCount }
+  const hosts     = new Map(); // ip   → { ip, name, policyCount }
+  const services  = new Map(); // key  → { key, port, proto, label, name, policyCount }
+
+  for (const p of deployState.analyzed) {
+    const a = p.analysis;
+    if (!a) continue;
+
+    // Src address manquante (seulement si pas en mode /32)
+    if (!p._use32Src && a.srcAddr && !a.srcAddr.found) {
+      const cidr = a.srcAddr.cidr;
+      if (cidr) {
+        if (!addresses.has(cidr)) addresses.set(cidr, { cidr, name: p._srcAddrName || a.srcAddr.suggestedName, policyCount: 0 });
+        addresses.get(cidr).policyCount++;
+      }
+    }
+    // Dst address manquante
+    if (!p._use32Dst && p.dstType === 'private' && a.dstAddr && !a.dstAddr.found) {
+      const cidr = a.dstAddr.cidr;
+      if (cidr && cidr !== 'all') {
+        if (!addresses.has(cidr)) addresses.set(cidr, { cidr, name: p._dstAddrName || a.dstAddr.suggestedName, policyCount: 0 });
+        addresses.get(cidr).policyCount++;
+      }
+    }
+    // Hôtes /32 src
+    if (p._use32Src && p.srcHosts?.length > 0) {
+      for (const h of p.srcHosts) {
+        if (!hosts.has(h)) {
+          const suggested = (p._srcHostNames?.[h]) || `FF_HOST_${h.replace(/\./g, '_')}`;
+          hosts.set(h, { ip: h, name: suggested, policyCount: 0 });
+        }
+        hosts.get(h).policyCount++;
+      }
+    }
+    // Hôtes /32 dst
+    if (p._use32Dst && p.dstHosts?.length > 0) {
+      for (const h of p.dstHosts) {
+        if (!hosts.has(h)) {
+          const suggested = (p._dstHostNames?.[h]) || `FF_HOST_${h.replace(/\./g, '_')}`;
+          hosts.set(h, { ip: h, name: suggested, policyCount: 0 });
+        }
+        hosts.get(h).policyCount++;
+      }
+    }
+    // Services manquants
+    for (const svc of a.services || []) {
+      if (!svc.found) {
+        const key = `${svc.port}/${svc.proto}`;
+        if (!services.has(key)) services.set(key, { key, port: svc.port, proto: svc.proto, label: svc.label, name: svc.suggestedName || `FF_SVC_${svc.port}_${svc.proto}`, policyCount: 0 });
+        services.get(key).policyCount++;
+      }
+    }
+  }
+
+  const result = {
+    addresses: [...addresses.values()],
+    hosts:     [...hosts.values()],
+    services:  [...services.values()],
+  };
+  result.total = result.addresses.length + result.hosts.length + result.services.length;
+  return result;
+}
+
+function showObjectsModal() {
+  const missing = collectMissingObjects();
+  if (missing.total === 0) return;
+
+  function section(title, icon, items, inputPrefix) {
+    if (!items.length) return '';
+    const rows = items.map((item, i) => {
+      const label = item.cidr || item.ip || item.label;
+      const hint  = item.policyCount > 1 ? `<span style="font-size:10px;color:var(--text2)">${item.policyCount} policies</span>` : '';
+      return `<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border)">
+        <span class="mono" style="min-width:160px;font-size:11px">${escHtml(label)}</span>
+        ${hint}
+        <input class="deploy-name-input obj-modal-input" style="flex:1" data-obj-prefix="${inputPrefix}" data-obj-key="${escHtml(item.cidr || item.ip || item.key)}" value="${escHtml(item.name)}" placeholder="Nom FortiGate…">
+      </div>`;
+    }).join('');
+    return `<div style="margin-bottom:16px">
+      <div style="font-size:12px;font-weight:600;margin-bottom:6px">${icon} ${title} <span style="font-size:11px;font-weight:400;color:var(--text2)">(${items.length})</span></div>
+      ${rows}
+    </div>`;
+  }
+
+  const modal = document.createElement('div');
+  modal.className = 'merge-modal-overlay';
+  modal.innerHTML = `
+    <div class="merge-modal" style="max-width:560px;width:90vw">
+      <div style="font-size:14px;font-weight:600;margin-bottom:4px">Objets à créer <span style="font-weight:400;color:var(--text2);font-size:12px">(${missing.total})</span></div>
+      <div style="font-size:11px;color:var(--text2);margin-bottom:14px">Nommez les objets manquants — ils seront appliqués à toutes les policies concernées.</div>
+      <div id="obj-modal-body" style="max-height:55vh;overflow-y:auto;padding-right:4px">
+        ${section('Adresses subnets', '🔖', missing.addresses, 'addr')}
+        ${section('Hôtes /32', '📍', missing.hosts, 'host')}
+        ${section('Services', '⚙', missing.services, 'svc')}
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
+        <button class="btn-sm" id="obj-modal-cancel">Annuler</button>
+        <button class="btn-accent" id="obj-modal-apply">✓ Appliquer à toutes les policies</button>
+      </div>
+    </div>`;
+
+  document.body.appendChild(modal);
+  modal.querySelector('#obj-modal-cancel').addEventListener('click', () => modal.remove());
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+  modal.querySelector('#obj-modal-apply').addEventListener('click', () => {
+    const addrMap = {}, hostsMap = {}, svcMap = {};
+    modal.querySelectorAll('.obj-modal-input').forEach(inp => {
+      const prefix = inp.dataset.objPrefix;
+      const key    = inp.dataset.objKey;
+      const val    = inp.value.trim();
+      if (!val) return;
+      if (prefix === 'addr') addrMap[key] = val;
+      else if (prefix === 'host') hostsMap[key] = val;
+      else if (prefix === 'svc')  svcMap[key]  = val;
+    });
+    modal.remove();
+    applyObjectNames(addrMap, hostsMap, svcMap);
+  });
+}
+
+function applyObjectNames(addrMap, hostsMap, svcMap) {
+  for (const p of deployState.analyzed) {
+    const a = p.analysis;
+    if (!a) continue;
+    // Src address
+    const srcCidr = a.srcAddr?.cidr;
+    if (srcCidr && addrMap[srcCidr]) p._srcAddrName = addrMap[srcCidr];
+    // Dst address
+    const dstCidr = a.dstAddr?.cidr;
+    if (dstCidr && dstCidr !== 'all' && addrMap[dstCidr]) p._dstAddrName = addrMap[dstCidr];
+    // Host names (stored per-policy for CLI generation)
+    if (p._use32Src && p.srcHosts?.length > 0) {
+      p._srcHostNames = p._srcHostNames || {};
+      for (const h of p.srcHosts) if (hostsMap[h]) p._srcHostNames[h] = hostsMap[h];
+    }
+    if (p._use32Dst && p.dstHosts?.length > 0) {
+      p._dstHostNames = p._dstHostNames || {};
+      for (const h of p.dstHosts) if (hostsMap[h]) p._dstHostNames[h] = hostsMap[h];
+    }
+    // Services
+    for (const svc of a.services || []) {
+      if (!svc.found) {
+        const key = `${svc.port}/${svc.proto}`;
+        if (svcMap[key]) svc.suggestedName = svcMap[key];
+      }
+    }
+  }
+  renderDeployPolicies(filterDeployPolicies(), false);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// View: Analyse (wrapper — sub-tabs: Flux, Matrice, Groupes, Ports)
+// ═══════════════════════════════════════════════════════════════
+
+async function analyse() {
+  const sub = state.subView.analyse;
+  const pills = [
+    { key: 'flows',  label: 'Flux',    icon: '≡' },
+    { key: 'matrix', label: 'Matrice', icon: '⊞' },
+    { key: 'groups', label: 'Groupes', icon: '⊕' },
+    { key: 'ports',  label: 'Ports',   icon: '◫' },
+  ];
+  const pillsHtml = pills.map(p =>
+    `<button class="sub-pill ${p.key === sub ? 'active' : ''}" data-sub="${p.key}">${p.icon} ${p.label}</button>`
+  ).join('');
+
+  el(_renderTarget || 'content').innerHTML = `
+    <div class="sub-pill-bar">${pillsHtml}</div>
+    <div id="sub-content"></div>`;
+
+  // Wire pill clicks
+  document.querySelectorAll('.sub-pill').forEach(btn => {
+    btn.addEventListener('click', () => {
+      state.subView.analyse = btn.dataset.sub;
+      analyse();
+    });
+  });
+
+  // Render sub-view into #sub-content
+  _renderTarget = 'sub-content';
+  const subViews = { flows, matrix, groups, ports };
+  await (subViews[sub] || flows)();
+  _renderTarget = null;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// View: Polices (wrapper — sub-tabs: Policies, Conseils, Refusés)
+// ═══════════════════════════════════════════════════════════════
+
+async function polices() {
+  const sub = state.subView.polices;
+  const pills = [
+    { key: 'policies',       label: 'Policies',  icon: '◎' },
+    { key: 'consilpolicies', label: 'Conseils',   icon: '⚡' },
+    { key: 'denied',         label: 'Refusés',   icon: '⊘' },
+  ];
+  const pillsHtml = pills.map(p =>
+    `<button class="sub-pill ${p.key === sub ? 'active' : ''}" data-sub="${p.key}">${p.icon} ${p.label}</button>`
+  ).join('');
+
+  el(_renderTarget || 'content').innerHTML = `
+    <div class="sub-pill-bar">${pillsHtml}</div>
+    <div id="sub-content"></div>`;
+
+  document.querySelectorAll('.sub-pill').forEach(btn => {
+    btn.addEventListener('click', () => {
+      state.subView.polices = btn.dataset.sub;
+      polices();
+    });
+  });
+
+  _renderTarget = 'sub-content';
+  const subViews = { policies, consilpolicies, denied };
+  await (subViews[sub] || policies)();
+  _renderTarget = null;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// View: Deploy
+// ═══════════════════════════════════════════════════════════════
+
+// ── F8: Predefined tags ──
+const POLICY_TAGS = ['critique', 'temporaire', 'a valider', 'segmentation'];
+
 async function deploy() {
-  el('content').innerHTML = `
+  // Auto-advance wizard based on state
+  if (deployState.fortiConfig && deployState.wizardStep < 2) deployState.wizardStep = 2;
+  if (deployState.analyzed && deployState.wizardStep < 3) deployState.wizardStep = 3;
+  const ws = deployState.wizardStep;
+
+  el(_renderTarget || 'content').innerHTML = `
     <div class="deploy-wrap">
+      <!-- Wizard progress -->
+      <div class="wizard-progress">
+        <div class="wizard-step-indicator ${ws >= 1 ? 'active' : ''} ${ws > 1 ? 'done' : ''}" data-step="1">
+          <span class="wizard-num">1</span> Config
+        </div>
+        <div class="wizard-connector ${ws > 1 ? 'done' : ''}"></div>
+        <div class="wizard-step-indicator ${ws >= 2 ? 'active' : ''} ${ws > 2 ? 'done' : ''}" data-step="2">
+          <span class="wizard-num">2</span> Interfaces
+        </div>
+        <div class="wizard-connector ${ws > 2 ? 'done' : ''}"></div>
+        <div class="wizard-step-indicator ${ws >= 3 ? 'active' : ''}" data-step="3">
+          <span class="wizard-num">3</span> Policies
+        </div>
+      </div>
+
       <!-- Step 1: import .conf -->
-      <div class="deploy-step" id="deploy-step1">
+      <div class="deploy-step" id="deploy-step1" ${ws !== 1 ? 'style="display:none"' : ''}>
         <div class="deploy-step-header">
           <span class="deploy-step-num">1</span>
           Importer la config FortiGate
@@ -1350,10 +1824,11 @@ async function deploy() {
                </label>`
           }
         </div>
+        ${deployState.fortiConfig ? `<div class="wizard-nav"><span></span><button class="btn-accent wizard-next" data-to="2">Suivant →</button></div>` : ''}
       </div>
 
-      <!-- Step 2: interfaces (collapsible) -->
-      <div class="deploy-step" id="deploy-step2" ${!deployState.interfaces ? 'style="display:none"' : ''}>
+      <!-- Step 2: interfaces -->
+      <div class="deploy-step" id="deploy-step2" ${ws !== 2 ? 'style="display:none"' : ''}>
         <div class="deploy-step-header" id="deploy-iface-toggle" style="cursor:pointer">
           <span class="deploy-step-num">2</span>
           Interfaces &amp; Zones
@@ -1362,10 +1837,14 @@ async function deploy() {
         <div class="deploy-step-body" id="deploy-iface-body">
           ${deployState.interfaces ? renderInterfaces(deployState.interfaces) : ''}
         </div>
+        <div class="wizard-nav">
+          <button class="btn-sm wizard-prev" data-to="1">← Précédent</button>
+          <button class="btn-accent wizard-next" data-to="3">Suivant →</button>
+        </div>
       </div>
 
       <!-- Step 3: policy table -->
-      <div class="deploy-step" id="deploy-step3" ${!deployState.fortiConfig ? 'style="display:none"' : ''}>
+      <div class="deploy-step" id="deploy-step3" ${ws !== 3 ? 'style="display:none"' : ''}>
         <div class="deploy-step-header">
           <span class="deploy-step-num">3</span>
           Policies à générer
@@ -1388,11 +1867,27 @@ async function deploy() {
         </div>
         <div class="deploy-merge-bar" id="deploy-merge-bar" style="display:none">
           <span id="deploy-merge-info" style="font-size:11px;color:var(--text2)"></span>
-          <button class="btn-sm" data-merge="internet" title="Une policy par src → internet (dst=all)">⚡ Fusionner Internet</button>
-          <button class="btn-sm" data-merge="lan"      title="Une policy par (src, dst) → merger les services">⚡ Fusionner LAN</button>
-          <button class="btn-sm" data-merge="all"      title="Les deux fusions simultanément">⚡ Tout fusionner</button>
-          <button class="btn-sm" data-merge="policy"   title="Une policy par ID FortiGate — regroupe tous les subnets sources de la même policy">⚡ Fusionner par Policy</button>
-          <button class="btn-sm" data-merge="reset"    title="Revenir aux policies originales">↺ Reset</button>
+          <div class="dropdown-wrap">
+            <button class="btn-sm dropdown-trigger">⚡ Fusion ▾</button>
+            <div class="dropdown-menu">
+              <div class="dropdown-item" data-merge="internet">Fusionner Internet</div>
+              <div class="dropdown-item" data-merge="lan">Fusionner LAN</div>
+              <div class="dropdown-item" data-merge="all">Tout fusionner</div>
+              <div class="dropdown-item" data-merge="policy">Par Policy ID</div>
+              <div class="dropdown-sep"></div>
+              <div class="dropdown-item" data-merge="reset">↺ Réinitialiser</div>
+            </div>
+          </div>
+          <div class="dropdown-wrap">
+            <button class="btn-sm dropdown-trigger">☰ Vue ▾</button>
+            <div class="dropdown-menu">
+              <div class="dropdown-item ${deployState.viewMode === 'flat' ? 'active' : ''}" data-view-mode="flat">☰ Liste classique</div>
+              <div class="dropdown-item ${deployState.viewMode === 'interface-pair' ? 'active' : ''}" data-view-mode="interface-pair">⇄ Par interfaces</div>
+              <div class="dropdown-item ${deployState.viewMode === 'sequence' ? 'active' : ''}" data-view-mode="sequence">⊞ Séquences</div>
+            </div>
+          </div>
+          <button class="btn-sm ${deployState.use32Global ? 'btn-active' : ''}" id="btn-32-global" title="Basculer toutes les policies : /24 subnets ↔ /32 hôtes réels">${deployState.use32Global ? '/32 ✓' : '/24'} ↔ /32</button>
+          <button class="btn-sm btn-warn" id="btn-missing-objects" style="display:none" title="Nommer les objets manquants avant de générer le CLI">⚠ …</button>
           <span style="margin-left:auto"></span>
           <input type="text" id="deploy-search" class="deploy-search-input" placeholder="Rechercher (IP, subnet, service, policy...)" value="${escHtml(deployState.searchFilter || '')}" title="Filtrer les policies par texte libre">
         </div>
@@ -1403,6 +1898,10 @@ async function deploy() {
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
             <button class="btn-accent" id="btn-generate">⬇ Générer config FortiGate</button>
             <span id="deploy-gen-info" style="font-size:11px;color:var(--text2)"></span>
+            <span style="margin-left:auto;display:flex;gap:6px">
+              <button class="btn-sm" id="btn-export-session" title="Sauvegarder la session de travail">💾 Sauvegarder</button>
+              <label class="btn-sm" style="cursor:pointer" title="Charger une session sauvegardée">📂 Charger<input type="file" id="btn-import-session" accept=".json" style="display:none"></label>
+            </span>
           </div>
           <div id="deploy-cli-wrap" style="display:none;margin-top:12px">
             <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
@@ -1471,10 +1970,62 @@ async function deploy() {
   // Analyze
   el('btn-analyze')?.addEventListener('click', analyzeDeployPolicies);
 
-  // Merge buttons — délégation sur data-merge
+  // Dropdown toggle + close-on-outside
   el('deploy-merge-bar')?.addEventListener('click', e => {
-    const mode = e.target.closest('[data-merge]')?.dataset.merge;
-    if (mode) applyMerge(mode);
+    const trigger = e.target.closest('.dropdown-trigger');
+    if (trigger) {
+      const wrap = trigger.closest('.dropdown-wrap');
+      const wasOpen = wrap.classList.contains('open');
+      document.querySelectorAll('.dropdown-wrap.open').forEach(w => w.classList.remove('open'));
+      if (!wasOpen) wrap.classList.add('open');
+      e.stopPropagation();
+      return;
+    }
+
+    // Merge action from dropdown
+    const mergeItem = e.target.closest('[data-merge]');
+    if (mergeItem) {
+      const mode = mergeItem.dataset.merge;
+      document.querySelectorAll('.dropdown-wrap.open').forEach(w => w.classList.remove('open'));
+      if (mode === 'reset') applyMerge(mode);
+      else if (mode) showMergeDiff(mode);
+      return;
+    }
+
+    // View mode from dropdown
+    const viewItem = e.target.closest('[data-view-mode]');
+    if (viewItem) {
+      deployState.viewMode = viewItem.dataset.viewMode;
+      deployState.collapsedGroups = new Set();
+      document.querySelectorAll('.dropdown-wrap.open').forEach(w => w.classList.remove('open'));
+      if (deployState.analyzed) renderDeployPolicies(filterDeployPolicies(), true);
+      return;
+    }
+  });
+
+  // Close dropdowns on outside click
+  document.addEventListener('click', () => {
+    document.querySelectorAll('.dropdown-wrap.open').forEach(w => w.classList.remove('open'));
+  });
+
+  // Wizard nav buttons
+  document.querySelectorAll('.wizard-next, .wizard-prev').forEach(btn => {
+    btn.addEventListener('click', () => {
+      deployState.wizardStep = +btn.dataset.to;
+      deploy();
+    });
+  });
+
+  // Wizard step indicators (click to jump)
+  document.querySelectorAll('.wizard-step-indicator').forEach(ind => {
+    ind.addEventListener('click', () => {
+      const step = +ind.dataset.step;
+      // Only allow jumping to completed steps or current
+      if (step === 1 || (step === 2 && deployState.fortiConfig) || (step === 3 && deployState.fortiConfig)) {
+        deployState.wizardStep = step;
+        deploy();
+      }
+    });
   });
 
   // Search bar
@@ -1486,6 +2037,34 @@ async function deploy() {
 
   // Generate
   el('btn-generate')?.addEventListener('click', generateDeployConf);
+
+  // Export/Import session
+  el('btn-export-session')?.addEventListener('click', exportSession);
+  el('btn-import-session')?.addEventListener('change', e => {
+    const f = e.target.files[0];
+    if (f) importSession(f);
+  });
+
+  // Missing objects modal (wired once — button persists in DOM)
+  el('btn-missing-objects')?.addEventListener('click', showObjectsModal);
+
+  // Global /32 toggle (wired once — button persists in DOM)
+  el('btn-32-global')?.addEventListener('click', () => {
+    deployState.use32Global = !deployState.use32Global;
+    if (deployState.analyzed) {
+      for (const p of deployState.analyzed) {
+        if ((p.srcHosts || []).length > 1) p._use32Src = deployState.use32Global;
+        if ((p.dstHosts || []).length > 1) p._use32Dst = deployState.use32Global;
+      }
+    }
+    // Update button appearance
+    const btn = el('btn-32-global');
+    if (btn) {
+      btn.textContent = deployState.use32Global ? '/32 ✓ ↔ /24' : '/24 ↔ /32';
+      btn.classList.toggle('btn-active', deployState.use32Global);
+    }
+    renderDeployPolicies(filterDeployPolicies(), false);
+  });
 
   // Restore analyzed policies if already present (tab switch preservation)
   if (deployState.analyzed && deployState.analyzed.length > 0) {
@@ -1506,6 +2085,8 @@ function renderConfSummary(cfg) {
     <div class="conf-stat"><span class="conf-stat-val">${cfg.addresses}</span><span class="conf-stat-lbl">adresses</span></div>
     ${cfg.addrGroups > 0 ? `<div class="conf-stat"><span class="conf-stat-val">${cfg.addrGroups}</span><span class="conf-stat-lbl">groupes addr</span></div>` : ''}
     <div class="conf-stat"><span class="conf-stat-val">${cfg.services}</span><span class="conf-stat-lbl">services custom</span></div>
+    ${cfg.serviceGroups > 0 ? `<div class="conf-stat"><span class="conf-stat-val">${cfg.serviceGroups}</span><span class="conf-stat-lbl">groupes svc</span></div>` : ''}
+    ${cfg.existingPolicies > 0 ? `<div class="conf-stat"><span class="conf-stat-val">${cfg.existingPolicies}</span><span class="conf-stat-lbl">policies</span></div>` : ''}
     <div class="conf-stat"><span class="conf-stat-val">${cfg.interfaces}</span><span class="conf-stat-lbl">interfaces</span></div>
     <div class="conf-stat"><span class="conf-stat-val">${cfg.zones}</span><span class="conf-stat-lbl">zones</span></div>
     ${cfg.routes > 0 ? `<div class="conf-stat" title="Routes (statiques + connected) pour l'auto-détection"><span class="conf-stat-val">${cfg.routes}</span><span class="conf-stat-lbl">routes</span></div>` : ''}
@@ -1517,7 +2098,7 @@ function renderConfSummary(cfg) {
   </div>`;
 }
 
-function renderInterfaces({ interfaces, zones, sdwanMembers, sdwanEnabled, sdwanIntfName }) {
+function renderInterfaces({ interfaces, zones, sdwanMembers, sdwanZoneNames, sdwanEnabled, sdwanIntfName }) {
   const ifaceRows = interfaces.map((iface, idx) => `
     <tr>
       <td class="mono">${escHtml(iface.name)}</td>
@@ -1537,16 +2118,15 @@ function renderInterfaces({ interfaces, zones, sdwanMembers, sdwanEnabled, sdwan
       <td colspan="2"></td>
     </tr>`).join('');
 
-  // SD-WAN section: if multiple members, show radio buttons for priority selection
+  // SD-WAN section: show SDWAN zones as selectable options (zone name goes into dstintf)
   let sdwanSection = '';
-  if (sdwanEnabled && sdwanMembers.length > 0) {
-    const virtualName = sdwanIntfName || 'virtual-wan-link';
-    const currentSel = deployState.selectedSdwan || virtualName;
-    // Option for virtual interface itself + each physical member
-    const options = [
-      { value: virtualName, label: `${virtualName} (interface virtuelle)` },
-      ...sdwanMembers.map(m => ({ value: m, label: m })),
-    ];
+  if (sdwanEnabled) {
+    // Use sdwanZoneNames if available, fallback to sdwanIntfName
+    const zoneOptions = sdwanZoneNames && sdwanZoneNames.length > 0
+      ? sdwanZoneNames
+      : [sdwanIntfName || 'virtual-wan-link'];
+    const currentSel = deployState.selectedSdwan || zoneOptions[0];
+    const options = zoneOptions.map(z => ({ value: z, label: z }));
     const radios = options.map(o => `
       <label style="display:flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap">
         <input type="radio" name="sdwan-priority" value="${escHtml(o.value)}" ${currentSel === o.value ? 'checked' : ''}>
@@ -1597,9 +2177,12 @@ async function uploadConf(file) {
     const ir = await fetch(`/api/deploy/interfaces?session=${state.session}`);
     if (ir.ok) {
       deployState.interfaces = await ir.json();
-      // Auto-select the SD-WAN virtual interface as default priority
+      // Auto-select first SDWAN zone as default
       if (deployState.interfaces?.sdwanEnabled) {
-        deployState.selectedSdwan = deployState.interfaces.sdwanIntfName || null;
+        const zones = deployState.interfaces.sdwanZoneNames;
+        deployState.selectedSdwan = (zones && zones.length > 0)
+          ? zones[0]
+          : (deployState.interfaces.sdwanIntfName || null);
       } else {
         deployState.selectedSdwan = null;
       }
@@ -1615,6 +2198,9 @@ async function uploadConf(file) {
 
 function mergeAnalyzedPolicies(policies, mode) {
   // mode: 'internet' | 'lan' | 'all'
+  // 'internet' = show & merge ONLY internet policies (filter out LAN completely)
+  // 'lan'      = show & merge ONLY LAN policies (filter out internet completely)
+  // 'all'      = show & merge everything
   const merged   = [];
   const internet = mode === 'internet' || mode === 'all';
   const lan      = mode === 'lan'      || mode === 'all';
@@ -1624,18 +2210,17 @@ function mergeAnalyzedPolicies(policies, mode) {
   const lanGroups      = new Map(); // key = srcSubnet|dstTarget
 
   for (const p of policies) {
-    const isPublic = p.dstType === 'public' || (!p.dstTarget?.match(/^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.)/));
-    if (internet && isPublic) {
+    const isPublic = p.dstType === 'public' || p.dstTarget === 'all';
+    if (isPublic && internet) {
       const k = p.srcSubnet;
       if (!internetGroups.has(k)) internetGroups.set(k, []);
       internetGroups.get(k).push(p);
-    } else if (lan && !isPublic) {
+    } else if (!isPublic && lan) {
       const k = `${p.srcSubnet}|${p.dstTarget}`;
       if (!lanGroups.has(k)) lanGroups.set(k, []);
       lanGroups.get(k).push(p);
-    } else {
-      merged.push({ ...p });
     }
+    // else: filtered out (not shown)
   }
 
   // Build merged internet policies (one per srcSubnet → dst=all)
@@ -1711,6 +2296,7 @@ function filterDeployPolicies() {
       p.serviceDesc || '',
       ...(p.analysis?.services || []).map(s => s.label || s.name || ''),
       ...(p._dstIPs || []),
+      ...(p._tags || []),
     ].join(' ').toLowerCase();
     return terms.every(t => haystack.includes(t));
   });
@@ -1720,14 +2306,32 @@ function filterDeployPolicies() {
 function dstTargetCell(p, idx) {
   const label = p.dstTarget === 'all' ? 'all (internet)' : p.dstTarget;
   const ips   = p._dstIPs;
-  if (!ips || ips.length === 0) return `<span class="mono">${escHtml(label)}</span>`;
+
+  // Badge hôtes /32 pour destinations privées
+  const dstHosts = p.dstHosts || [];
+  const use32Dst = p._use32Dst || false;
+  let dstHostsHtml = '';
+  if (p.dstType === 'private' && dstHosts.length > 1) {
+    const rows = dstHosts.slice(0, 50).map(h => `<div class="mono" style="font-size:10px;color:var(--text2)">${escHtml(h)}</div>`).join('');
+    const moreH = dstHosts.length > 50 ? `<div style="font-size:10px;color:var(--text2)">+${dstHosts.length - 50} autres…</div>` : '';
+    dstHostsHtml = `<button class="btn-sm dst-hosts-badge ${use32Dst ? 'hosts-active' : ''}" data-idx="${idx}" style="font-size:9px;padding:1px 5px;margin-left:4px">${dstHosts.length} hôtes${use32Dst ? ' /32 ✓' : ' ▾'}</button>
+    <div class="hosts-detail" id="dst-hosts-${idx}" style="display:none;margin-top:4px;max-height:130px;overflow-y:auto;background:var(--bg0);border:1px solid var(--border);border-radius:4px;padding:4px 8px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;padding-bottom:4px;border-bottom:1px solid var(--border)">
+        <span style="font-size:10px;font-weight:600">${dstHosts.length} hôtes</span>
+        <button class="btn-sm btn-use32" data-idx="${idx}" data-type="dst" style="font-size:9px">${use32Dst ? '↩ /24' : '⇒ /32'}</button>
+      </div>
+      ${rows}${moreH}
+    </div>`;
+  }
+
+  if (!ips || ips.length === 0) return `<span class="mono">${escHtml(label)}</span>${dstHostsHtml}`;
   const ipRows = ips.slice(0, 50).map(ip => `<div class="mono" style="font-size:10px;color:var(--text2)">${escHtml(ip)}</div>`).join('');
   const more   = ips.length > 50 ? `<div style="color:var(--text2);font-size:10px">+${ips.length - 50} autres…</div>` : '';
   return `<span class="mono">${escHtml(label)}</span>
     <button class="btn-sm deploy-dst-detail-btn" data-idx="${idx}" style="font-size:9px;padding:1px 5px;margin-left:4px">▸ ${ips.length} IPs</button>
     <div class="deploy-dst-detail" id="dst-detail-${idx}" style="display:none;margin-top:4px;max-height:150px;overflow-y:auto;background:var(--bg0);border:1px solid var(--border);border-radius:4px;padding:4px 8px">
       ${ipRows}${more}
-    </div>`;
+    </div>${dstHostsHtml}`;
 }
 
 // Clé de service normalisée pour comparer les ensembles de services entre policies
@@ -1736,6 +2340,59 @@ function serviceSetKey(p) {
     .map(s => `${s.port}/${s.proto}`)
     .sort()
     .join(',');
+}
+
+// ── View mode grouping functions ──
+
+function groupByInterfacePair(policies) {
+  const groups = new Map();
+  for (const p of policies) {
+    const src = p._srcintf || '?';
+    const dst = p._dstintf || '?';
+    const key = `${src} → ${dst}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(p);
+  }
+  return groups;
+}
+
+function buildSequenceAggregated(policies) {
+  const groups = new Map();
+  for (const p of policies) {
+    const srcKey = p.srcSubnets ? p.srcSubnets.slice().sort().join('|') : (p.srcSubnet || '');
+    const dstKey = p.dstTarget || '';
+    const svcKey = serviceSetKey(p);
+    const key = `${srcKey}||${dstKey}||${svcKey}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(p);
+  }
+  const result = [];
+  for (const [, members] of groups) {
+    if (members.length === 1) {
+      result.push(members[0]);
+      continue;
+    }
+    // Aggregate: merge interfaces, sum sessions
+    const srcintfs = [...new Set(members.map(m => m._srcintf).filter(Boolean))];
+    const dstintfs = [...new Set(members.map(m => m._dstintf).filter(Boolean))];
+    const totalSessions = members.reduce((s, m) => s + (m.sessions || 0), 0);
+    const memberIndices = members.map(m => deployState.analyzed.indexOf(m));
+    const agg = {
+      ...members[0],
+      _srcintfList: srcintfs,
+      _dstintfList: dstintfs,
+      _srcintf: srcintfs.join(', ') || '?',
+      _dstintf: dstintfs.join(', ') || '?',
+      sessions: totalSessions,
+      srcHosts: [...new Set(members.flatMap(m => m.srcHosts || []))].sort(),
+      dstHosts: [...new Set(members.flatMap(m => m.dstHosts || []))].sort(),
+      _sequenceCount: members.length,
+      _sequenceMembers: memberIndices,
+      _isAggregated: true,
+    };
+    result.push(agg);
+  }
+  return result;
 }
 
 // Regroupe les policies ayant le même policyId, en sous-groupant par ensemble de services.
@@ -1782,6 +2439,8 @@ function mergeByPolicyId(policies) {
       const isWan         = subGroup.some(p => p._isWan || p.dstType === 'public');
       const dstTarget     = isWan ? 'all' : base.dstTarget;
       const allDstIPs     = [...new Set(subGroup.flatMap(p => p.dstIPs || (p.dstType === 'public' ? [p.dstTarget] : [])).filter(t => t && t !== 'all'))];
+      const allSrcHosts   = [...new Set(subGroup.flatMap(p => p.srcHosts || []))].sort();
+      const allDstHosts   = [...new Set(subGroup.flatMap(p => p.dstHosts || []))].sort();
       const multiSrc      = srcSubnets.length > 1;
 
       // Chercher un groupe d'adresses existant contenant ces subnets
@@ -1815,6 +2474,8 @@ function mergeByPolicyId(policies) {
         policyIds:    allPolicyIds,
         dstIPs:       allDstIPs,
         _dstIPs:      allDstIPs,
+        srcHosts:     allSrcHosts,
+        dstHosts:     allDstHosts,
         _mergedCount: subGroup.length,
         _isWan:       isWan,
         _nat:         isWan,
@@ -1903,6 +2564,11 @@ async function analyzeDeployPolicies() {
   let rawPolicies;
   try {
     rawPolicies = await api('/api/policies');
+    // Append pending denied flows if any
+    if (deployState._pendingDenied && deployState._pendingDenied.length > 0) {
+      rawPolicies = rawPolicies.concat(deployState._pendingDenied);
+      deployState._pendingDenied = null;
+    }
     setLoadingText(`${rawPolicies.length} policies récupérées — analyse en cours…`);
     setLoadingPct(30);
   } catch (err) { resetAnalyzeBtn(); alert(err.message); return; }
@@ -1931,6 +2597,7 @@ async function analyzeDeployPolicies() {
     const respData = await r.json();
     analyzed = respData.analyzed;
     deployState.addrGroups = respData.addrGroups || {};
+    deployState.warnings   = respData.warnings  || [];
     setLoadingPct(95);
     setLoadingText('Enrichissement des données…');
   } catch (err) { resetAnalyzeBtn(); alert(err.message); return; }
@@ -1945,8 +2612,8 @@ async function analyzeDeployPolicies() {
   // Enrich with frontend display fields
   analyzed = analyzed.map(p => {
     const isWan = p.dstType === 'public' || p.dstTarget === 'all';
-    const rawSrcIntf = p.analysis?.srcIface || ifaces.find(i => i.name === p.srcintf)?.name || '';
-    const rawDstIntf = p.analysis?.dstIface || ifaces.find(i => i.name === p.dstintf)?.name || '';
+    const rawSrcIntf = p.analysis?.srcZone || p.analysis?.srcIface || ifaces.find(i => i.name === p.srcintf)?.name || '';
+    const rawDstIntf = p.analysis?.dstZone || p.analysis?.dstIface || ifaces.find(i => i.name === p.dstintf)?.name || '';
     return {
       ...p,
       srcAddrExists: p.analysis?.srcAddr?.found ?? false,
@@ -1989,6 +2656,15 @@ async function analyzeDeployPolicies() {
   } catch { /* non-bloquant */ }
 
   if (info) info.innerHTML = `${analyzed.length} policies${deniedNote} · `;
+
+  deployState.wizardStep = 3;
+  // Update wizard progress indicators
+  document.querySelectorAll('.wizard-step-indicator').forEach(ind => {
+    const s = +ind.dataset.step;
+    ind.classList.toggle('active', s <= 3);
+    ind.classList.toggle('done', s < 3);
+  });
+  document.querySelectorAll('.wizard-connector').forEach((c, i) => c.classList.toggle('done', i < 2));
 
   resetAnalyzeBtn();
   renderDeployPolicies(analyzed);
@@ -2059,7 +2735,7 @@ function countMissingObjects(analyzed) {
     if (!p.analysis?.srcAddr?.found && p.analysis?.srcAddr?.cidr) addrs.add(p.analysis.srcAddr.cidr);
     if (!p.analysis?.dstAddr?.found && p.analysis?.dstAddr?.cidr && p.analysis?.dstAddr?.cidr !== 'all') addrs.add(p.analysis.dstAddr.cidr);
     for (const svc of p.analysis?.services || []) {
-      if (!svc.found && svc.port) svcs.add(`${svc.port}/${svc.proto}`);
+      if (!svc.found) svcs.add(svc.port ? `${svc.port}/${svc.proto}` : svc.label || svc.name);
     }
   }
   return { addrs: addrs.size, svcs: svcs.size };
@@ -2068,12 +2744,16 @@ function countMissingObjects(analyzed) {
 function renderDeployPolicies(analyzed, resetPage = true) {
   if (resetPage) deployState.page = 1;
 
-  const total     = analyzed.length;
+  // In sequence mode, aggregate before pagination
+  const viewMode = deployState.viewMode || 'flat';
+  const displayList = viewMode === 'sequence' ? buildSequenceAggregated(analyzed) : analyzed;
+
+  const total     = displayList.length;
   const pageSize  = deployState.pageSize;
   const pages     = Math.ceil(total / pageSize);
   const page      = Math.min(deployState.page, pages || 1);
   const start     = (page - 1) * pageSize;
-  const pageSlice = analyzed.slice(start, start + pageSize);
+  const pageSlice = displayList.slice(start, start + pageSize);
 
   const ifaces   = (deployState.interfaces?.interfaces || []).map(i => i.name);
   const zones    = (deployState.interfaces?.zones || []);
@@ -2088,11 +2768,21 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     ...ifaceNotInZone.map(n => `<option value="${escHtml(n)}">${escHtml(n)}</option>`),
   ].join('');
 
-  // rows use global index (start + local index) so state arrays stay consistent
-  const rows = pageSlice.map((p, localIdx) => {
-    const idx = start + localIdx;
-    const srcAddrExists = p.srcAddrExists;
-    const dstAddrExists = p.dstAddrExists;
+  // rows use the real index in deployState.analyzed (not filtered position)
+  // so that data-idx always references the correct policy in the full array
+  const maxSessions = displayList.reduce((m, pp) => Math.max(m, pp.sessions || 0), 1);
+
+  function buildRow(p) {
+    const isAgg = p._isAggregated;
+    const idx = isAgg ? (p._sequenceMembers?.[0] ?? -1) : deployState.analyzed.indexOf(p);
+
+    // Checkbox: for aggregated rows, use a special data-seq-members attribute
+    const chkChecked = isAgg
+      ? p._sequenceMembers.every(i => deployState.selected.has(i))
+      : deployState.selected.has(idx);
+    const chkAttr = isAgg
+      ? `class="deploy-chk deploy-chk-seq" data-seq-members="${p._sequenceMembers.join(',')}" ${chkChecked ? 'checked' : ''}`
+      : `class="deploy-chk" data-idx="${idx}" ${chkChecked ? 'checked' : ''}`;
 
     // Pour les policies multi-src : afficher le groupe d'adresses (existant ou à créer)
     let srcAddrCell;
@@ -2117,51 +2807,115 @@ function renderDeployPolicies(analyzed, resetPage = true) {
       return `<span data-tip="${escHtml(tip)}" style="display:inline-flex;align-items:center;gap:2px"><span class="match-miss">✗</span><input class="deploy-name-input sm" data-idx="${idx}" data-field="svc_${svc.port}_${svc.proto}" value="${escHtml(svc.suggestedName || '')}" placeholder="FF_SVC_..."></span>`;
     }).join(' ');
 
-    // Badge indiquant la source de la détection des interfaces
-    const srcLabels = { route: '🛣 route', sdwan: '⚡ sdwan', subnet: '🔗 subnet', 'wan-candidate': '📡 wan', auto: '' };
-    const srcSrcBadge = p._srcIfaceSource && p._srcIfaceSource !== 'auto' && p._srcintf
-      ? `<span class="intf-src-badge ${p._srcIfaceSource}" title="Détecté via : ${srcLabels[p._srcIfaceSource] || p._srcIfaceSource}">${srcLabels[p._srcIfaceSource]}</span>`
-      : '';
-    const srcSel = `<span style="display:inline-flex;align-items:center;gap:4px">${srcSrcBadge}<select class="deploy-iface-sel" data-idx="${idx}" data-field="_srcintf">
-      <option value="">— auto —</option>${allIfOpts}
-    </select></span>`;
-    // Badge dstintf
-    const dstSrcBadge = p._dstIfaceSource && p._dstIfaceSource !== 'auto' && p._dstintf
-      ? `<span class="intf-src-badge ${p._dstIfaceSource}" title="Détecté via : ${srcLabels[p._dstIfaceSource] || p._dstIfaceSource}">${srcLabels[p._dstIfaceSource]}</span>`
-      : '';
-
-    const dstSel = `<span style="display:inline-flex;align-items:center;gap:4px">${dstSrcBadge}<select class="deploy-iface-sel" data-idx="${idx}" data-field="_dstintf">
-      <option value="">— auto —</option>${allIfOpts}
-    </select></span>`;
+    // Interface cells: read-only for aggregated policies, dropdown otherwise
+    let srcSel, dstSel, sameIntfWarn = '';
+    if (isAgg) {
+      const srcList = (p._srcintfList || []).join(', ') || '?';
+      const dstList = (p._dstintfList || []).join(', ') || '?';
+      srcSel = `<span class="mono seq-intf" title="${escHtml(srcList)}">${escHtml(srcList)}</span>`;
+      dstSel = `<span class="mono seq-intf" title="${escHtml(dstList)}">${escHtml(dstList)}</span>`;
+    } else {
+      const srcLabels = { route: '🛣 route', sdwan: '⚡ sdwan', subnet: '🔗 subnet', 'wan-candidate': '📡 wan', auto: '' };
+      const srcSrcBadge = p._srcIfaceSource && p._srcIfaceSource !== 'auto' && p._srcintf
+        ? `<span class="intf-src-badge ${p._srcIfaceSource}" title="Détecté via : ${srcLabels[p._srcIfaceSource] || p._srcIfaceSource}">${srcLabels[p._srcIfaceSource]}</span>`
+        : '';
+      srcSel = `<span style="display:inline-flex;align-items:center;gap:4px">${srcSrcBadge}<select class="deploy-iface-sel" data-idx="${idx}" data-field="_srcintf">
+        <option value="">— auto —</option>${allIfOpts}
+      </select></span>`;
+      const dstSrcBadge = p._dstIfaceSource && p._dstIfaceSource !== 'auto' && p._dstintf
+        ? `<span class="intf-src-badge ${p._dstIfaceSource}" title="Détecté via : ${srcLabels[p._dstIfaceSource] || p._dstIfaceSource}">${srcLabels[p._dstIfaceSource]}</span>`
+        : '';
+      dstSel = `<span style="display:inline-flex;align-items:center;gap:4px">${dstSrcBadge}<select class="deploy-iface-sel" data-idx="${idx}" data-field="_dstintf">
+        <option value="">— auto —</option>${allIfOpts}
+      </select></span>`;
+      sameIntfWarn = (p._srcintf && p._dstintf && p._srcintf === p._dstintf)
+        ? `<span class="intf-warn" title="⚠ srcintf = dstintf : policy possiblement invalide">⚠</span>` : '';
+    }
 
     const dirBadge = p._isWan
       ? `<span class="dir-badge wan" title="Vers internet">WAN</span>`
       : `<span class="dir-badge lan" title="Trafic interne">LAN</span>`;
     const natChk = `<input type="checkbox" class="deploy-nat-chk" data-idx="${idx}" ${p._nat ? 'checked' : ''} title="NAT pour cette policy">`;
-    const sameIntfWarn = (p._srcintf && p._dstintf && p._srcintf === p._dstintf)
-      ? `<span class="intf-warn" title="⚠ srcintf = dstintf : policy possiblement invalide">⚠</span>` : '';
 
+    // Impact / sessions
+    const barW = Math.round(((p.sessions || 0) / maxSessions) * 100);
+
+    // Warnings (conflict with existing policies)
+    const rowWarnings = (deployState.warnings || []).filter(w => w.generatedIdx === idx);
+    const warnBadge = rowWarnings.length > 0
+      ? `<span class="conflict-warn" title="${escHtml(rowWarnings.map(w => w.detail).join('\n'))}">${rowWarnings[0].type === 'duplicate' ? '⚠ doublon' : '⚠ conflit'}</span>`
+      : '';
+
+    const seqBadge = isAgg ? ` <span class="seq-badge" title="${p._sequenceCount} policies agrégées en 1 séquence">×${p._sequenceCount} seq</span>` : '';
+    // Badge hôtes /32 pour source
+    const srcHosts = p.srcHosts || [];
+    const use32Src = p._use32Src || false;
+    let srcHostsHtml = '';
+    if (srcHosts.length > 1) {
+      const rows = srcHosts.slice(0, 50).map(h => `<div class="mono" style="font-size:10px;color:var(--text2)">${escHtml(h)}</div>`).join('');
+      const moreH = srcHosts.length > 50 ? `<div style="font-size:10px;color:var(--text2)">+${srcHosts.length - 50} autres…</div>` : '';
+      srcHostsHtml = `<button class="btn-sm src-hosts-badge ${use32Src ? 'hosts-active' : ''}" data-idx="${idx}" style="font-size:9px;padding:1px 5px;margin-top:2px">${srcHosts.length} hôtes${use32Src ? ' /32 ✓' : ' ▾'}</button>
+      <div class="hosts-detail" id="src-hosts-${idx}" style="display:none;margin-top:4px;max-height:130px;overflow-y:auto;background:var(--bg0);border:1px solid var(--border);border-radius:4px;padding:4px 8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;padding-bottom:4px;border-bottom:1px solid var(--border)">
+          <span style="font-size:10px;font-weight:600">${srcHosts.length} hôtes réels</span>
+          <button class="btn-sm btn-use32" data-idx="${idx}" data-type="src" style="font-size:9px">${use32Src ? '↩ /24' : '⇒ /32'}</button>
+        </div>
+        ${rows}${moreH}
+      </div>`;
+    }
     const srcSubnetCell = p.srcSubnets && p.srcSubnets.length > 1
-      ? p.srcSubnets.map(s => `<span class="mono" style="display:block;font-size:11px">${escHtml(s)}</span>`).join('')
-      : `<span class="mono">${escHtml(p.srcSubnet)}${p._mergedCount > 1 ? ` <span class="merge-badge" title="${p._mergedCount} policies fusionnées">×${p._mergedCount}</span>` : ''}</span>`;
+      ? `<div>${p.srcSubnets.map(s => `<span class="mono" style="display:block;font-size:11px">${escHtml(s)}</span>`).join('')}</div>${srcHostsHtml}`
+      : `<div><span class="mono">${escHtml(p.srcSubnet)}${p._mergedCount > 1 ? ` <span class="merge-badge" title="${p._mergedCount} policies fusionnées">×${p._mergedCount}</span>` : ''}</span></div>${srcHostsHtml}`;
+
+    // Tags
+    const tags = p._tags || [];
+    const tagBadges = tags.map(t => `<span class="policy-tag" data-idx="${idx}" data-tag="${escHtml(t)}">${escHtml(t)} ✕</span>`).join('');
+    const tagOpts = POLICY_TAGS.filter(t => !tags.includes(t)).map(t => `<option value="${escHtml(t)}">${escHtml(t)}</option>`).join('');
+    const tagCell = `<td class="tag-cell">${tagBadges}<select class="tag-select" data-idx="${idx}"><option value="">+</option>${tagOpts}<option value="__custom">autre…</option></select></td>`;
 
     return `
-      <tr class="deploy-policy-row" data-idx="${idx}">
-        <td><input type="checkbox" class="deploy-chk" data-idx="${idx}" ${deployState.selected.has(idx) ? 'checked' : ''}></td>
+      <tr class="deploy-policy-row ${isAgg ? 'seq-row' : ''}" data-idx="${idx}" ${isAgg ? `data-seq-members="${p._sequenceMembers.join(',')}"` : ''}>
+        <td class="${isAgg ? '' : 'drag-handle'}" ${isAgg ? '' : `draggable="true" data-idx="${idx}"`} data-expert>${isAgg ? '' : '⠿'}</td>
+        <td><input type="checkbox" ${chkAttr}></td>
         <td>${dirBadge}</td>
-        <td style="text-align:center">${natChk}</td>
-        <td>${policyIdsCell(p)}</td>
-        <td>${srcSubnetCell}</td>
+        <td style="text-align:center" data-expert>${natChk}</td>
+        <td data-expert>${policyIdsCell(p)}</td>
+        <td>${warnBadge}${seqBadge}${srcSubnetCell}</td>
         <td>${srcAddrCell}</td>
         <td>${srcSel}</td>
         <td>${dstTargetCell(p, idx)}</td>
         <td>${dstAddrCell}</td>
         <td>${dstSel}${sameIntfWarn}</td>
         <td>${svcCells || '<span style="color:var(--text2)">–</span>'}</td>
+        <td class="impact-cell" data-expert><div class="impact-bar" style="width:${barW}%"></div><span class="impact-val">${fmtNum(p.sessions || 0)}</span></td>
+        ${tagCell.replace('<td class="tag-cell">', '<td class="tag-cell" data-expert>')}
       </tr>`;
-  }).join('');
+  }
 
-  const selCount = [...deployState.selected].filter(i => i >= 0 && i < total).length;
+  // Build rows — for interface-pair mode, insert group headers
+  let rows;
+  if (viewMode === 'interface-pair') {
+    const groups = groupByInterfacePair(pageSlice);
+    const parts = [];
+    for (const [pair, members] of groups) {
+      const collapsed = deployState.collapsedGroups.has(pair);
+      parts.push(`<tr class="intf-pair-header ${collapsed ? 'collapsed' : ''}" data-pair="${escHtml(pair)}">
+        <td colspan="14"><div class="intf-pair-header-inner">
+          <span class="intf-pair-toggle">${collapsed ? '▸' : '▾'}</span>
+          <span class="intf-pair-name">${escHtml(pair)}</span>
+          <span class="intf-pair-count">${members.length} policy(s)</span>
+        </div></td>
+      </tr>`);
+      if (!collapsed) {
+        for (const p of members) parts.push(buildRow(p));
+      }
+    }
+    rows = parts.join('');
+  } else {
+    rows = pageSlice.map(p => buildRow(p)).join('');
+  }
+
+  const selCount = [...deployState.selected].filter(i => i >= 0 && i < deployState.analyzed.length).length;
   const hasMerge = analyzed.some(p => p._mergedCount > 1);
 
   const paginationBar = pages > 1 ? `
@@ -2181,18 +2935,25 @@ function renderDeployPolicies(analyzed, resetPage = true) {
   const body = el('deploy-policy-body');
   body.innerHTML = `
     <div style="margin-bottom:8px;font-size:12px;color:var(--text2);display:flex;align-items:center;gap:12px">
-      <span>${total} policy(s) · <strong>${selCount}</strong> sélectionnées${hasMerge ? ' · <span style="color:var(--accent2)">⚡ fusion active</span>' : ''}${missingNote}</span>
+      <span>${total} policy(s) · <strong>${selCount}</strong> sélectionnées${hasMerge ? ' · <span style="color:var(--accent2)">⚡ fusion active</span>' : ''}${missingNote}${
+        (deployState.warnings || []).length > 0
+          ? ` · <span style="color:var(--warn)">⚠ ${deployState.warnings.length} conflit${deployState.warnings.length > 1 ? 's' : ''}</span>`
+          : ''
+      }</span>
     </div>
     ${paginationBar}
     <div style="overflow-x:auto">
       <table class="deploy-policy-table">
         <thead><tr>
+          <th style="width:20px" data-expert></th>
           <th><input type="checkbox" id="chk-all-deploy"></th>
-          <th>Dir.</th><th>NAT</th>
-          <th title="Policy(s) FortiGate dans lesquelles ce trafic a été observé">Policy</th>
+          <th>Dir.</th><th data-expert>NAT</th>
+          <th data-expert title="Policy(s) FortiGate dans lesquelles ce trafic a été observé">Policy</th>
           <th>Src Subnet</th><th>Src addr</th><th>Src intf*</th>
           <th>Dst Target</th><th>Dst addr</th><th>Dst intf*</th>
           <th>Services</th>
+          <th data-expert title="Sessions observées dans les logs">Sessions</th>
+          <th data-expert>Tags</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
@@ -2212,10 +2973,26 @@ function renderDeployPolicies(analyzed, resetPage = true) {
   document.querySelectorAll('.pg-next') .forEach(b => b.addEventListener('click', () => goPage(Math.min(pages, page + 1))));
   document.querySelectorAll('.pg-last') .forEach(b => b.addEventListener('click', () => goPage(pages)));
 
+  // Update missing objects button
+  const missingBtn = el('btn-missing-objects');
+  if (missingBtn) {
+    const missing = collectMissingObjects();
+    missingBtn.style.display = missing.total > 0 ? '' : 'none';
+    missingBtn.textContent = `⚠ ${missing.total} objet${missing.total > 1 ? 's' : ''} manquant${missing.total > 1 ? 's' : ''}`;
+  }
+
   // Wire select-all (current page only)
   const chkAll = el('chk-all-deploy');
   if (chkAll) {
-    const pageIdxs = pageSlice.map((_, li) => start + li);
+    // Collect all real indices on this page (including aggregated members)
+    const pageIdxs = [];
+    for (const p of pageSlice) {
+      if (p._isAggregated && p._sequenceMembers) {
+        pageIdxs.push(...p._sequenceMembers);
+      } else {
+        pageIdxs.push(deployState.analyzed.indexOf(p));
+      }
+    }
     chkAll.checked = pageIdxs.every(i => deployState.selected.has(i));
     chkAll.indeterminate = !chkAll.checked && pageIdxs.some(i => deployState.selected.has(i));
     chkAll.addEventListener('change', e => {
@@ -2226,11 +3003,32 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     });
   }
 
-  // Wire row checkboxes
+  // Wire row checkboxes (normal + sequence aggregated)
   document.querySelectorAll('.deploy-chk').forEach(chk => {
     chk.addEventListener('change', e => {
-      const i = +e.target.dataset.idx;
-      e.target.checked ? deployState.selected.add(i) : deployState.selected.delete(i);
+      if (e.target.dataset.seqMembers) {
+        // Aggregated row: toggle all members
+        const members = e.target.dataset.seqMembers.split(',').map(Number);
+        members.forEach(i => {
+          e.target.checked ? deployState.selected.add(i) : deployState.selected.delete(i);
+        });
+      } else {
+        const i = +e.target.dataset.idx;
+        e.target.checked ? deployState.selected.add(i) : deployState.selected.delete(i);
+      }
+    });
+  });
+
+  // Wire interface-pair header collapse/expand
+  document.querySelectorAll('.intf-pair-header').forEach(header => {
+    header.addEventListener('click', () => {
+      const pair = header.dataset.pair;
+      if (deployState.collapsedGroups.has(pair)) {
+        deployState.collapsedGroups.delete(pair);
+      } else {
+        deployState.collapsedGroups.add(pair);
+      }
+      renderDeployPolicies(filterDeployPolicies(), false);
     });
   });
 
@@ -2262,6 +3060,37 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     });
   });
 
+  // Wire src/dst hosts badges (show/hide dropdown)
+  document.querySelectorAll('.src-hosts-badge').forEach(btn => {
+    btn.addEventListener('click', e => {
+      const idx = e.currentTarget.dataset.idx;
+      const detail = document.getElementById(`src-hosts-${idx}`);
+      if (detail) detail.style.display = detail.style.display === 'none' ? '' : 'none';
+    });
+  });
+  document.querySelectorAll('.dst-hosts-badge').forEach(btn => {
+    btn.addEventListener('click', e => {
+      const idx = e.currentTarget.dataset.idx;
+      const detail = document.getElementById(`dst-hosts-${idx}`);
+      if (detail) detail.style.display = detail.style.display === 'none' ? '' : 'none';
+    });
+  });
+
+  // Wire /32 toggle buttons (per-policy)
+  document.querySelectorAll('.btn-use32').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const idx  = +e.currentTarget.dataset.idx;
+      const type = e.currentTarget.dataset.type; // 'src' | 'dst'
+      const p    = deployState.analyzed[idx];
+      if (!p) return;
+      if (type === 'src') p._use32Src = !p._use32Src;
+      else                p._use32Dst = !p._use32Dst;
+      renderDeployPolicies(filterDeployPolicies(), false);
+    });
+  });
+
+  // Wire global /32 toggle
   // Wire name inputs + interface selects
   document.querySelectorAll('.deploy-name-input, .deploy-iface-sel, .deploy-name-sel').forEach(inp => {
     inp.addEventListener('input', e => {
@@ -2282,22 +3111,99 @@ function renderDeployPolicies(analyzed, resetPage = true) {
       if (auto) inp.value = auto;
     }
   });
+
+  // ── F7: Drag & drop reorder ──
+  let dragSrcIdx = null;
+  document.querySelectorAll('.drag-handle').forEach(handle => {
+    const row = handle.closest('tr');
+    handle.addEventListener('dragstart', e => {
+      dragSrcIdx = +handle.dataset.idx;
+      row.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+    });
+    handle.addEventListener('dragend', () => { row.classList.remove('dragging'); });
+  });
+  document.querySelectorAll('.deploy-policy-row').forEach(row => {
+    row.addEventListener('dragover', e => { e.preventDefault(); row.classList.add('drag-over'); });
+    row.addEventListener('dragleave', () => row.classList.remove('drag-over'));
+    row.addEventListener('drop', e => {
+      e.preventDefault();
+      row.classList.remove('drag-over');
+      const targetIdx = +row.dataset.idx;
+      if (dragSrcIdx === null || dragSrcIdx === targetIdx) return;
+      const arr = deployState.analyzed;
+      const srcPos = arr.findIndex((_, i) => i === dragSrcIdx);
+      const tgtPos = arr.findIndex((_, i) => i === targetIdx);
+      if (srcPos < 0 || tgtPos < 0) return;
+      const [moved] = arr.splice(srcPos, 1);
+      arr.splice(tgtPos, 0, moved);
+      deployState.selected = new Set(arr.map((_, i) => i));
+      renderDeployPolicies(filterDeployPolicies(), false);
+    });
+  });
+
+  // ── F8: Tags ──
+  document.querySelectorAll('.tag-select').forEach(sel => {
+    sel.addEventListener('change', e => {
+      const idx = +e.target.dataset.idx;
+      const p = deployState.analyzed[idx];
+      if (!p) return;
+      let val = e.target.value;
+      if (val === '__custom') {
+        val = prompt('Nom du tag :');
+        if (!val) { e.target.value = ''; return; }
+      }
+      if (!val) return;
+      if (!p._tags) p._tags = [];
+      if (!p._tags.includes(val)) p._tags.push(val);
+      renderDeployPolicies(filterDeployPolicies(), false);
+    });
+  });
+  document.querySelectorAll('.policy-tag').forEach(tag => {
+    tag.addEventListener('click', e => {
+      const idx = +e.target.dataset.idx;
+      const tagName = e.target.dataset.tag;
+      const p = deployState.analyzed[idx];
+      if (p?._tags) p._tags = p._tags.filter(t => t !== tagName);
+      renderDeployPolicies(filterDeployPolicies(), false);
+    });
+  });
 }
 
 async function generateDeployConf() {
   if (!deployState.analyzed) return;
-  const selectedPolicies = deployState.analyzed
-    .filter((_, i) => deployState.selected.has(i))
-    .map(p => ({
+
+  let selectedPolicies;
+  if (deployState.viewMode === 'sequence') {
+    // In sequence mode, aggregate selected policies before sending
+    const selected = deployState.analyzed.filter((_, i) => deployState.selected.has(i));
+    const aggregated = buildSequenceAggregated(selected);
+    selectedPolicies = aggregated.map(p => ({
       ...p,
-      srcintf:      p._srcintf || p.srcintf || '',
-      dstintf:      p._dstintf || p.dstintf || '',
+      srcintf:      p._isAggregated ? (p._srcintfList || []) : (p._srcintf || p.srcintf || ''),
+      dstintf:      p._isAggregated ? (p._dstintfList || []) : (p._dstintf || p.dstintf || ''),
       srcAddrName:  p._srcAddrName,
       dstAddrName:  p._dstAddrName,
       policyName:   p._policyName,
       nat:          p._nat ?? p._isWan,
       srcAddrNames: p.srcAddrNames || null,
+      tags:         p._tags || [],
     }));
+  } else {
+    selectedPolicies = deployState.analyzed
+      .filter((_, i) => deployState.selected.has(i))
+      .map(p => ({
+        ...p,
+        srcintf:      p._srcintf || p.srcintf || '',
+        dstintf:      p._dstintf || p.dstintf || '',
+        srcAddrName:  p._srcAddrName,
+        dstAddrName:  p._dstAddrName,
+        policyName:   p._policyName,
+        nat:          p._nat ?? p._isWan,
+        srcAddrNames: p.srcAddrNames || null,
+        tags:         p._tags || [],
+      }));
+  }
 
   if (!selectedPolicies.length) { alert('Sélectionnez au moins une policy'); return; }
 
@@ -2383,9 +3289,21 @@ el('btn-clear-session')?.addEventListener('click', () => {
   state.stats   = null;
   state.meta    = null;
   el('sidebar-session').style.display = 'none';
-  ['badge-flows','badge-groups','badge-policies'].forEach(id => { el(id).textContent = '–'; });
+  ['badge-flows','badge-groups','badge-policies','badge-analyse','badge-polices'].forEach(id => { const b = el(id); if (b) b.textContent = '–'; });
   navigateTo('dashboard');
 });
+
+// Expert mode toggle
+document.body.classList.toggle('simple-mode', !state.expertMode);
+const expertToggle = el('expert-mode-toggle');
+if (expertToggle) {
+  expertToggle.checked = state.expertMode;
+  expertToggle.addEventListener('change', e => {
+    state.expertMode = e.target.checked;
+    localStorage.setItem('ff-expert', e.target.checked ? '1' : '0');
+    document.body.classList.toggle('simple-mode', !state.expertMode);
+  });
+}
 
 // Start
 navigateTo('dashboard');

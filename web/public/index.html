@@ -21,31 +21,32 @@
       <div class="nav-item active" data-view="dashboard">
         <span class="nav-icon">◈</span> Dashboard
       </div>
-      <div class="nav-item" data-view="flows">
-        <span class="nav-icon">≡</span> Flux
-        <span class="nav-badge" id="badge-flows">–</span>
+      <div class="nav-item" data-view="analyse">
+        <span class="nav-icon">≡</span> Analyse
+        <span class="nav-badge" id="badge-analyse">–</span>
       </div>
-      <div class="nav-item" data-view="matrix">
-        <span class="nav-icon">⊞</span> Matrice
-      </div>
-      <div class="nav-item" data-view="groups">
-        <span class="nav-icon">⊕</span> Groupes
-        <span class="nav-badge" id="badge-groups">–</span>
-      </div>
-      <div class="nav-item" data-view="policies">
+      <div class="nav-item" data-view="polices">
         <span class="nav-icon">◎</span> Policies
-        <span class="nav-badge" id="badge-policies">–</span>
-      </div>
-      <div class="nav-item" data-view="ports">
-        <span class="nav-icon">◫</span> Ports
-      </div>
-      <div class="nav-item" data-view="consilpolicies">
-        <span class="nav-icon">⚡</span> Conseils
-        <span class="nav-badge accent" id="badge-consilpolicies">–</span>
+        <span class="nav-badge" id="badge-polices">–</span>
       </div>
       <div class="nav-item" data-view="deploy">
         <span class="nav-icon">⊙</span> Déploiement
       </div>
+    </div>
+
+    <!-- Hidden badge targets for backward compat -->
+    <span id="badge-flows" style="display:none"></span>
+    <span id="badge-groups" style="display:none"></span>
+    <span id="badge-policies" style="display:none"></span>
+    <span id="badge-consilpolicies" style="display:none"></span>
+    <span id="badge-denied" style="display:none"></span>
+
+    <div class="sidebar-mode-toggle">
+      <label class="mode-toggle-label">
+        <input type="checkbox" id="expert-mode-toggle">
+        <span class="mode-toggle-knob"></span>
+        Mode expert
+      </label>
     </div>
 
     <div id="sidebar-session" class="sidebar-session" style="display:none">

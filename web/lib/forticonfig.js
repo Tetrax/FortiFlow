@@ -201,16 +201,24 @@ function parseFortiConfig(text) {
   const sdwanEnabled  = sdwanMembers.length > 0;
   // Virtual interface/zone name used in policies for SD-WAN traffic
   // FortiOS 6.x: "virtual-wan-link", FortiOS 7.x: zone name (often "virtual-wan-link" or custom)
+  // Parse ALL SDWAN zone names from config system sdwan > config zone
+  const sdwanZoneNames = (() => {
+    if (!sdwanEnabled) return [];
+    const zonesBlock = text.match(/config system sdwan[\s\S]*?config zone([\s\S]*?)^\s*end/m);
+    if (!zonesBlock) return [];
+    const names = [];
+    for (const m of zonesBlock[1].matchAll(/edit\s+"?([^\s"]+)"?/g)) names.push(m[1]);
+    return names;
+  })();
+  // Default SDWAN zone: prefer zone that has members assigned (set zone "X" in members)
   const sdwanZoneName = (() => {
     if (!sdwanEnabled) return null;
-    // 7.x: look for first zone name under system sdwan
-    const m = text.match(/config system sdwan[\s\S]*?config zone([\s\S]*?)(?:^\s*end\s*$)/m);
-    if (m) {
-      const zm = m[1].match(/edit\s+"?([^\s"]+)"?/);
+    const membersBlock = text.match(/config system sdwan[\s\S]*?config members([\s\S]*?)^\s*end/m);
+    if (membersBlock) {
+      const zm = membersBlock[1].match(/set zone\s+"?([^\s"]+)"?/);
       if (zm) return zm[1];
     }
-    // 6.x fallback
-    return 'virtual-wan-link';
+    return sdwanZoneNames[0] || 'virtual-wan-link';
   })();
 
   // ── Addresses ──
@@ -243,6 +251,36 @@ function parseFortiConfig(text) {
       tcpPorts: parsePorts(props['tcp-portrange'] || ''),
       udpPorts: parsePorts(props['udp-portrange'] || ''),
     };
+  }
+
+  // ── Service groups ──
+  const rawSvcGroups = extractSection(lines, 'firewall service group');
+  const serviceGroups = {};
+  for (const [name, props] of Object.entries(rawSvcGroups)) {
+    const members = (props.member || '').match(/"([^"]+)"/g)?.map(m => m.replace(/"/g, ''))
+                    || (props.member || '').split(/\s+/).filter(Boolean).map(m => m.replace(/^"|"$/g, ''));
+    serviceGroups[name] = { name, members };
+  }
+
+  // ── Existing firewall policies ──
+  const rawPolicies = extractSection(lines, 'firewall policy');
+  const existingPolicies = [];
+  const parseMultiVal = (val) => (val || '').match(/"([^"]+)"/g)?.map(m => m.replace(/"/g, ''))
+                                 || (val || '').split(/\s+/).filter(Boolean).map(v => v.replace(/^"|"$/g, ''));
+  for (const [editId, props] of Object.entries(rawPolicies)) {
+    existingPolicies.push({
+      policyid:  parseInt(editId, 10) || editId,
+      name:      (props.name || '').replace(/^"|"$/g, ''),
+      srcintf:   parseMultiVal(props.srcintf),
+      dstintf:   parseMultiVal(props.dstintf),
+      srcaddr:   parseMultiVal(props.srcaddr),
+      dstaddr:   parseMultiVal(props.dstaddr),
+      service:   parseMultiVal(props.service),
+      action:    (props.action || 'deny').replace(/^"|"$/g, ''),
+      nat:       props.nat === 'enable',
+      status:    (props.status || 'enable').replace(/^"|"$/g, ''),
+      comments:  (props.comments || '').replace(/^"|"$/g, ''),
+    });
   }
 
   // ── Interfaces ──
@@ -281,6 +319,28 @@ function parseFortiConfig(text) {
     zones[name] = { name, members, isWan: allWan };
   }
 
+  // ── SDWAN zones (config system sdwan > config members: set interface / set zone) ──
+  // These are NOT in config system zone, so we parse them separately
+  const sdwanMembersBlock = text.match(/config system sdwan[\s\S]*?config members([\s\S]*?)^\s*end/m);
+  if (sdwanMembersBlock) {
+    // Split by "edit N" to get individual member entries
+    const entries = sdwanMembersBlock[1].split(/^\s*edit\s+\d+/m).filter(Boolean);
+    for (const entry of entries) {
+      const ifaceM = entry.match(/set interface\s+"?([^\s"]+)"?/);
+      const zoneM  = entry.match(/set zone\s+"?([^\s"]+)"?/);
+      if (ifaceM && zoneM) {
+        const ifaceName = ifaceM[1];
+        const zoneName  = zoneM[1];
+        if (!zones[zoneName]) {
+          zones[zoneName] = { name: zoneName, members: [], isWan: true };
+        }
+        if (!zones[zoneName].members.includes(ifaceName)) {
+          zones[zoneName].members.push(ifaceName);
+        }
+      }
+    }
+  }
+
   // ── Routes statiques ──
   const staticRoutes = parseStaticRoutes(lines);
 
@@ -307,7 +367,7 @@ function parseFortiConfig(text) {
   // OSPF detection — vérifie la présence de networks configurés
   const hasOspf = /config router ospf[\s\S]*?set router-id\s+\d/m.test(text);
 
-  return { addresses, addressGroups, customServices, interfaces, zones, sdwanMembers, sdwanEnabled, sdwanIntfName, hasVdom, staticRoutes, fullRoutes, hasBgp, hasOspf };
+  return { addresses, addressGroups, customServices, serviceGroups, interfaces, zones, sdwanMembers, sdwanZoneNames, sdwanEnabled, sdwanIntfName, hasVdom, staticRoutes, fullRoutes, hasBgp, hasOspf, existingPolicies };
 }
 
 // ─── Static routes + BGP parser ──────────────────────────────────────────────
@@ -506,6 +566,54 @@ function findAddressGroup(cidrs, addressGroups, addresses) {
   return null;
 }
 
+function findServiceGroup(serviceNames, serviceGroups) {
+  if (!serviceNames || serviceNames.length < 2 || !serviceGroups) return null;
+  const sorted = [...serviceNames].sort();
+  for (const [name, grp] of Object.entries(serviceGroups)) {
+    const grpSorted = [...grp.members].sort();
+    if (grpSorted.length === sorted.length && grpSorted.every((m, i) => m === sorted[i])) {
+      return { name, members: grp.members };
+    }
+  }
+  return null;
+}
+
+function validateAgainstExisting(generatedPolicies, existingPolicies) {
+  if (!existingPolicies || existingPolicies.length === 0) return [];
+  const warnings = [];
+  for (let gi = 0; gi < generatedPolicies.length; gi++) {
+    const gen = generatedPolicies[gi];
+    const genSrc = new Set(Array.isArray(gen.srcaddr) ? gen.srcaddr : [gen.srcAddrName].filter(Boolean));
+    const genDst = new Set(Array.isArray(gen.dstaddr) ? gen.dstaddr : [gen.dstAddrName].filter(Boolean));
+    const genSvc = new Set(gen.serviceNames || []);
+    if (genSrc.size === 0 || genDst.size === 0) continue;
+
+    for (const exist of existingPolicies) {
+      if (exist.status === 'disable') continue;
+      const exSrc = new Set(exist.srcaddr);
+      const exDst = new Set(exist.dstaddr);
+      const exSvc = new Set(exist.service);
+
+      const srcOverlap = [...genSrc].some(s => exSrc.has(s));
+      const dstOverlap = [...genDst].some(d => exDst.has(d));
+      if (!srcOverlap || !dstOverlap) continue;
+
+      const svcExact = genSvc.size === exSvc.size && [...genSvc].every(s => exSvc.has(s));
+      const svcOverlap = [...genSvc].some(s => exSvc.has(s)) || exSvc.has('ALL') || genSvc.has('ALL');
+
+      if (svcExact) {
+        warnings.push({ generatedIdx: gi, type: 'duplicate', existingPolicyId: exist.policyid,
+          detail: `Doublon: policy ${exist.policyid} (${exist.srcaddr.join(',')} → ${exist.dstaddr.join(',')}, ${exist.service.join(',')})` });
+      } else if (svcOverlap) {
+        const common = [...genSvc].filter(s => exSvc.has(s));
+        warnings.push({ generatedIdx: gi, type: 'overlap', existingPolicyId: exist.policyid,
+          detail: `Chevauchement: policy ${exist.policyid} — services communs: ${common.join(', ') || 'ALL'}` });
+      }
+    }
+  }
+  return warnings;
+}
+
 function findService(port, protoName, customServices) {
   const p     = parseInt(port, 10);
   const isUdp = /^(udp|17)$/i.test(String(protoName));
@@ -570,18 +678,23 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
           portHint = p.ports.slice(0, 8).map(pt => `${proto}: ${pt}`).join(', ') + ' (observé)';
         }
 
+        // Ignorer les services ISDB (ni predefined ni custom) — on ne garde
+        // que les vrais services avec port/proto connu
+        if (!knownPredef && !customMatch) continue;
         serviceItems.push({
           label: svc,
-          found: !!(knownPredef || customMatch),
+          found: true,
           name:  svc,
-          source: knownPredef ? 'predefined' : (customMatch ? 'custom' : null),
+          source: knownPredef ? 'predefined' : 'custom',
           suggestedName: svc,
           isNamed: true,
           portHint,
         });
       }
-    } else {
-      for (const port of (p.ports || []).slice(0, 10)) {
+    }
+    // Fallback sur les ports bruts si aucun service nommé reconnu (ou tous ISDB)
+    if (serviceItems.length === 0 && p.ports?.length) {
+      for (const port of p.ports.slice(0, 10)) {
         const match = findService(port, protoLabel, customServices);
         serviceItems.push({
           label: `${port}/${protoLabel}`,
@@ -687,7 +800,18 @@ function generateConfig(selectedPolicies, opts = {}) {
     natEnabled     = false,
     actionVerb     = 'accept',
     logTraffic     = 'all',
+    addresses      = {},
+    zones          = {},
   } = opts;
+
+  // Helper: resolve a /32 host — use existing object if found, otherwise suggest a new name
+  function resolveHost32(ip, customNames) {
+    const cidr = `${ip}/32`;
+    const existing = findAddress(cidr, addresses);
+    if (existing.found) return { name: existing.name, isNew: false };
+    const name = customNames?.[ip] || `FF_HOST_${ip.replace(/\./g, '_')}`;
+    return { name, isNew: true };
+  }
 
   const newAddresses  = new Map();  // cidr → name
   const newAddrGroups = new Map();  // grpName → [memberNames]
@@ -699,7 +823,21 @@ function generateConfig(selectedPolicies, opts = {}) {
 
     // Source address(es) — peut être multiple si policy-grouped merge
     let srcAddrName, srcAddrNames, srcAddrGrpName;
-    if (p.srcAddrNames && p.srcAddrNames.length > 1) {
+    if (p._use32Src && p.srcHosts && p.srcHosts.length > 0) {
+      // Mode /32 : utiliser les hôtes réels plutôt que le subnet /24
+      const hostNames = p.srcHosts.map(h => {
+        const { name, isNew } = resolveHost32(h, p._srcHostNames);
+        if (isNew) newAddresses.set(`${h}/32`, name);
+        return name;
+      });
+      if (hostNames.length === 1) {
+        srcAddrName = hostNames[0];
+      } else {
+        srcAddrGrpName = p._srcAddrName || `FF_HOSTS_${suggestAddrName(p.srcSubnet)}`;
+        srcAddrNames = hostNames;
+        newAddrGroups.set(srcAddrGrpName, hostNames);
+      }
+    } else if (p.srcAddrNames && p.srcAddrNames.length > 1) {
       // Multi-src : enregistrer chaque adresse + créer un groupe
       srcAddrNames = p.srcAddrNames;
       const subnets = p.srcSubnets || [p.srcSubnet];
@@ -722,7 +860,21 @@ function generateConfig(selectedPolicies, opts = {}) {
 
     // Destination address
     let dstAddrName;
-    if (analysis.dstAddr.found) {
+    if (p._use32Dst && p.dstHosts && p.dstHosts.length > 0) {
+      // Mode /32 : utiliser les hôtes réels pour la destination
+      const hostNames = p.dstHosts.map(h => {
+        const { name, isNew } = resolveHost32(h, p._dstHostNames);
+        if (isNew) newAddresses.set(`${h}/32`, name);
+        return name;
+      });
+      if (hostNames.length === 1) {
+        dstAddrName = hostNames[0];
+      } else {
+        const grpName = p._dstAddrName || `FF_HOSTS_${suggestAddrName(p.dstTarget)}`;
+        newAddrGroups.set(grpName, hostNames);
+        dstAddrName = grpName;
+      }
+    } else if (analysis.dstAddr.found) {
       dstAddrName = analysis.dstAddr.name;
     } else {
       dstAddrName = p.dstAddrName || analysis.dstAddr.suggestedName;
@@ -746,8 +898,24 @@ function generateConfig(selectedPolicies, opts = {}) {
     }
     if (serviceNames.length === 0) serviceNames.push('ALL');
 
-    const srcintf  = p.srcintf  || analysis.srcZone  || analysis.srcIface  || defaultSrcIntf;
-    const dstintf  = p.dstintf  || analysis.dstZone  || analysis.dstIface  || defaultDstIntf;
+    // Check if services match an existing service group
+    const svcGrpMatch = opts.serviceGroups ? findServiceGroup(serviceNames, opts.serviceGroups) : null;
+    if (svcGrpMatch) {
+      serviceNames.length = 0;
+      serviceNames.push(svcGrpMatch.name);
+    }
+
+    // Resolve interface name → zone name (belt-and-suspenders: also resolve on server side)
+    const _resolveZone = (name) => {
+      if (!name) return name;
+      for (const z of Object.values(zones)) {
+        if (z.members && z.members.includes(name)) return z.name;
+      }
+      return name;
+    };
+    const _resolveZoneArr = (v) => Array.isArray(v) ? v.map(_resolveZone) : _resolveZone(v);
+    const srcintf  = _resolveZoneArr(p.srcintf  || analysis.srcZone  || analysis.srcIface  || defaultSrcIntf);
+    const dstintf  = _resolveZoneArr(p.dstintf  || analysis.dstZone  || analysis.dstIface  || defaultDstIntf);
     const useNat   = p.nat != null ? p.nat : (natEnabled || p.dstType === 'public');
 
     policyBlocks.push({
@@ -757,13 +925,13 @@ function generateConfig(selectedPolicies, opts = {}) {
       srcSubnet:   p.srcSubnets ? p.srcSubnets.join(', ') : p.srcSubnet,
       dstTarget:   p.dstTarget,
       serviceDesc: p.serviceDesc, sessions: p.sessions,
+      tags: p.tags || [],
     });
   }
 
   // ── Build CLI output ──
   const L = [];
   const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
-  L.push(`# FortiFlow Policy Export — ${ts}`);
   L.push(`# Policies: ${policyBlocks.length}  |  Adresses: ${newAddresses.size}  |  Groupes: ${newAddrGroups.size}  |  Services: ${newServices.size}`);
   L.push('');
 
@@ -779,7 +947,6 @@ function generateConfig(selectedPolicies, opts = {}) {
       L.push(`    edit "${name}"`);
       L.push(`        set type ipmask`);
       L.push(`        set subnet ${ip} ${mask}`);
-      L.push(`        set comment "Created by FortiFlow"`);
       L.push(`    next`);
     }
     L.push('end');
@@ -795,7 +962,6 @@ function generateConfig(selectedPolicies, opts = {}) {
       const memberStr = members.map(m => `"${m}"`).join(' ');
       L.push(`    edit "${grpName}"`);
       L.push(`        set member ${memberStr}`);
-      L.push(`        set comment "Created by FortiFlow"`);
       L.push(`    next`);
     }
     L.push('end');
@@ -812,7 +978,6 @@ function generateConfig(selectedPolicies, opts = {}) {
       L.push(`    edit "${svc.name}"`);
       L.push(`        set protocol TCP/UDP/SCTP`);
       L.push(`        set ${isUdp ? 'udp' : 'tcp'}-portrange ${svc.port}`);
-      L.push(`        set comment "Created by FortiFlow"`);
       L.push(`    next`);
     }
     L.push('end');
@@ -828,8 +993,14 @@ function generateConfig(selectedPolicies, opts = {}) {
       const svcStr = pol.serviceNames.map(s => `"${s}"`).join(' ');
       L.push(`    edit 0`);
       L.push(`        set name "${pol.name}"`);
-      L.push(`        set srcintf "${pol.srcintf}"`);
-      L.push(`        set dstintf "${pol.dstintf}"`);
+      const srcintfStr = Array.isArray(pol.srcintf)
+        ? pol.srcintf.map(i => `"${i}"`).join(' ')
+        : `"${pol.srcintf}"`;
+      const dstintfStr = Array.isArray(pol.dstintf)
+        ? pol.dstintf.map(i => `"${i}"`).join(' ')
+        : `"${pol.dstintf}"`;
+      L.push(`        set srcintf ${srcintfStr}`);
+      L.push(`        set dstintf ${dstintfStr}`);
       const srcAddrStr = pol.srcAddrNames && pol.srcAddrNames.length > 1
         ? pol.srcAddrNames.map(n => `"${n}"`).join(' ')
         : `"${pol.srcAddrName}"`;
@@ -840,7 +1011,9 @@ function generateConfig(selectedPolicies, opts = {}) {
       L.push(`        set schedule "always"`);
       if (pol.nat) L.push(`        set nat enable`);
       L.push(`        set logtraffic ${logTraffic}`);
-      L.push(`        set comments "FortiFlow: ${pol.srcSubnet} -> ${pol.dstTarget} | ${pol.serviceDesc || ''} | ${pol.sessions || 0} sess"`);
+      if (pol.tags && pol.tags.length > 0) {
+        L.push(`        set comments "${pol.tags.join(', ')}"`);
+      }
       L.push(`    next`);
     }
     L.push('end');
@@ -853,10 +1026,12 @@ module.exports = {
   parseFortiConfig,
   analyzePolicies,
   generateConfig,
+  validateAgainstExisting,
   findInterfaceForSubnet,
   detectWanCandidates,
   findAddress,
   findAddressGroup,
   findService,
+  findServiceGroup,
   PREDEFINED,
 };
