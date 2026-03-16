@@ -333,8 +333,12 @@ function parseFortiConfig(text) {
         cidr = `${network}/${prefix}`;
       }
     }
-    const isTunnel = props.type === 'tunnel';
-    const isWan = !isTunnel && !isPrivateIP(props.ip?.split(' ')[0] || '') && !!props.ip;
+    // Tunnel = explicitement type tunnel ET sans vlanid (les sous-interfaces VLAN ne sont jamais des tunnels)
+    const isTunnel = props.type === 'tunnel' && !props.vlanid;
+    // WAN : priorité au set role (lan/dmz/undefined = LAN, wan = WAN), sinon détection par IP
+    const roleLan = props.role === 'lan' || props.role === 'dmz';
+    const roleWan = props.role === 'wan';
+    const isWan = !isTunnel && (roleWan || (!roleLan && !isPrivateIP(props.ip?.split(' ')[0] || '') && !!props.ip));
     interfaces[name] = {
       name,
       rawIp:  props.ip || '',
