@@ -3,3 +3,5 @@ web/node_modules/
 *.log
 .env
 uploads/
+ideabox/
+CLAUDE.md
