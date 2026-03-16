@@ -5,39 +5,64 @@
 // Gère la profondeur pour ignorer les sections imbriquées sans les parser.
 
 function extractSection(lines, sectionName) {
-  const result = {};
-  let depth     = 0;
-  let inTarget  = false;
-  let editName  = null;
-  let editProps = {};
+  return extractSections(lines, [sectionName])[sectionName];
+}
+
+// Multi-section single-pass scanner.
+// Accepts an array of section names, returns { [sectionName]: { [editName]: props } }
+function extractSections(lines, sectionNames) {
+  // Build a Set for O(1) lookup
+  const wanted   = new Set(sectionNames);
+  // Results map: sectionName → {}
+  const results  = {};
+  for (const name of sectionNames) results[name] = {};
+
+  let depth      = 0;
+  let inTarget   = null;  // current section name being parsed, or null
+  let editName   = null;
+  let editProps  = {};
 
   for (const rawLine of lines) {
     const t = rawLine.trim();
     if (!t || t.startsWith('#')) continue;
 
-    if (!inTarget) {
-      if (t === `config ${sectionName}`) { inTarget = true; depth = 1; }
-      continue;
-    }
-
-    if (t.startsWith('config ')) { depth++; continue; }
-    if (t === 'end') {
-      if (--depth === 0) {
-        if (editName !== null) result[editName] = editProps;
-        break;
+    if (inTarget === null) {
+      // Not inside any target section — check for a new target header
+      if (t.startsWith('config ')) {
+        const candidate = t.slice(7).trim();
+        if (wanted.has(candidate)) {
+          inTarget  = candidate;
+          depth     = 1;
+          editName  = null;
+          editProps = {};
+        }
       }
       continue;
     }
 
-    if (depth !== 1) continue; // ignorer le contenu des sections imbriquées
+    // Inside a target section
+    if (t.startsWith('config ')) { depth++; continue; }
+    if (t === 'end') {
+      if (--depth === 0) {
+        // Flush last pending edit (some sections have no 'next' before 'end')
+        if (editName !== null) results[inTarget][editName] = editProps;
+        inTarget  = null;
+        editName  = null;
+        editProps = {};
+      }
+      continue;
+    }
+
+    if (depth !== 1) continue; // ignore nested section content
 
     if (t.startsWith('edit ')) {
-      if (editName !== null) result[editName] = editProps;
+      if (editName !== null) results[inTarget][editName] = editProps;
       editName  = t.slice(5).trim().replace(/^"|"$/g, '');
       editProps = {};
     } else if (t === 'next') {
-      if (editName !== null) result[editName] = editProps;
-      editName = null; editProps = {};
+      if (editName !== null) results[inTarget][editName] = editProps;
+      editName  = null;
+      editProps = {};
     } else if (t.startsWith('set ')) {
       const rest = t.slice(4).trim();
       const idx  = rest.indexOf(' ');
@@ -48,7 +73,8 @@ function extractSection(lines, sectionName) {
       }
     }
   }
-  return result;
+
+  return results;
 }
 
 // ─── Subnet helpers ───────────────────────────────────────────────────────────
@@ -190,11 +216,21 @@ function isPrivateIP(ip) {
 function parseFortiConfig(text) {
   const lines = text.split(/\r?\n/);
 
-  // ── Raw section extraction ──
-  const rawAddresses  = extractSection(lines, 'firewall address');
-  const rawCustomSvcs = extractSection(lines, 'firewall service custom');
-  const rawInterfaces = extractSection(lines, 'system interface');
-  const rawZones      = extractSection(lines, 'system zone');
+  // ── Raw section extraction — single pass for all sections ──
+  const _sections     = extractSections(lines, [
+    'firewall address',
+    'firewall service custom',
+    'firewall addrgrp',
+    'firewall service group',
+    'firewall policy',
+    'system interface',
+    'system zone',
+    'router static',
+  ]);
+  const rawAddresses  = _sections['firewall address'];
+  const rawCustomSvcs = _sections['firewall service custom'];
+  const rawInterfaces = _sections['system interface'];
+  const rawZones      = _sections['system zone'];
 
   // SDWAN : FortiOS 7.x uses "system sdwan", 6.x uses "system virtual-wan-link"
   const sdwanMembers  = parseSdwanMembers(text);
@@ -232,7 +268,7 @@ function parseFortiConfig(text) {
   }
 
   // ── Address groups ──
-  const rawAddrGroups = extractSection(lines, 'firewall addrgrp');
+  const rawAddrGroups = _sections['firewall addrgrp'];
   const addressGroups = {};
   for (const [name, props] of Object.entries(rawAddrGroups)) {
     const members = (props.member || '').split(/\s+/)
@@ -254,7 +290,7 @@ function parseFortiConfig(text) {
   }
 
   // ── Service groups ──
-  const rawSvcGroups = extractSection(lines, 'firewall service group');
+  const rawSvcGroups = _sections['firewall service group'];
   const serviceGroups = {};
   for (const [name, props] of Object.entries(rawSvcGroups)) {
     const members = (props.member || '').match(/"([^"]+)"/g)?.map(m => m.replace(/"/g, ''))
@@ -263,7 +299,7 @@ function parseFortiConfig(text) {
   }
 
   // ── Existing firewall policies ──
-  const rawPolicies = extractSection(lines, 'firewall policy');
+  const rawPolicies = _sections['firewall policy'];
   const existingPolicies = [];
   const parseMultiVal = (val) => (val || '').match(/"([^"]+)"/g)?.map(m => m.replace(/"/g, ''))
                                  || (val || '').split(/\s+/).filter(Boolean).map(v => v.replace(/^"|"$/g, ''));
@@ -342,7 +378,7 @@ function parseFortiConfig(text) {
   }
 
   // ── Routes statiques ──
-  const staticRoutes = parseStaticRoutes(lines);
+  const staticRoutes = parseStaticRoutes(_sections['router static']);
 
   // ── BGP ──
   const bgpNeighborIntfs = parseBgpNeighborIntfs(text);
@@ -374,8 +410,11 @@ function parseFortiConfig(text) {
 
 // Extrait config router static → [{dst, device, gateway, distance, priority}]
 // Trié par préfixe le plus long d'abord, puis distance croissante
-function parseStaticRoutes(lines) {
-  const rawRoutes = extractSection(lines, 'router static');
+// rawRoutes peut être un objet pré-extrait (depuis extractSections) ou un tableau de lignes (compat)
+function parseStaticRoutes(rawRoutesOrLines) {
+  const rawRoutes = Array.isArray(rawRoutesOrLines)
+    ? extractSection(rawRoutesOrLines, 'router static')
+    : (rawRoutesOrLines || {});
   const routes = [];
 
   for (const [, props] of Object.entries(rawRoutes)) {

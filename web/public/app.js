@@ -22,6 +22,10 @@ let _renderTarget = null;
 // Helpers
 // ═══════════════════════════════════════════════════════════════
 
+function escHtml(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
 const fmtNum = n => (n ?? 0).toLocaleString('fr-FR');
 
 function fmtBytes(n) {
@@ -131,7 +135,7 @@ async function handleUpload(file) {
 }
 
 function showError(msg) {
-  el(_renderTarget || 'content').innerHTML = `<div class="alert alert-error">⚠ ${msg}</div>`;
+  el(_renderTarget || 'content').innerHTML = `<div class="alert alert-error">⚠ ${escHtml(msg)}</div>`;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -399,7 +403,7 @@ async function loadFlows() {
     renderFlowsTable(data);
     renderPagination(data);
   } catch (e) {
-    wrap.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
+    wrap.innerHTML = `<div class="alert alert-error">${escHtml(e.message)}</div>`;
   }
 }
 
@@ -522,7 +526,7 @@ async function matrix() {
         el('matrix-wrap').innerHTML = '<canvas id="matrix-canvas"></canvas>';
         renderMatrix(data, state.matrix.action);
       } catch (e) {
-        el('matrix-wrap').innerHTML = `<div class="alert alert-error">${e.message}</div>`;
+        el('matrix-wrap').innerHTML = `<div class="alert alert-error">${escHtml(e.message)}</div>`;
       }
     });
   });
@@ -531,7 +535,7 @@ async function matrix() {
     const data = await api(`/api/matrix?action=${state.matrix.action}`);
     renderMatrix(data, state.matrix.action);
   } catch (e) {
-    el('matrix-wrap').innerHTML = `<div class="alert alert-error">${e.message}</div>`;
+    el('matrix-wrap').innerHTML = `<div class="alert alert-error">${escHtml(e.message)}</div>`;
   }
 }
 
@@ -673,11 +677,11 @@ function renderMatrix(data, mode = 'accept') {
         const svcStr  = c.services?.length ? c.services.join(', ') : '–';
         const portStr = c.ports?.length    ? c.ports.join(', ')    : '–';
         tooltip.innerHTML = `
-          <div><span class="tt-src">${c.src}</span></div>
-          <div>→ <span class="tt-dst">${c.dst}</span></div>
+          <div><span class="tt-src">${escHtml(c.src)}</span></div>
+          <div>→ <span class="tt-dst">${escHtml(c.dst)}</span></div>
           <div>Sessions : <span class="tt-val">${fmtNum(c.count)}</span></div>
-          <div>Services : ${svcStr}</div>
-          <div>Ports : ${portStr}</div>`;
+          <div>Services : ${escHtml(svcStr)}</div>
+          <div>Ports : ${escHtml(portStr)}</div>`;
         tooltip.style.display = 'block';
         tooltip.style.left    = (e.clientX + 16) + 'px';
         tooltip.style.top     = (e.clientY - 10) + 'px';
@@ -731,7 +735,7 @@ async function groups() {
     const data = await api('/api/subnets');
     renderGroups(data);
   } catch (e) {
-    el(_renderTarget || 'content').innerHTML = `<div class="alert alert-error">${e.message}</div>`;
+    el(_renderTarget || 'content').innerHTML = `<div class="alert alert-error">${escHtml(e.message)}</div>`;
   }
 }
 
@@ -819,7 +823,7 @@ async function toggleHostPanel(subnetB64, subnet) {
       panel.innerHTML = renderHostPanel(hosts, subnet);
       panel.dataset.loaded = '1';
     } catch (e) {
-      panel.innerHTML = `<div class="alert alert-error" style="margin:8px 16px">Erreur : ${e.message}</div>`;
+      panel.innerHTML = `<div class="alert alert-error" style="margin:8px 16px">Erreur : ${escHtml(e.message)}</div>`;
     }
   } else {
     panel.style.display = 'block';
@@ -910,7 +914,7 @@ async function loadPolicies() {
     if (policesEl) policesEl.textContent = fmtNum(data.length);
     renderPoliciesTable(data);
   } catch (e) {
-    wrap.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
+    wrap.innerHTML = `<div class="alert alert-error">${escHtml(e.message)}</div>`;
   }
 }
 
@@ -966,10 +970,6 @@ function renderPoliciesTable(policies) {
     </div>`;
 }
 
-function escHtml(s) {
-  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}
-
 // ═══════════════════════════════════════════════════════════════
 // Policy drill-down (détail IPs individuelles)
 // ═══════════════════════════════════════════════════════════════
@@ -1001,7 +1001,7 @@ async function togglePolicyDrill(idx, srcB64, dstB64) {
     content.innerHTML = renderPolicyDrillTable(data.data, srcSubnet, dstTarget);
     content.dataset.loaded = '1';
   } catch (e) {
-    content.innerHTML = `<div class="alert alert-error">Erreur : ${e.message}</div>`;
+    content.innerHTML = `<div class="alert alert-error">Erreur : ${escHtml(e.message)}</div>`;
   }
 }
 window.togglePolicyDrill = togglePolicyDrill;
@@ -1052,7 +1052,7 @@ async function ports() {
     const data = await api('/api/ports');
     renderPorts(data);
   } catch (e) {
-    el(_renderTarget || 'content').innerHTML = `<div class="alert alert-error">${e.message}</div>`;
+    el(_renderTarget || 'content').innerHTML = `<div class="alert alert-error">${escHtml(e.message)}</div>`;
   }
 }
 
@@ -1135,7 +1135,7 @@ async function loadConsilPolicies() {
     el('badge-consilpolicies').textContent = fmtNum(data.stats.totalCons);
     renderConsilPolicies(data);
   } catch (e) {
-    wrap.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
+    wrap.innerHTML = `<div class="alert alert-error">${escHtml(e.message)}</div>`;
   }
 }
 
@@ -1280,7 +1280,7 @@ async function toggleCpDrill(idx, srcB64, dstB64) {
     content.innerHTML = renderCpDrillTable(allFlows, srcSubnets, dstTargets);
     content.dataset.loaded = '1';
   } catch (e) {
-    content.innerHTML = `<div class="alert alert-error">Erreur : ${e.message}</div>`;
+    content.innerHTML = `<div class="alert alert-error">Erreur : ${escHtml(e.message)}</div>`;
   }
 }
 window.toggleCpDrill = toggleCpDrill;
@@ -1434,7 +1434,7 @@ async function denied() {
     });
 
   } catch (err) {
-    el(_renderTarget || 'content').innerHTML = `<div class="empty-state" style="padding:40px;color:var(--danger)">${err.message}</div>`;
+    el(_renderTarget || 'content').innerHTML = `<div class="empty-state" style="padding:40px;color:var(--danger)">${escHtml(err.message)}</div>`;
   }
 }
 
@@ -1783,6 +1783,9 @@ async function polices() {
 const POLICY_TAGS = ['critique', 'temporaire', 'a valider', 'segmentation'];
 
 async function deploy() {
+  // Reset delegation flag — deploy() replaces the entire DOM tree
+  resetDeployTableWiring();
+
   // Auto-advance wizard based on state
   if (deployState.fortiConfig && deployState.wizardStep < 2) deployState.wizardStep = 2;
   if (deployState.analyzed && deployState.wizardStep < 3) deployState.wizardStep = 3;
@@ -1969,6 +1972,14 @@ async function deploy() {
 
   // Analyze
   el('btn-analyze')?.addEventListener('click', analyzeDeployPolicies);
+
+  // Global NAT toggle → apply only to WAN rows (wired here since opt-nat is stable in deploy DOM)
+  el('opt-nat')?.addEventListener('change', e => {
+    document.querySelectorAll('.deploy-nat-chk').forEach(chk => {
+      const p = deployState.analyzed?.[+chk.dataset.idx];
+      if (p?._isWan) { chk.checked = e.target.checked; p._nat = e.target.checked; }
+    });
+  });
 
   // Dropdown toggle + close-on-outside
   el('deploy-merge-bar')?.addEventListener('click', e => {
@@ -2741,6 +2752,201 @@ function countMissingObjects(analyzed) {
   return { addrs: addrs.size, svcs: svcs.size };
 }
 
+// ── F7: Event delegation on the deploy table ──────────────────────────────────
+// Called once after the deploy-policy-body container exists.
+// Installs delegated listeners on the stable container — avoids re-attaching
+// hundreds of listeners on every render.
+
+let _deployTableWired = false;
+let _dragSrcIdx       = null;
+
+function wireDeployTable() {
+  const container = el('deploy-policy-body');
+  if (!container || _deployTableWired) return;
+  _deployTableWired = true;
+
+  // ── change: .deploy-chk ──
+  container.addEventListener('change', e => {
+    const chk = e.target.closest('.deploy-chk');
+    if (!chk) return;
+    if (chk.dataset.seqMembers) {
+      const members = chk.dataset.seqMembers.split(',').map(Number);
+      members.forEach(i => {
+        chk.checked ? deployState.selected.add(i) : deployState.selected.delete(i);
+      });
+    } else {
+      const i = +chk.dataset.idx;
+      chk.checked ? deployState.selected.add(i) : deployState.selected.delete(i);
+    }
+  });
+
+  // ── change: .deploy-nat-chk ──
+  container.addEventListener('change', e => {
+    if (!e.target.matches('.deploy-nat-chk')) return;
+    deployState.analyzed[+e.target.dataset.idx]._nat = e.target.checked;
+  });
+
+  // ── change: .deploy-iface-sel ──
+  container.addEventListener('change', e => {
+    if (!e.target.matches('.deploy-iface-sel')) return;
+    const { idx, field } = e.target.dataset;
+    deployState.analyzed[+idx][field] = e.target.value;
+  });
+
+  // ── change: .deploy-name-sel ──
+  container.addEventListener('change', e => {
+    if (!e.target.matches('.deploy-name-sel')) return;
+    const { idx, field } = e.target.dataset;
+    deployState.analyzed[+idx][field] = e.target.value;
+  });
+
+  // ── change: .tag-select ──
+  container.addEventListener('change', e => {
+    if (!e.target.matches('.tag-select')) return;
+    const idx = +e.target.dataset.idx;
+    const p = deployState.analyzed[idx];
+    if (!p) return;
+    let val = e.target.value;
+    if (val === '__custom') {
+      val = prompt('Nom du tag :');
+      if (!val) { e.target.value = ''; return; }
+    }
+    if (!val) return;
+    if (!p._tags) p._tags = [];
+    if (!p._tags.includes(val)) p._tags.push(val);
+    renderDeployPolicies(filterDeployPolicies(), false);
+  });
+
+  // ── input: .deploy-name-input ──
+  container.addEventListener('input', e => {
+    if (!e.target.matches('.deploy-name-input')) return;
+    const { idx, field } = e.target.dataset;
+    if (!field) return;
+    if (field.startsWith('svc_')) {
+      const parts = field.split('_'); // svc_PORT_PROTO
+      const policy = deployState.analyzed[+idx];
+      const svc = (policy?.services || []).find(s => String(s.port) === parts[1] && s.proto === parts[2]);
+      if (svc) svc.suggestedName = e.target.value;
+    } else {
+      if (deployState.analyzed[+idx]) deployState.analyzed[+idx][field] = e.target.value;
+    }
+  });
+
+  // ── click: .btn-use32 ──
+  container.addEventListener('click', e => {
+    const btn = e.target.closest('.btn-use32');
+    if (!btn) return;
+    e.stopPropagation();
+    const idx  = +btn.dataset.idx;
+    const type = btn.dataset.type; // 'src' | 'dst'
+    const p    = deployState.analyzed[idx];
+    if (!p) return;
+    if (type === 'src') p._use32Src = !p._use32Src;
+    else                p._use32Dst = !p._use32Dst;
+    renderDeployPolicies(filterDeployPolicies(), false);
+  });
+
+  // ── click: .src-hosts-badge and .dst-hosts-badge ──
+  container.addEventListener('click', e => {
+    const srcBadge = e.target.closest('.src-hosts-badge');
+    if (srcBadge) {
+      const idx    = srcBadge.dataset.idx;
+      const detail = document.getElementById(`src-hosts-${idx}`);
+      if (detail) detail.style.display = detail.style.display === 'none' ? '' : 'none';
+      return;
+    }
+    const dstBadge = e.target.closest('.dst-hosts-badge');
+    if (dstBadge) {
+      const idx    = dstBadge.dataset.idx;
+      const detail = document.getElementById(`dst-hosts-${idx}`);
+      if (detail) detail.style.display = detail.style.display === 'none' ? '' : 'none';
+    }
+  });
+
+  // ── click: .deploy-dst-detail-btn ──
+  container.addEventListener('click', e => {
+    const btn = e.target.closest('.deploy-dst-detail-btn');
+    if (!btn) return;
+    const idx    = btn.dataset.idx;
+    const detail = document.getElementById(`dst-detail-${idx}`);
+    if (!detail) return;
+    const open = detail.style.display !== 'none';
+    detail.style.display = open ? 'none' : '';
+    const ips = (deployState.analyzed[+idx]?._dstIPs || []).length;
+    btn.textContent = open ? `▸ ${ips} IPs` : '▾ fermer';
+  });
+
+  // ── click: .policy-tag (tag-remove) ──
+  container.addEventListener('click', e => {
+    const tag = e.target.closest('.policy-tag');
+    if (!tag) return;
+    const idx     = +tag.dataset.idx;
+    const tagName = tag.dataset.tag;
+    const p       = deployState.analyzed[idx];
+    if (p?._tags) p._tags = p._tags.filter(t => t !== tagName);
+    renderDeployPolicies(filterDeployPolicies(), false);
+  });
+
+  // ── click: .intf-pair-header (collapse/expand groups) ──
+  container.addEventListener('click', e => {
+    const header = e.target.closest('.intf-pair-header');
+    if (!header) return;
+    const pair = header.dataset.pair;
+    if (deployState.collapsedGroups.has(pair)) {
+      deployState.collapsedGroups.delete(pair);
+    } else {
+      deployState.collapsedGroups.add(pair);
+    }
+    renderDeployPolicies(filterDeployPolicies(), false);
+  });
+
+  // ── Drag & drop reorder (delegated on container) ──
+  container.addEventListener('dragstart', e => {
+    const handle = e.target.closest('.drag-handle');
+    if (!handle) return;
+    _dragSrcIdx = +handle.dataset.idx;
+    handle.closest('tr')?.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+  });
+  container.addEventListener('dragend', e => {
+    const handle = e.target.closest('.drag-handle');
+    if (handle) handle.closest('tr')?.classList.remove('dragging');
+  });
+  container.addEventListener('dragover', e => {
+    const row = e.target.closest('.deploy-policy-row');
+    if (!row) return;
+    e.preventDefault();
+    row.classList.add('drag-over');
+  });
+  container.addEventListener('dragleave', e => {
+    const row = e.target.closest('.deploy-policy-row');
+    if (row) row.classList.remove('drag-over');
+  });
+  container.addEventListener('drop', e => {
+    const row = e.target.closest('.deploy-policy-row');
+    if (!row) return;
+    e.preventDefault();
+    row.classList.remove('drag-over');
+    const targetIdx = +row.dataset.idx;
+    if (_dragSrcIdx === null || _dragSrcIdx === targetIdx) return;
+    const arr    = deployState.analyzed;
+    const srcPos = arr.findIndex((_, i) => i === _dragSrcIdx);
+    const tgtPos = arr.findIndex((_, i) => i === targetIdx);
+    if (srcPos < 0 || tgtPos < 0) return;
+    const [moved] = arr.splice(srcPos, 1);
+    arr.splice(tgtPos, 0, moved);
+    deployState.selected = new Set(arr.map((_, i) => i));
+    renderDeployPolicies(filterDeployPolicies(), false);
+  });
+}
+
+// Reset delegation flag when the deploy view is re-rendered from scratch
+// (deploy() replaces the whole DOM, so we must re-wire)
+function resetDeployTableWiring() {
+  _deployTableWired = false;
+  _dragSrcIdx       = null;
+}
+
 function renderDeployPolicies(analyzed, resetPage = true) {
   if (resetPage) deployState.page = 1;
 
@@ -2963,7 +3169,8 @@ function renderDeployPolicies(analyzed, resetPage = true) {
 
   el('deploy-step3-footer').style.display = '';
 
-  // Wire pagination buttons (both top and bottom bars)
+  // Wire pagination buttons (both top and bottom bars) — re-wired each render
+  // because page/pages values change and the buttons are recreated
   const goPage = (p) => {
     deployState.page = p;
     renderDeployPolicies(filterDeployPolicies(), false);
@@ -2981,10 +3188,9 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     missingBtn.textContent = `⚠ ${missing.total} objet${missing.total > 1 ? 's' : ''} manquant${missing.total > 1 ? 's' : ''}`;
   }
 
-  // Wire select-all (current page only)
+  // Wire select-all (current page only) — re-wired each render (pageIdxs change)
   const chkAll = el('chk-all-deploy');
   if (chkAll) {
-    // Collect all real indices on this page (including aggregated members)
     const pageIdxs = [];
     for (const p of pageSlice) {
       if (p._isAggregated && p._sequenceMembers) {
@@ -3003,171 +3209,15 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     });
   }
 
-  // Wire row checkboxes (normal + sequence aggregated)
-  document.querySelectorAll('.deploy-chk').forEach(chk => {
-    chk.addEventListener('change', e => {
-      if (e.target.dataset.seqMembers) {
-        // Aggregated row: toggle all members
-        const members = e.target.dataset.seqMembers.split(',').map(Number);
-        members.forEach(i => {
-          e.target.checked ? deployState.selected.add(i) : deployState.selected.delete(i);
-        });
-      } else {
-        const i = +e.target.dataset.idx;
-        e.target.checked ? deployState.selected.add(i) : deployState.selected.delete(i);
-      }
-    });
+  // Pre-select auto-detected values for interface selects — must happen after innerHTML set
+  body.querySelectorAll('.deploy-iface-sel').forEach(sel => {
+    const { idx, field } = sel.dataset;
+    const auto = deployState.analyzed[+idx]?.[field];
+    if (auto) sel.value = auto;
   });
 
-  // Wire interface-pair header collapse/expand
-  document.querySelectorAll('.intf-pair-header').forEach(header => {
-    header.addEventListener('click', () => {
-      const pair = header.dataset.pair;
-      if (deployState.collapsedGroups.has(pair)) {
-        deployState.collapsedGroups.delete(pair);
-      } else {
-        deployState.collapsedGroups.add(pair);
-      }
-      renderDeployPolicies(filterDeployPolicies(), false);
-    });
-  });
-
-  // Wire per-row NAT checkboxes
-  document.querySelectorAll('.deploy-nat-chk').forEach(chk => {
-    chk.addEventListener('change', e => {
-      deployState.analyzed[+e.target.dataset.idx]._nat = e.target.checked;
-    });
-  });
-
-  // Global NAT toggle → apply only to WAN rows
-  el('opt-nat')?.addEventListener('change', e => {
-    document.querySelectorAll('.deploy-nat-chk').forEach(chk => {
-      const p = deployState.analyzed[+chk.dataset.idx];
-      if (p?._isWan) { chk.checked = e.target.checked; p._nat = e.target.checked; }
-    });
-  });
-
-  // Wire dst detail toggle buttons
-  document.querySelectorAll('.deploy-dst-detail-btn').forEach(btn => {
-    btn.addEventListener('click', e => {
-      const idx = e.target.dataset.idx;
-      const detail = document.getElementById(`dst-detail-${idx}`);
-      if (!detail) return;
-      const open = detail.style.display !== 'none';
-      detail.style.display = open ? 'none' : '';
-      const ips = (deployState.analyzed[+idx]?._dstIPs || []).length;
-      e.target.textContent = open ? `▸ ${ips} IPs` : '▾ fermer';
-    });
-  });
-
-  // Wire src/dst hosts badges (show/hide dropdown)
-  document.querySelectorAll('.src-hosts-badge').forEach(btn => {
-    btn.addEventListener('click', e => {
-      const idx = e.currentTarget.dataset.idx;
-      const detail = document.getElementById(`src-hosts-${idx}`);
-      if (detail) detail.style.display = detail.style.display === 'none' ? '' : 'none';
-    });
-  });
-  document.querySelectorAll('.dst-hosts-badge').forEach(btn => {
-    btn.addEventListener('click', e => {
-      const idx = e.currentTarget.dataset.idx;
-      const detail = document.getElementById(`dst-hosts-${idx}`);
-      if (detail) detail.style.display = detail.style.display === 'none' ? '' : 'none';
-    });
-  });
-
-  // Wire /32 toggle buttons (per-policy)
-  document.querySelectorAll('.btn-use32').forEach(btn => {
-    btn.addEventListener('click', e => {
-      e.stopPropagation();
-      const idx  = +e.currentTarget.dataset.idx;
-      const type = e.currentTarget.dataset.type; // 'src' | 'dst'
-      const p    = deployState.analyzed[idx];
-      if (!p) return;
-      if (type === 'src') p._use32Src = !p._use32Src;
-      else                p._use32Dst = !p._use32Dst;
-      renderDeployPolicies(filterDeployPolicies(), false);
-    });
-  });
-
-  // Wire global /32 toggle
-  // Wire name inputs + interface selects
-  document.querySelectorAll('.deploy-name-input, .deploy-iface-sel, .deploy-name-sel').forEach(inp => {
-    inp.addEventListener('input', e => {
-      const { idx, field } = e.target.dataset;
-      if (field.startsWith('svc_')) {
-        const parts = field.split('_'); // svc_PORT_PROTO
-        const policy = deployState.analyzed[+idx];
-        const svc = (policy.services || []).find(s => String(s.port) === parts[1] && s.proto === parts[2]);
-        if (svc) svc.suggestedName = e.target.value;
-      } else {
-        deployState.analyzed[+idx][field] = e.target.value;
-      }
-    });
-    // pre-select auto-detected value
-    if (inp.tagName === 'SELECT') {
-      const { idx, field } = inp.dataset;
-      const auto = deployState.analyzed[+idx]?.[field];
-      if (auto) inp.value = auto;
-    }
-  });
-
-  // ── F7: Drag & drop reorder ──
-  let dragSrcIdx = null;
-  document.querySelectorAll('.drag-handle').forEach(handle => {
-    const row = handle.closest('tr');
-    handle.addEventListener('dragstart', e => {
-      dragSrcIdx = +handle.dataset.idx;
-      row.classList.add('dragging');
-      e.dataTransfer.effectAllowed = 'move';
-    });
-    handle.addEventListener('dragend', () => { row.classList.remove('dragging'); });
-  });
-  document.querySelectorAll('.deploy-policy-row').forEach(row => {
-    row.addEventListener('dragover', e => { e.preventDefault(); row.classList.add('drag-over'); });
-    row.addEventListener('dragleave', () => row.classList.remove('drag-over'));
-    row.addEventListener('drop', e => {
-      e.preventDefault();
-      row.classList.remove('drag-over');
-      const targetIdx = +row.dataset.idx;
-      if (dragSrcIdx === null || dragSrcIdx === targetIdx) return;
-      const arr = deployState.analyzed;
-      const srcPos = arr.findIndex((_, i) => i === dragSrcIdx);
-      const tgtPos = arr.findIndex((_, i) => i === targetIdx);
-      if (srcPos < 0 || tgtPos < 0) return;
-      const [moved] = arr.splice(srcPos, 1);
-      arr.splice(tgtPos, 0, moved);
-      deployState.selected = new Set(arr.map((_, i) => i));
-      renderDeployPolicies(filterDeployPolicies(), false);
-    });
-  });
-
-  // ── F8: Tags ──
-  document.querySelectorAll('.tag-select').forEach(sel => {
-    sel.addEventListener('change', e => {
-      const idx = +e.target.dataset.idx;
-      const p = deployState.analyzed[idx];
-      if (!p) return;
-      let val = e.target.value;
-      if (val === '__custom') {
-        val = prompt('Nom du tag :');
-        if (!val) { e.target.value = ''; return; }
-      }
-      if (!val) return;
-      if (!p._tags) p._tags = [];
-      if (!p._tags.includes(val)) p._tags.push(val);
-      renderDeployPolicies(filterDeployPolicies(), false);
-    });
-  });
-  document.querySelectorAll('.policy-tag').forEach(tag => {
-    tag.addEventListener('click', e => {
-      const idx = +e.target.dataset.idx;
-      const tagName = e.target.dataset.tag;
-      const p = deployState.analyzed[idx];
-      if (p?._tags) p._tags = p._tags.filter(t => t !== tagName);
-      renderDeployPolicies(filterDeployPolicies(), false);
-    });
-  });
+  // Wire event delegation on deploy-policy-body (idempotent — only installed once)
+  wireDeployTable();
 }
 
 async function generateDeployConf() {

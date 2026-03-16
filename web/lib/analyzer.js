@@ -8,12 +8,21 @@ try { geoip = require('geoip-lite'); } catch { geoip = null; }
 // ─── Geo lookup (cache par IP) ────────────────────────────────────────────────
 
 const geoCache = new Map();
+const GEO_CACHE_MAX = 5000;
+function geoCacheSet(ip, val) {
+  if (geoCache.size >= GEO_CACHE_MAX) {
+    // Supprime la première entrée (la plus ancienne)
+    geoCache.delete(geoCache.keys().next().value);
+  }
+  geoCache.set(ip, val);
+}
+
 function lookupCountry(ip) {
   if (!geoip || !ip) return '';
   if (geoCache.has(ip)) return geoCache.get(ip);
   const result = geoip.lookup(ip);
   const cc = result?.country || '';
-  geoCache.set(ip, cc);
+  geoCacheSet(ip, cc);
   return cc;
 }
 

@@ -54,19 +54,43 @@ function requireSession(req, res) {
 }
 
 function applyFlowFilters(flows, q) {
-  let r = flows;
-  if (q.srcip)     r = r.filter(f => f.srcip.includes(q.srcip));
-  if (q.dstip)     r = r.filter(f => f.dstip.includes(q.dstip));
-  if (q.port)      r = r.filter(f => f.dstport === q.port || f.srcport === q.port);
-  if (q.proto)     r = r.filter(f => f.proto === q.proto || f.protoName?.toLowerCase() === q.proto.toLowerCase());
-  if (q.action)    r = r.filter(f => f.action === q.action);
-  if (q.src_type)  r = r.filter(f => f.srcType === q.src_type);
-  if (q.dst_type)  r = r.filter(f => f.dstType === q.dst_type);
-  if (q.subnet)    r = r.filter(f => f.srcSubnet === q.subnet || f.dstSubnet === q.subnet);
-  // Drill-down filters: exact subnet match + destination target (subnet /24 ou IP publique)
-  if (q.srcSubnet) r = r.filter(f => f.srcSubnet === q.srcSubnet);
-  if (q.dstTarget) r = r.filter(f => f.dstSubnet === q.dstTarget || f.dstip === q.dstTarget);
-  return r;
+  // Single-pass filter: all conditions evaluated in one .filter() call
+  if (!q.srcip && !q.dstip && !q.port && !q.proto && !q.action &&
+      !q.src_type && !q.dst_type && !q.subnet && !q.srcSubnet && !q.dstTarget) {
+    return flows;
+  }
+  return flows.filter(f => {
+    if (q.srcip     && !f.srcip.includes(q.srcip))                                               return false;
+    if (q.dstip     && !f.dstip.includes(q.dstip))                                               return false;
+    if (q.port      && f.dstport !== q.port && f.srcport !== q.port)                             return false;
+    if (q.proto     && f.proto !== q.proto && f.protoName?.toLowerCase() !== q.proto.toLowerCase()) return false;
+    if (q.action    && f.action !== q.action)                                                     return false;
+    if (q.src_type  && f.srcType !== q.src_type)                                                  return false;
+    if (q.dst_type  && f.dstType !== q.dst_type)                                                  return false;
+    if (q.subnet    && f.srcSubnet !== q.subnet && f.dstSubnet !== q.subnet)                      return false;
+    if (q.srcSubnet && f.srcSubnet !== q.srcSubnet)                                               return false;
+    if (q.dstTarget && f.dstSubnet !== q.dstTarget && f.dstip !== q.dstTarget)                   return false;
+    return true;
+  });
+}
+
+// ─── CSV helper ───────────────────────────────────────────────────────────────
+
+function sendCsv(res, filename, rows, columns) {
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.write('\uFEFF'); // BOM for Excel
+  res.write(columns.join(',') + '\n');
+  for (const row of rows) {
+    const line = columns.map(c => {
+      let v = row[c];
+      if (Array.isArray(v)) v = v.join(';');
+      v = String(v ?? '');
+      return (v.includes(',') || v.includes(';')) ? `"${v.replace(/"/g, '""')}"` : v;
+    });
+    res.write(line.join(',') + '\n');
+  }
+  res.end();
 }
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
@@ -281,24 +305,8 @@ app.get('/api/export/consolidated-policies', (req, res) => {
   if (req.query.dst_type) raw = raw.filter(p => p.dstType === req.query.dst_type);
 
   const consolidated = consolidatePolicies(raw);
-
   const COLS = ['name','srcSubnets','dstTargets','dstTypeSummary','serviceDesc','ports','protos','sessions','action'];
-
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', 'attachment; filename="fortiflow_consolidated.csv"');
-  res.write('\uFEFF');
-  res.write(COLS.join(',') + '\n');
-
-  for (const p of consolidated) {
-    const row = COLS.map(c => {
-      let v = p[c];
-      if (Array.isArray(v)) v = v.join(';');
-      v = String(v ?? '');
-      return (v.includes(',') || v.includes(';')) ? `"${v.replace(/"/g, '""')}"` : v;
-    });
-    res.write(row.join(',') + '\n');
-  }
-  res.end();
+  sendCsv(res, 'fortiflow_consolidated.csv', consolidated, COLS);
 });
 
 // GET /api/ports — top 25 TCP + UDP destination ports
@@ -326,20 +334,7 @@ app.get('/api/export/flows', (req, res) => {
   const COLS = ['srcip','srcSubnet','srcType','dstip','dstSubnet','dstType',
                 'srcport','dstport','proto','protoName','action','service',
                 'srcintf','dstintf','policyid','count','sentBytes','rcvdBytes','totalBytes'];
-
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', 'attachment; filename="fortiflow_flows.csv"');
-  res.write('\uFEFF'); // BOM for Excel
-  res.write(COLS.join(',') + '\n');
-
-  for (const f of flows) {
-    const row = COLS.map(c => {
-      const v = String(f[c] ?? '');
-      return v.includes(',') ? `"${v.replace(/"/g, '""')}"` : v;
-    });
-    res.write(row.join(',') + '\n');
-  }
-  res.end();
+  sendCsv(res, 'fortiflow_flows.csv', flows, COLS);
 });
 
 // GET /api/export/policies — CSV download of policy suggestions
@@ -352,22 +347,7 @@ app.get('/api/export/policies', (req, res) => {
 
   // FortiGate-friendly CSV layout
   const COLS = ['name','srcSubnet','dstTarget','dstType','serviceDesc','ports','protos','sessions','action'];
-
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', 'attachment; filename="fortiflow_policies.csv"');
-  res.write('\uFEFF');
-  res.write(COLS.join(',') + '\n');
-
-  for (const p of policies) {
-    const row = COLS.map(c => {
-      let v = p[c];
-      if (Array.isArray(v)) v = v.join(';');
-      v = String(v ?? '');
-      return (v.includes(',') || v.includes(';')) ? `"${v.replace(/"/g, '""')}"` : v;
-    });
-    res.write(row.join(',') + '\n');
-  }
-  res.end();
+  sendCsv(res, 'fortiflow_policies.csv', policies, COLS);
 });
 
 // DELETE /api/session/:session — free memory
