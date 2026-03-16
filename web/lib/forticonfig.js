@@ -333,7 +333,8 @@ function parseFortiConfig(text) {
         cidr = `${network}/${prefix}`;
       }
     }
-    const isWan = !isPrivateIP(props.ip?.split(' ')[0] || '') && !!props.ip;
+    const isTunnel = props.type === 'tunnel';
+    const isWan = !isTunnel && !isPrivateIP(props.ip?.split(' ')[0] || '') && !!props.ip;
     interfaces[name] = {
       name,
       rawIp:  props.ip || '',
@@ -342,6 +343,7 @@ function parseFortiConfig(text) {
       alias:  props.alias || name,
       type:   props.type  || 'physical',
       isWan,
+      isTunnel,
       isSdwan: sdwanMembers.includes(name),
     };
   }

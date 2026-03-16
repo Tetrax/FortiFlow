@@ -2009,7 +2009,10 @@ async function deploy() {
     const idx   = +btn.dataset.ifaceIdx;
     const iface = deployState.interfaces?.interfaces?.[idx];
     if (!iface) return;
-    iface.isWan = !iface.isWan;
+    // Cycle: LAN → WAN → VPN → LAN
+    if (!iface.isWan && !iface.isTunnel)      { iface.isWan = true;  iface.isTunnel = false; }
+    else if (iface.isWan && !iface.isTunnel)  { iface.isWan = false; iface.isTunnel = true;  }
+    else                                       { iface.isWan = false; iface.isTunnel = false; }
     // Re-render interfaces panel
     el('deploy-iface-body').innerHTML = renderInterfaces(deployState.interfaces);
   });
@@ -2170,17 +2173,21 @@ function renderConfSummary(cfg) {
 }
 
 function renderInterfaces({ interfaces, zones, sdwanMembers, sdwanZoneNames, sdwanEnabled, sdwanIntfName }) {
-  const ifaceRows = interfaces.map((iface, idx) => `
+  const ifaceRows = interfaces.map((iface, idx) => {
+    const typeClass = iface.isTunnel ? 'vpn' : (iface.isWan ? 'wan' : 'lan');
+    const typeLabel = iface.isTunnel ? 'VPN' : (iface.isWan ? 'WAN' : 'LAN');
+    return `
     <tr>
       <td class="mono">${escHtml(iface.name)}</td>
       <td class="mono" style="color:var(--text2)">${escHtml(iface.cidr || iface.rawIp || '–')}</td>
       <td>
-        <button class="deploy-itype-toggle ${iface.isWan ? 'wan' : 'lan'}" data-iface-idx="${idx}" title="Cliquer pour basculer">
-          ${iface.isWan ? 'WAN' : 'LAN'} ⇄
+        <button class="deploy-itype-toggle ${typeClass}" data-iface-idx="${idx}" title="Cliquer pour basculer : LAN → WAN → VPN">
+          ${typeLabel} ⇄
         </button>
       </td>
       <td style="color:var(--text2);font-size:11px">${escHtml(iface.alias || '')}</td>
-    </tr>`).join('');
+    </tr>`;
+  }).join('');
 
   const zoneRows = zones.map(z => `
     <tr>
@@ -2220,7 +2227,7 @@ function renderInterfaces({ interfaces, zones, sdwanMembers, sdwanZoneNames, sdw
   }
 
   return `
-    <div style="font-size:11px;color:var(--text2);margin-bottom:8px">Cliquez sur WAN ⇄ / LAN ⇄ pour corriger la classification</div>
+    <div style="font-size:11px;color:var(--text2);margin-bottom:8px">Cliquez sur le type pour basculer : LAN ⇄ WAN ⇄ VPN (tunnels IPsec/SSL)</div>
     <table class="deploy-iface-table">
       <thead><tr><th>Interface</th><th>IP/CIDR</th><th>Type</th><th>Alias</th></tr></thead>
       <tbody>${ifaceRows}${zoneRows}</tbody>

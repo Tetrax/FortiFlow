@@ -992,6 +992,7 @@ td.mono { font-family: var(--mono); }
 .deploy-itype-toggle:hover { opacity: 0.8; transform: scale(1.05); }
 .deploy-itype-toggle.wan { background: rgba(212,113,61,0.1);  color: var(--accent3); border-color: rgba(212,113,61,0.3); }
 .deploy-itype-toggle.lan { background: rgba(74,158,114,0.1);  color: var(--success); border-color: rgba(74,158,114,0.25); }
+.deploy-itype-toggle.vpn { background: rgba(240,180,228,0.1); color: var(--brand);   border-color: rgba(240,180,228,0.3); }
 
 /* Impact bar */
 .impact-cell { position: relative; min-width: 70px; white-space: nowrap; }
