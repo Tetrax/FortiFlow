@@ -111,39 +111,130 @@ function buildSubnetGroups(flows) {
 
 // ─── Main analysis ────────────────────────────────────────────────────────────
 
+// Single-pass builder: computes all 4 subnet-group variants + port stats in
+// one iteration over flows, avoiding 5 separate passes.
+function buildAllSubnetGroupsAndPorts(flows, topN = 25) {
+  const all     = {};  // all flows
+  const allowed = {};  // accept only (not deny/drop)
+  const accept  = {};  // accept only (for matrix)
+  const deny    = {};  // deny + drop (for matrix + denied count)
+
+  const tcpMap = new Map();
+  const udpMap = new Map();
+
+  function addToGroup(groups, flow) {
+    if (!isPrivate(flow.srcip)) return;
+    const srcSubnet = getSubnet24(flow.srcip);
+    if (!srcSubnet) return;
+    if (!groups[srcSubnet]) {
+      groups[srcSubnet] = { subnet: srcSubnet, srcIPs: new Set(), dsts: {} };
+    }
+    const sg = groups[srcSubnet];
+    sg.srcIPs.add(flow.srcip);
+    const dstKey  = isPrivate(flow.dstip) ? getSubnet24(flow.dstip) : flow.dstip;
+    const dstType = isPrivate(flow.dstip) ? 'private' : 'public';
+    if (!dstKey) return;
+    if (!sg.dsts[dstKey]) {
+      sg.dsts[dstKey] = { key: dstKey, type: dstType, ports: new Set(), protos: new Set(), services: new Set(), policyIds: new Set(), dstIPs: new Set(), srcIPs: new Set(), count: 0, sentBytes: 0, rcvdBytes: 0 };
+    }
+    const dst = sg.dsts[dstKey];
+    if (flow.dstport)  dst.ports.add(flow.dstport);
+    if (flow.proto)    dst.protos.add(protoName(flow.proto));
+    if (flow.service)  dst.services.add(flow.service.toUpperCase());
+    if (flow.policyid) dst.policyIds.add(String(flow.policyid));
+    if (flow.srcip)    dst.srcIPs.add(flow.srcip);
+    if (flow.dstip)    dst.dstIPs.add(flow.dstip);
+    dst.count      += flow.count;
+    dst.sentBytes  += flow.sentBytes;
+    dst.rcvdBytes  += flow.rcvdBytes;
+  }
+
+  for (const f of flows) {
+    const isDeny = f.action === 'deny' || f.action === 'drop';
+    const isAccept = f.action === 'accept';
+
+    addToGroup(all, f);
+    if (!isDeny)    addToGroup(allowed, f);
+    if (isAccept)   addToGroup(accept, f);
+    if (isDeny)     addToGroup(deny, f);
+
+    // Port stats (same logic as buildPortStats)
+    const port = parseInt(f.dstport, 10);
+    if (port > 0 && port <= 65535) {
+      const pn = String(f.proto);
+      if (pn === '17' || pn.toUpperCase() === 'UDP') {
+        udpMap.set(port, (udpMap.get(port) || 0) + f.count);
+      } else {
+        tcpMap.set(port, (tcpMap.get(port) || 0) + f.count);
+      }
+    }
+  }
+
+  function toTopList(map, proto) {
+    const entries = [...map.entries()].sort((a, b) => b[1] - a[1]).slice(0, topN);
+    const total = entries.reduce((s, [, c]) => s + c, 0) || 1;
+    return entries.map(([port, count]) => ({
+      port,
+      name:  portName(port, proto),
+      count,
+      pct:   Math.round((count / total) * 1000) / 10,
+    }));
+  }
+
+  return {
+    subnetGroups:         all,
+    allowedSubnetGroups:  allowed,
+    acceptSubnetGroups:   accept,
+    denySubnetGroups:     deny,
+    portStats: {
+      tcp: toTopList(tcpMap, 'TCP'),
+      udp: toTopList(udpMap, 'UDP'),
+    },
+  };
+}
+
 function buildAnalysis(flowMap) {
   const flows = Array.from(flowMap.values());
 
-  // ── Global stats ──
-  const srcIPs   = new Set(flows.map(f => f.srcip));
-  const dstIPs   = new Set(flows.map(f => f.dstip));
-  const totalSessions = flows.reduce((s, f) => s + f.count, 0);
-  const acceptSessions = flows.filter(f => f.action === 'accept').reduce((s, f) => s + f.count, 0);
-  const denySessions   = flows.filter(f => f.action === 'deny' || f.action === 'drop').reduce((s, f) => s + f.count, 0);
+  // ── Single pass: all subnet groups + port stats ──
+  const { subnetGroups, allowedSubnetGroups, acceptSubnetGroups, denySubnetGroups, portStats } =
+    buildAllSubnetGroupsAndPorts(flows);
 
-  const privateSrcIPs  = [...srcIPs].filter(isPrivate);
-  const privateDstIPs  = [...dstIPs].filter(isPrivate);
+  // ── Global stats (single pass) ──
+  const srcIPs = new Set();
+  const dstIPs = new Set();
+  let totalSessions  = 0;
+  let acceptSessions = 0;
+  let denySessions   = 0;
+  let totalBytes     = 0;
+
+  for (const f of flows) {
+    srcIPs.add(f.srcip);
+    dstIPs.add(f.dstip);
+    totalSessions += f.count;
+    totalBytes    += f.sentBytes + f.rcvdBytes;
+    if (f.action === 'accept') {
+      acceptSessions += f.count;
+    } else if (f.action === 'deny' || f.action === 'drop') {
+      denySessions += f.count;
+    }
+  }
+
+  const srcIPsArr      = [...srcIPs];
+  const dstIPsArr      = [...dstIPs];
+  const privateSrcIPs  = srcIPsArr.filter(isPrivate);
+  const privateDstIPs  = dstIPsArr.filter(isPrivate);
   const srcSubnetsSet  = new Set(privateSrcIPs.map(getSubnet24).filter(Boolean));
 
-  // ── Subnet groups ──
-  // Subnets tab : tous les flows (pour avoir la vue complète du trafic observé)
-  const subnetGroups = buildSubnetGroups(flows);
-
-  // Policies : seulement les flows acceptés (deny/drop = déjà bloqué, inutile de créer une allow)
-  const allowedFlows = flows.filter(f => f.action !== 'deny' && f.action !== 'drop');
-  const allowedSubnetGroups = buildSubnetGroups(allowedFlows);
-
-  // Compter les groupes src→dst purement refusés (pour info UI)
-  const denyOnlyGroups = buildSubnetGroups(flows.filter(f => f.action === 'deny' || f.action === 'drop'));
+  // ── Denied policy groups count ──
   let deniedPolicyGroups = 0;
-  for (const [srcSubnet, sg] of Object.entries(denyOnlyGroups)) {
+  for (const [srcSubnet, sg] of Object.entries(denySubnetGroups)) {
     for (const dstKey of Object.keys(sg.dsts)) {
-      // "purement refusé" = aucune session acceptée pour ce même src→dst
       if (!allowedSubnetGroups[srcSubnet]?.dsts[dstKey]) deniedPolicyGroups++;
     }
   }
 
-  // Serialize Sets → Arrays for JSON transport
+  // ── Serialize Sets → Arrays for JSON transport ──
   const subnets = {};
   for (const [key, sg] of Object.entries(subnetGroups)) {
     subnets[key] = {
@@ -167,9 +258,9 @@ function buildAnalysis(flowMap) {
 
   // ── Flows for table view (add computed fields + geo) ──
   const enrichedFlows = flows.map(f => {
-    const pn        = protoName(f.proto);
+    const pn         = protoName(f.proto);
     const resolvedSvc = f.service || portName(f.dstport, pn) || '';
-    const dstPriv   = isPrivate(f.dstip);
+    const dstPriv    = isPrivate(f.dstip);
     const dstCountry = !dstPriv ? lookupCountry(f.dstip) : '';
     return {
       ...f,
@@ -184,9 +275,6 @@ function buildAnalysis(flowMap) {
       totalBytes: f.sentBytes + f.rcvdBytes,
     };
   });
-
-  // ── Port stats top 25 TCP + UDP ──
-  const portStats = buildPortStats(flows);
 
   // ── Geo enrichment dans subnets (destinations publiques) ──
   for (const sg of Object.values(subnets)) {
@@ -203,10 +291,8 @@ function buildAnalysis(flowMap) {
   const policies = buildPolicies(allowedSubnetGroups);
 
   // ── Matrices accept vs deny (private→private heatmap) ──
-  const acceptFlows = flows.filter(f => f.action === 'accept');
-  const denyFlows   = flows.filter(f => f.action === 'deny' || f.action === 'drop');
-  const matrix      = buildMatrix(buildSubnetGroups(acceptFlows));
-  const denyMatrix  = buildMatrix(buildSubnetGroups(denyFlows));
+  const matrix     = buildMatrix(acceptSubnetGroups);
+  const denyMatrix = buildMatrix(denySubnetGroups);
 
   return {
     stats: {
@@ -220,7 +306,7 @@ function buildAnalysis(flowMap) {
       acceptSessions,
       denySessions,
       deniedPolicyGroups,
-      totalBytes:    flows.reduce((s, f) => s + f.sentBytes + f.rcvdBytes, 0),
+      totalBytes,
     },
     flows:    enrichedFlows,
     subnets,

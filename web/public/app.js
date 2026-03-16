@@ -17,6 +17,7 @@ const state = {
 };
 
 let _renderTarget = null;
+let _viewAbort = null;
 
 // ═══════════════════════════════════════════════════════════════
 // Helpers
@@ -321,6 +322,10 @@ async function dashboard() {
 // ═══════════════════════════════════════════════════════════════
 
 async function flows() {
+  if (_viewAbort) _viewAbort.abort();
+  _viewAbort = new AbortController();
+  const { signal } = _viewAbort;
+
   el(_renderTarget || 'content').innerHTML = `
     <div class="filter-bar">
       <input class="filter-input" id="f-srcip"   placeholder="Source IP…">
@@ -359,7 +364,7 @@ async function flows() {
     };
     state.flows.page = 1;
     loadFlows();
-  });
+  }, { signal });
 
   el('btn-reset-filter').addEventListener('click', () => {
     state.flows.filters = {};
@@ -370,13 +375,13 @@ async function flows() {
       else e.value = '';
     });
     loadFlows();
-  });
+  }, { signal });
 
   el('btn-export-flows').addEventListener('click', e => {
     e.preventDefault();
     const q = buildFlowQuery();
     window.location = `/api/export/flows?${q}&session=${state.session}`;
-  });
+  }, { signal });
 
   loadFlows();
 }
@@ -494,6 +499,10 @@ function renderPagination(data) {
 // ═══════════════════════════════════════════════════════════════
 
 async function matrix() {
+  if (_viewAbort) _viewAbort.abort();
+  _viewAbort = new AbortController();
+  const { signal } = _viewAbort;
+
   el(_renderTarget || 'content').innerHTML = `
     <div class="section-header">
       <div>
@@ -528,7 +537,7 @@ async function matrix() {
       } catch (e) {
         el('matrix-wrap').innerHTML = `<div class="alert alert-error">${escHtml(e.message)}</div>`;
       }
-    });
+    }, { signal });
   });
 
   try {
@@ -662,8 +671,16 @@ function renderMatrix(data, mode = 'accept') {
     }
   }
 
-  // Tooltip on hover
+  // Save the static render into an offscreen canvas for hover redraw
+  const offscreen = document.createElement('canvas');
+  offscreen.width  = W;
+  offscreen.height = H;
+  offscreen.getContext('2d').drawImage(canvas, 0, 0);
+
+  // Tooltip on hover — with early-exit if same cell (P7)
   const tooltip = el('matrix-tooltip');
+  let _lastHoverCell = { si: -1, di: -1 };
+
   canvas.addEventListener('mousemove', e => {
     const rect = canvas.getBoundingClientRect();
     const mx = (e.clientX - rect.left) * (canvas.width  / rect.width);
@@ -671,9 +688,29 @@ function renderMatrix(data, mode = 'accept') {
     const di = Math.floor((mx - LABEL_LEFT) / CELL);
     const si = Math.floor((my - LABEL_TOP)  / CELL);
 
+    // Early-exit: same cell as last frame → skip redraw
+    if (si === _lastHoverCell.si && di === _lastHoverCell.di) {
+      // Still update tooltip position if visible
+      if (tooltip.style.display === 'block') {
+        tooltip.style.left = (e.clientX + 16) + 'px';
+        tooltip.style.top  = (e.clientY - 10) + 'px';
+      }
+      return;
+    }
+    _lastHoverCell = { si, di };
+
     if (si >= 0 && di >= 0 && si < srcSubnets.length && di < dstSubnets.length) {
       const c = cellMap.get(`${si},${di}`);
+      // Restore static image first, then draw highlight on top
+      ctx.drawImage(offscreen, 0, 0);
       if (c) {
+        // Highlight the hovered cell with a white border overlay
+        const hx = LABEL_LEFT + di * CELL;
+        const hy = LABEL_TOP  + si * CELL;
+        ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+        ctx.lineWidth   = 1.5;
+        ctx.strokeRect(hx + 1, hy + 1, CELL - 2, CELL - 2);
+
         const svcStr  = c.services?.length ? c.services.join(', ') : '–';
         const portStr = c.ports?.length    ? c.ports.join(', ')    : '–';
         tooltip.innerHTML = `
@@ -689,11 +726,16 @@ function renderMatrix(data, mode = 'accept') {
         tooltip.style.display = 'none';
       }
     } else {
+      ctx.drawImage(offscreen, 0, 0);
       tooltip.style.display = 'none';
     }
   });
 
-  canvas.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
+  canvas.addEventListener('mouseleave', () => {
+    _lastHoverCell = { si: -1, di: -1 };
+    ctx.drawImage(offscreen, 0, 0);
+    tooltip.style.display = 'none';
+  });
 
   // Click → filter flows
   canvas.addEventListener('click', e => {
@@ -729,6 +771,9 @@ function renderMatrix(data, mode = 'accept') {
 // ═══════════════════════════════════════════════════════════════
 
 async function groups() {
+  if (_viewAbort) _viewAbort.abort();
+  _viewAbort = new AbortController();
+  // signal available for future listeners; groups() renders via innerHTML — no direct listeners to attach
   el(_renderTarget || 'content').innerHTML = '<div class="empty-state"><div class="progress-spinner" style="margin:0 auto"></div></div>';
 
   try {
@@ -873,6 +918,10 @@ window.filterFlowsByHost = filterFlowsByHost;
 // ═══════════════════════════════════════════════════════════════
 
 async function policies() {
+  if (_viewAbort) _viewAbort.abort();
+  _viewAbort = new AbortController();
+  const { signal } = _viewAbort;
+
   el(_renderTarget || 'content').innerHTML = `
     <div class="filter-bar">
       <select class="filter-select" id="p-dst-type">
@@ -890,13 +939,13 @@ async function policies() {
   el('btn-apply-policy-filter').addEventListener('click', () => {
     state.policies.dst_type = el('p-dst-type').value;
     loadPolicies();
-  });
+  }, { signal });
 
   el('btn-export-policies').addEventListener('click', e => {
     e.preventDefault();
     const q = state.policies.dst_type ? `dst_type=${state.policies.dst_type}` : '';
     window.location = `/api/export/policies${q ? '?' + q : ''}${q ? '&' : '?'}session=${state.session}`;
-  });
+  }, { signal });
 
   loadPolicies();
 }
@@ -1047,6 +1096,9 @@ function renderPolicyDrillTable(flows, srcSubnet, dstTarget) {
 // ═══════════════════════════════════════════════════════════════
 
 async function ports() {
+  if (_viewAbort) _viewAbort.abort();
+  _viewAbort = new AbortController();
+  // signal available for future listeners; ports() renders via innerHTML — no direct listeners to attach
   el(_renderTarget || 'content').innerHTML = '<div class="empty-state"><div class="progress-spinner" style="margin:0 auto"></div></div>';
   try {
     const data = await api('/api/ports');
@@ -1097,6 +1149,10 @@ function renderPorts({ tcp = [], udp = [] }) {
 // ═══════════════════════════════════════════════════════════════
 
 async function consilpolicies() {
+  if (_viewAbort) _viewAbort.abort();
+  _viewAbort = new AbortController();
+  const { signal } = _viewAbort;
+
   el(_renderTarget || 'content').innerHTML = `
     <div class="filter-bar">
       <select class="filter-select" id="cp-dst-type">
@@ -1111,13 +1167,13 @@ async function consilpolicies() {
     </div>
     <div id="cp-wrap"></div>`;
 
-  el('btn-apply-cp').addEventListener('click', loadConsilPolicies);
+  el('btn-apply-cp').addEventListener('click', loadConsilPolicies, { signal });
 
   el('btn-export-cp').addEventListener('click', e => {
     e.preventDefault();
     const q = el('cp-dst-type').value ? `dst_type=${el('cp-dst-type').value}` : '';
     window.location = `/api/export/consolidated-policies${q ? '?' + q : ''}${q ? '&' : '?'}session=${state.session}`;
-  });
+  }, { signal });
 
   loadConsilPolicies();
 }
@@ -1341,6 +1397,10 @@ function renderCpDrillTable(flows, srcSubnets, dstTargets) {
 // ═══════════════════════════════════════════════════════════════
 
 async function denied() {
+  if (_viewAbort) _viewAbort.abort();
+  _viewAbort = new AbortController();
+  const { signal } = _viewAbort;
+
   el(_renderTarget || 'content').innerHTML = '<div class="empty-state"><div class="progress-spinner"></div></div>';
   try {
     const data = await api('/api/denied-flows');
@@ -1403,13 +1463,13 @@ async function denied() {
         e.target.checked ? deniedSelected.add(+chk.dataset.idx) : deniedSelected.delete(+chk.dataset.idx);
       });
       updateBtn();
-    });
+    }, { signal });
 
     document.querySelectorAll('.denied-chk').forEach(chk => {
       chk.addEventListener('change', e => {
         e.target.checked ? deniedSelected.add(+chk.dataset.idx) : deniedSelected.delete(+chk.dataset.idx);
         updateBtn();
-      });
+      }, { signal });
     });
 
     el('btn-denied-to-deploy').addEventListener('click', () => {
@@ -1431,7 +1491,7 @@ async function denied() {
         _fromDenied: true,
       }));
       navigateTo('deploy');
-    });
+    }, { signal });
 
   } catch (err) {
     el(_renderTarget || 'content').innerHTML = `<div class="empty-state" style="padding:40px;color:var(--danger)">${escHtml(err.message)}</div>`;
