@@ -2948,15 +2948,20 @@ async function analyzeDeployPolicies() {
   let analyzed;
   try {
     setLoadingPct(50);
-    // Determine preferred WAN interface (SD-WAN selection or auto)
+    // Determine preferred WAN interface — SD-WAN zone has priority
     const ifData = deployState.interfaces;
     const preferredWanIntf = deployState.selectedSdwan
       || (ifData?.sdwanEnabled ? (ifData?.sdwanIntfName || null) : null);
 
+    // Interfaces manually toggled to WAN by the user (sent as overrides to the server)
+    const wanOverrides = (ifData?.interfaces || [])
+      .filter(i => i.isWan)
+      .map(i => i.name);
+
     const r = await fetch(`/api/deploy/generate?session=${state.session}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ selectedPolicies: rawPolicies, opts: { preferredWanIntf } }),
+      body: JSON.stringify({ selectedPolicies: rawPolicies, opts: { preferredWanIntf, wanOverrides } }),
     });
     setLoadingPct(80);
     if (!r.ok) {

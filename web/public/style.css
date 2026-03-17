@@ -1122,6 +1122,33 @@ td.mono { font-family: var(--mono); }
 .sub-pill:hover { color: var(--text); }
 .sub-pill.active { color: var(--text); border-bottom-color: var(--brand); }
 
+/* ── PDF Guide button ────────────────────────────────────────────────────────── */
+.nav-item-pdf {
+  text-decoration: none;
+  color: var(--text2);
+}
+.nav-item-pdf:hover {
+  color: var(--text);
+}
+.nav-icon-pdf {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #e05a5a;
+  opacity: 1 !important;
+}
+.nav-pdf-badge {
+  margin-left: auto;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  background: rgba(224, 90, 90, 0.15);
+  color: #e05a5a;
+  border: 1px solid rgba(224, 90, 90, 0.3);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
 /* ── Expert mode toggle ──────────────────────────────────────────────────────── */
 .sidebar-mode-toggle {
   padding: 16px 20px; border-top: 1px solid var(--border); margin-top: auto;

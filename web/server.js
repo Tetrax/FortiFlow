@@ -521,7 +521,21 @@ app.post('/api/deploy/generate', (req, res) => {
 
   try {
     const o = opts || {};
-    const analyzed = analyzePolicies(selectedPolicies, s.fortiConfig, o.preferredWanIntf || null);
+
+    // Apply user WAN toggles — build a patched config without mutating the session
+    let configToUse = s.fortiConfig;
+    if (Array.isArray(o.wanOverrides) && o.wanOverrides.length > 0) {
+      const patchedInterfaces = { ...s.fortiConfig.interfaces };
+      o.wanOverrides.forEach(name => {
+        if (patchedInterfaces[name]) {
+          patchedInterfaces[name] = { ...patchedInterfaces[name], isWan: true };
+        }
+      });
+      configToUse = { ...s.fortiConfig, interfaces: patchedInterfaces };
+    }
+
+    // SD-WAN zone takes priority; if none, preferredWanIntf falls to null (detectWanCandidates handles it)
+    const analyzed = analyzePolicies(selectedPolicies, configToUse, o.preferredWanIntf || null);
     const genOpts = {
       natEnabled:     o.nat     || false,
       actionVerb:     o.action  || 'accept',
@@ -577,6 +591,23 @@ app.post('/api/deploy/generate', (req, res) => {
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 
-app.listen(PORT, () => {
-  console.log(`\n  FortiFlow  →  http://localhost:${PORT}\n`);
-});
+const https = require('https');
+
+const DOMAIN = process.env.DOMAIN || 'devval.com';
+const SSL_KEY  = process.env.SSL_KEY  || `/etc/letsencrypt/live/${DOMAIN}/privkey.pem`;
+const SSL_CERT = process.env.SSL_CERT || `/etc/letsencrypt/live/${DOMAIN}/fullchain.pem`;
+
+if (fs.existsSync(SSL_KEY) && fs.existsSync(SSL_CERT)) {
+  const sslOptions = {
+    key:  fs.readFileSync(SSL_KEY),
+    cert: fs.readFileSync(SSL_CERT),
+  };
+  https.createServer(sslOptions, app).listen(PORT, () => {
+    console.log(`\n  FortiFlow  →  https://${DOMAIN}:${PORT}\n`);
+  });
+} else {
+  // Fallback HTTP si les certificats ne sont pas encore présents
+  app.listen(PORT, () => {
+    console.log(`\n  FortiFlow  →  http://localhost:${PORT}  (HTTP — certificats SSL introuvables)\n`);
+  });
+}
