@@ -11,7 +11,9 @@ const { createSession, getSession, setSessionData,
         setSessionError, deleteSession }                 = require('./lib/store');
 const { parseFortiConfig, analyzePolicies,
         generateConfig, validateAgainstExisting,
-        detectWanCandidates }                            = require('./lib/forticonfig');
+        detectWanCandidates,
+        parseFullRoutingTable, parseOspfRoutingTable, parseBgpNetworkTable,
+        sortRoutes }                                     = require('./lib/forticonfig');
 
 const app  = express();
 const PORT = process.env.PORT || 3737;
@@ -197,9 +199,20 @@ app.get('/api/flows', (req, res) => {
 
   const total = flows.length;
   const start = (page - 1) * limit;
+  let slice = flows.slice(start, start + limit);
+
+  // Enrich with existing policy name if a config has been uploaded
+  if (s.policyMap && s.policyMap.size > 0) {
+    slice = slice.map(f => {
+      if (!f.policyid) return f;
+      const pol = s.policyMap.get(String(f.policyid));
+      if (!pol) return f;
+      return { ...f, coveredByPolicy: { id: pol.policyid, name: pol.name, action: pol.action } };
+    });
+  }
 
   res.json({
-    data:  flows.slice(start, start + limit),
+    data:  slice,
     total,
     page,
     limit,
@@ -400,6 +413,13 @@ app.post('/api/deploy/config-upload', upload.single('conffile'), (req, res) => {
     const fortiConfig = parseFortiConfig(text);
     s.fortiConfig = fortiConfig;
 
+    // Build a fast policyid → policy lookup (keyed as string for log compatibility)
+    const policyMap = new Map();
+    for (const pol of fortiConfig.existingPolicies || []) {
+      policyMap.set(String(pol.policyid), pol);
+    }
+    s.policyMap = policyMap;
+
     // Build a Set of WAN interface names for quick lookup
     const wanInfo = detectWanCandidates(fortiConfig.interfaces, fortiConfig.zones, fortiConfig.sdwanMembers);
     s.wanNames = new Set(wanInfo.interfaces.map(i => i.name));
@@ -445,6 +465,47 @@ app.get('/api/deploy/interfaces', (req, res) => {
     sdwanEnabled: sdwanEnabled || false,
     sdwanIntfName: sdwanIntfName || null,
   });
+});
+
+// POST /api/deploy/dynamic-routes — inject live routing table into session
+// protocol: 'all' (get router info routing-table all) | 'ospf' | 'bgp'
+// 'all' REPLACES the fullRoutes table entirely (ground truth).
+// 'ospf'/'bgp' kept for backward compat — inject only matching routes.
+app.post('/api/deploy/dynamic-routes', (req, res) => {
+  const s = requireSession(req, res);
+  if (!s) return;
+  if (!s.fortiConfig) return res.status(404).json({ error: 'Aucune config FortiGate chargée' });
+
+  const { protocol, cliOutput } = req.body || {};
+  if (!cliOutput || !protocol) return res.status(400).json({ error: 'protocol et cliOutput requis' });
+
+  let parsed = [];
+  if (protocol === 'all') {
+    parsed = parseFullRoutingTable(cliOutput);
+    // Replace fullRoutes entirely — real routing table is ground truth
+    s.fortiConfig.fullRoutes = parsed;
+    sortRoutes(s.fortiConfig.fullRoutes);
+    return res.json({ added: parsed.length, total: parsed.length, routes: parsed, replaced: true });
+  } else if (protocol === 'ospf') {
+    parsed = parseOspfRoutingTable(cliOutput);
+  } else if (protocol === 'bgp') {
+    parsed = parseBgpNetworkTable(cliOutput);
+  } else {
+    return res.status(400).json({ error: 'protocol inconnu (all|ospf|bgp)' });
+  }
+
+  // ospf/bgp: inject (deduplicate by dst)
+  const existing = new Map(s.fortiConfig.fullRoutes.map(r => [r.dst, r]));
+  let added = 0;
+  for (const r of parsed) {
+    if (!existing.has(r.dst)) {
+      s.fortiConfig.fullRoutes.push(r);
+      existing.set(r.dst, r);
+      added++;
+    }
+  }
+  sortRoutes(s.fortiConfig.fullRoutes);
+  res.json({ added, total: parsed.length, routes: parsed });
 });
 
 // POST /api/deploy/generate — generate FortiGate CLI from selected policies

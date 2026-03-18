@@ -424,6 +424,13 @@ function renderFlowsTable(data) {
     { key: 'action',    label: 'Action',     render: r => actionTag(r.action) },
     { key: 'count',     label: 'Sessions',   mono: true, render: r => fmtNum(r.count) },
     { key: 'totalBytes',label: 'Octets',     mono: true, render: r => fmtBytes(r.totalBytes) },
+    { key: 'coveredByPolicy', label: 'Politique', render: r => {
+      if (!r.coveredByPolicy) return '<span style="color:var(--text2)">–</span>';
+      const p = r.coveredByPolicy;
+      const tip = `Policy #${p.id}${p.name ? ' · ' + p.name : ''} (${p.action})`;
+      const cls = p.action === 'deny' ? 'tag-deny' : 'tag-accept';
+      return `<span class="${cls}" title="${escHtml(tip)}" style="font-size:11px;cursor:default">#${p.id}${p.name ? ' ' + escHtml(p.name) : ''}</span>`;
+    }},
   ];
 
   const sort  = state.flows.sort;
@@ -446,7 +453,7 @@ function renderFlowsTable(data) {
     <div class="table-wrap">
       <table>
         <thead><tr>${head}</tr></thead>
-        <tbody>${rows || '<tr><td colspan="10" class="empty-state">Aucun flux trouvé</td></tr>'}</tbody>
+        <tbody>${rows || '<tr><td colspan="11" class="empty-state">Aucun flux trouvé</td></tr>'}</tbody>
       </table>
     </div>`;
 
@@ -1515,7 +1522,7 @@ const deployState = {
   warnings:      [],
   viewMode:      'flat',           // 'flat' | 'interface-pair' | 'sequence'
   collapsedGroups: new Set(),      // collapsed group keys for interface-pair view
-  wizardStep:    1,                // 1: config upload, 2: interfaces, 3: policies
+  wizardStep:    1,                // 1: config upload, 2: routes, 3: interfaces, 4: policies
   use32Global:   false,            // global /32 mode (use real hosts instead of /24)
 };
 
@@ -1841,6 +1848,7 @@ async function polices() {
 
 // ── F8: Predefined tags ──
 const POLICY_TAGS = ['critique', 'temporaire', 'a valider', 'segmentation'];
+const AUTO32_THRESHOLD = 3; // auto-activer /32 si ≤ N hôtes réels
 
 async function deploy() {
   // Reset delegation flag — deploy() replaces the entire DOM tree
@@ -1848,7 +1856,7 @@ async function deploy() {
 
   // Auto-advance wizard based on state
   if (deployState.fortiConfig && deployState.wizardStep < 2) deployState.wizardStep = 2;
-  if (deployState.analyzed && deployState.wizardStep < 3) deployState.wizardStep = 3;
+  if (deployState.analyzed && deployState.wizardStep < 4) deployState.wizardStep = 4;
   const ws = deployState.wizardStep;
 
   el(_renderTarget || 'content').innerHTML = `
@@ -1860,11 +1868,15 @@ async function deploy() {
         </div>
         <div class="wizard-connector ${ws > 1 ? 'done' : ''}"></div>
         <div class="wizard-step-indicator ${ws >= 2 ? 'active' : ''} ${ws > 2 ? 'done' : ''}" data-step="2">
-          <span class="wizard-num">2</span> Interfaces
+          <span class="wizard-num">2</span> Routes
         </div>
         <div class="wizard-connector ${ws > 2 ? 'done' : ''}"></div>
-        <div class="wizard-step-indicator ${ws >= 3 ? 'active' : ''}" data-step="3">
-          <span class="wizard-num">3</span> Policies
+        <div class="wizard-step-indicator ${ws >= 3 ? 'active' : ''} ${ws > 3 ? 'done' : ''}" data-step="3">
+          <span class="wizard-num">3</span> Interfaces
+        </div>
+        <div class="wizard-connector ${ws > 3 ? 'done' : ''}"></div>
+        <div class="wizard-step-indicator ${ws >= 4 ? 'active' : ''}" data-step="4">
+          <span class="wizard-num">4</span> Policies
         </div>
       </div>
 
@@ -1890,15 +1902,14 @@ async function deploy() {
         ${deployState.fortiConfig ? `<div class="wizard-nav"><span></span><button class="btn-accent wizard-next" data-to="2">Suivant →</button></div>` : ''}
       </div>
 
-      <!-- Step 2: interfaces -->
+      <!-- Step 2: routing table -->
       <div class="deploy-step" id="deploy-step2" ${ws !== 2 ? 'style="display:none"' : ''}>
-        <div class="deploy-step-header" id="deploy-iface-toggle" style="cursor:pointer">
+        <div class="deploy-step-header">
           <span class="deploy-step-num">2</span>
-          Interfaces &amp; Zones
-          <span id="deploy-iface-arrow" style="margin-left:auto;font-size:11px">▾</span>
+          Table de routage réelle
         </div>
-        <div class="deploy-step-body" id="deploy-iface-body">
-          ${deployState.interfaces ? renderInterfaces(deployState.interfaces) : ''}
+        <div class="deploy-step-body">
+          ${renderDynamicRoutesPanel()}
         </div>
         <div class="wizard-nav">
           <button class="btn-sm wizard-prev" data-to="1">← Précédent</button>
@@ -1906,10 +1917,26 @@ async function deploy() {
         </div>
       </div>
 
-      <!-- Step 3: policy table -->
+      <!-- Step 3: interfaces -->
       <div class="deploy-step" id="deploy-step3" ${ws !== 3 ? 'style="display:none"' : ''}>
-        <div class="deploy-step-header">
+        <div class="deploy-step-header" id="deploy-iface-toggle" style="cursor:pointer">
           <span class="deploy-step-num">3</span>
+          Interfaces &amp; Zones
+          <span id="deploy-iface-arrow" style="margin-left:auto;font-size:11px">▾</span>
+        </div>
+        <div class="deploy-step-body" id="deploy-iface-body">
+          ${deployState.interfaces ? renderInterfaces(deployState.interfaces) : ''}
+        </div>
+        <div class="wizard-nav">
+          <button class="btn-sm wizard-prev" data-to="2">← Précédent</button>
+          <button class="btn-accent wizard-next" data-to="4">Suivant →</button>
+        </div>
+      </div>
+
+      <!-- Step 4: policy table -->
+      <div class="deploy-step" id="deploy-step4" ${ws !== 4 ? 'style="display:none"' : ''}>
+        <div class="deploy-step-header">
+          <span class="deploy-step-num">4</span>
           Policies à générer
           <div style="margin-left:auto;display:flex;gap:12px;align-items:center;font-size:12px;font-weight:400">
             <label class="deploy-toggle-label">
@@ -1957,7 +1984,7 @@ async function deploy() {
         <div class="deploy-step-body" id="deploy-policy-body">
           <div class="empty-state" style="padding:24px">Cliquez sur <strong>Analyser les policies</strong> pour commencer</div>
         </div>
-        <div class="deploy-step-footer" id="deploy-step3-footer" style="display:none">
+        <div class="deploy-step-footer" id="deploy-step4-footer" style="display:none">
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
             <button class="btn-accent" id="btn-generate">⬇ Générer config FortiGate</button>
             <span id="deploy-gen-info" style="font-size:11px;color:var(--text2)"></span>
@@ -2023,6 +2050,42 @@ async function deploy() {
       deployState.selectedSdwan = e.target.value;
     }
   });
+
+  // ── Dynamic routes inject (wired once) ──
+  if (!window._dynRouteWired) {
+    window._dynRouteWired = true;
+    document.addEventListener('click', async e => {
+    const btn = e.target.closest('.dyn-route-inject');
+    if (!btn) return;
+    const proto = btn.dataset.proto;
+    const ta = btn.closest('.dyn-route-block')?.querySelector('.dyn-route-ta');
+    const text = ta?.value?.trim();
+    if (!text) { alert('Collez le output CLI avant d\'injecter.'); return; }
+
+    btn.disabled = true;
+    btn.textContent = '⏳ Injection…';
+    try {
+      const r = await fetch(`/api/deploy/dynamic-routes?session=${state.session}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ protocol: proto, cliOutput: text }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+      if (!deployState.dynRouteStatus) deployState.dynRouteStatus = {};
+      deployState.dynRouteStatus[proto] = { added: data.added, total: data.total };
+    } catch (err) {
+      if (!deployState.dynRouteStatus) deployState.dynRouteStatus = {};
+      deployState.dynRouteStatus[proto] = { error: err.message };
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Injecter les routes';
+      // Re-render only the panel badge (avoid full redeploy)
+      const panel = document.querySelector('.dyn-routes-panel');
+      if (panel) panel.outerHTML = renderDynamicRoutesPanel();
+    }
+  });
+  } // end _dynRouteWired
 
   // Reload conf
   el('btn-reload-conf')?.addEventListener('click', () => {
@@ -2095,7 +2158,7 @@ async function deploy() {
     ind.addEventListener('click', () => {
       const step = +ind.dataset.step;
       // Only allow jumping to completed steps or current
-      if (step === 1 || (step === 2 && deployState.fortiConfig) || (step === 3 && deployState.fortiConfig)) {
+      if (step === 1 || (step === 2 && deployState.fortiConfig) || (step === 3 && deployState.fortiConfig) || (step === 4 && deployState.fortiConfig)) {
         deployState.wizardStep = step;
         deploy();
       }
@@ -2127,8 +2190,8 @@ async function deploy() {
     deployState.use32Global = !deployState.use32Global;
     if (deployState.analyzed) {
       for (const p of deployState.analyzed) {
-        if ((p.srcHosts || []).length > 1) p._use32Src = deployState.use32Global;
-        if ((p.dstHosts || []).length > 1) p._use32Dst = deployState.use32Global;
+        if ((p.srcHosts || []).length >= 1) p._use32Src = deployState.use32Global;
+        if ((p.dstHosts || []).length >= 1) p._use32Dst = deployState.use32Global;
       }
     }
     // Update button appearance
@@ -2172,6 +2235,42 @@ function renderConfSummary(cfg) {
   </div>`;
 }
 
+// ─── Dynamic routes panel ────────────────────────────────────────────────────
+
+function renderDynamicRoutesPanel() {
+  if (!deployState.fortiConfig) return '';
+
+  const st = (deployState.dynRouteStatus || {})['all'];
+
+  const badge = st
+    ? `<span class="dyn-route-badge ${st.error ? 'err' : 'ok'}">${
+        st.error
+          ? '✗ ' + st.error
+          : `✓ Table remplacée — ${st.added} route(s) (${st.replaced ? 'remplacement complet' : 'injection'})`
+      }</span>`
+    : '';
+
+  return `
+  <div class="dyn-routes-panel">
+    <div class="dyn-routes-title">🗺 Table de routage réelle</div>
+    <div style="font-size:11px;color:var(--text2);margin-bottom:10px">
+      Collez le output de la commande ci-dessous pour remplacer la table de routage parsée par la <strong>table réelle</strong> du FortiGate.
+      Permet un mapping interfaces/WAN exact, incluant routes dynamiques et chemins actifs.
+    </div>
+    <div class="dyn-route-block">
+      <div style="font-size:10px;color:var(--text2);margin-bottom:6px;font-family:var(--mono)">
+        FG# <strong style="color:var(--text)">get router info routing-table all</strong>
+      </div>
+      <textarea class="dyn-route-ta" data-proto="all" rows="6"
+        placeholder="Collez ici le résultat de : get router info routing-table all"></textarea>
+      <div style="display:flex;align-items:center;gap:10px;margin-top:6px">
+        <button class="btn-sm dyn-route-inject" data-proto="all">Appliquer la table de routage</button>
+        ${badge}
+      </div>
+    </div>
+  </div>`;
+}
+
 function renderInterfaces({ interfaces, zones, sdwanMembers, sdwanZoneNames, sdwanEnabled, sdwanIntfName }) {
   const ifaceRows = interfaces.map((iface, idx) => {
     const typeClass = iface.isTunnel ? 'vpn' : (iface.isWan ? 'wan' : 'lan');
@@ -2179,7 +2278,7 @@ function renderInterfaces({ interfaces, zones, sdwanMembers, sdwanZoneNames, sdw
     return `
     <tr>
       <td class="mono">${escHtml(iface.name)}</td>
-      <td class="mono" style="color:var(--text2)">${escHtml(iface.cidr || iface.rawIp || '–')}</td>
+      <td class="mono iface-cidr-cell" style="color:var(--text2)">${escHtml(iface.cidr || iface.rawIp || '–')}</td>
       <td>
         <button class="deploy-itype-toggle ${typeClass}" data-iface-idx="${idx}" title="Cliquer pour basculer : LAN → WAN → VPN">
           ${typeLabel} ⇄
@@ -2192,7 +2291,7 @@ function renderInterfaces({ interfaces, zones, sdwanMembers, sdwanZoneNames, sdw
   const zoneRows = zones.map(z => `
     <tr>
       <td class="mono">${escHtml(z.name)}</td>
-      <td class="mono" style="color:var(--text2)">${z.members.map(escHtml).join(', ')}</td>
+      <td class="mono iface-members-cell" style="color:var(--text2)" title="${z.members.map(escHtml).join(', ')}">${z.members.map(escHtml).join(', ')}</td>
       <td colspan="2"></td>
     </tr>`).join('');
 
@@ -2389,15 +2488,14 @@ function dstTargetCell(p, idx) {
   const dstHosts = p.dstHosts || [];
   const use32Dst = p._use32Dst || false;
   let dstHostsHtml = '';
-  if (p.dstType === 'private' && dstHosts.length > 1) {
-    const rows = dstHosts.slice(0, 50).map(h => `<div class="mono" style="font-size:10px;color:var(--text2)">${escHtml(h)}</div>`).join('');
+  if (p.dstType === 'private' && dstHosts.length >= 1) {
+    const rows = dstHosts.slice(0, 50).map(h => buildHostRow(h, p._dstHostNames, idx, 'dst')).join('');
     const moreH = dstHosts.length > 50 ? `<div style="font-size:10px;color:var(--text2)">+${dstHosts.length - 50} autres…</div>` : '';
-    dstHostsHtml = `<button class="btn-sm dst-hosts-badge ${use32Dst ? 'hosts-active' : ''}" data-idx="${idx}" style="font-size:9px;padding:1px 5px;margin-left:4px">${dstHosts.length} hôtes${use32Dst ? ' /32 ✓' : ' ▾'}</button>
+    dstHostsHtml = `<span style="display:inline-flex;align-items:center;gap:2px;margin-left:4px">
+      <button class="btn-sm btn-toggle32 ${use32Dst ? 'hosts-active' : ''}" data-idx="${idx}" data-type="dst" title="${use32Dst ? 'Mode /32 actif — cliquer pour revenir en subnet' : 'Cliquer pour activer les objets /32'}" style="font-size:9px;padding:1px 5px">${dstHosts.length} hôtes${use32Dst ? ' /32 ✓' : ''}</button><button class="btn-sm btn-hosts-edit" data-idx="${idx}" data-type="dst" title="Noms des objets /32" style="font-size:9px;padding:1px 4px;opacity:0.6">✏</button>
+    </span>
     <div class="hosts-detail" id="dst-hosts-${idx}" style="display:none;margin-top:4px;max-height:130px;overflow-y:auto;background:var(--bg0);border:1px solid var(--border);border-radius:4px;padding:4px 8px">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;padding-bottom:4px;border-bottom:1px solid var(--border)">
-        <span style="font-size:10px;font-weight:600">${dstHosts.length} hôtes</span>
-        <button class="btn-sm btn-use32" data-idx="${idx}" data-type="dst" style="font-size:9px">${use32Dst ? '↩ /24' : '⇒ /32'}</button>
-      </div>
+      <div style="font-size:10px;font-weight:600;margin-bottom:4px;padding-bottom:4px;border-bottom:1px solid var(--border)">${dstHosts.length} hôtes — noms d'objets</div>
       ${rows}${moreH}
     </div>`;
   }
@@ -2410,6 +2508,17 @@ function dstTargetCell(p, idx) {
     <div class="deploy-dst-detail" id="dst-detail-${idx}" style="display:none;margin-top:4px;max-height:150px;overflow-y:auto;background:var(--bg0);border:1px solid var(--border);border-radius:4px;padding:4px 8px">
       ${ipRows}${more}
     </div>${dstHostsHtml}`;
+}
+
+// Render one host row inside a /32 popup: green ✓ if object exists, editable input otherwise
+function buildHostRow(h, nameMap, idx, type) {
+  const existingName = (nameMap || {})[h];
+  const defaultName  = `FF_HOST_${h.replace(/\./g, '_')}`;
+  const ipSpan = `<span class="mono" style="font-size:10px;min-width:105px;display:inline-block;color:var(--text2)">${escHtml(h)}</span>`;
+  if (existingName) {
+    return `<div style="display:flex;align-items:center;gap:6px;padding:2px 0">${ipSpan}<span class="match-ok" style="font-size:9px">✓ ${escHtml(existingName)}</span></div>`;
+  }
+  return `<div style="display:flex;align-items:center;gap:6px;padding:2px 0">${ipSpan}<input class="host-name-input deploy-name-input" data-idx="${idx}" data-type="${type}" data-host="${escHtml(h)}" value="${escHtml(defaultName)}" style="font-size:10px;width:180px;padding:2px 6px" placeholder="FF_HOST_…"></div>`;
 }
 
 // Clé de service normalisée pour comparer les ensembles de services entre policies
@@ -2515,7 +2624,8 @@ function mergeByPolicyId(policies) {
       const srcSubnets    = [...new Set(subGroup.map(p => p.srcSubnet).filter(Boolean))].sort();
       const allPolicyIds  = [...new Set(subGroup.flatMap(p => p.policyIds || []))].sort((a, b) => Number(a) - Number(b));
       const isWan         = subGroup.some(p => p._isWan || p.dstType === 'public');
-      const dstTarget     = isWan ? 'all' : base.dstTarget;
+      const allDstTargets = [...new Set(subGroup.map(p => p.dstTarget).filter(t => t && t !== 'all'))];
+      const dstTarget     = isWan ? 'all' : (cidrSupernet(allDstTargets) || base.dstTarget);
       const allDstIPs     = [...new Set(subGroup.flatMap(p => p.dstIPs || (p.dstType === 'public' ? [p.dstTarget] : [])).filter(t => t && t !== 'all'))];
       const allSrcHosts   = [...new Set(subGroup.flatMap(p => p.srcHosts || []))].sort();
       const allDstHosts   = [...new Set(subGroup.flatMap(p => p.dstHosts || []))].sort();
@@ -2554,12 +2664,14 @@ function mergeByPolicyId(policies) {
         _dstIPs:      allDstIPs,
         srcHosts:     allSrcHosts,
         dstHosts:     allDstHosts,
+        _use32Src:    allSrcHosts.length >= 1 && allSrcHosts.length <= AUTO32_THRESHOLD,
+        _use32Dst:    !isWan && allDstHosts.length >= 1 && allDstHosts.length <= AUTO32_THRESHOLD,
         _mergedCount: subGroup.length,
         _isWan:       isWan,
         _nat:         isWan,
         _srcAddrName: existingGrp || (multiSrc ? `FF_POLICY_${policyId}_SRC` : (base._srcAddrName || suggestAddrNameFE(srcSubnets[0]))),
         _srcAddrGrpFound: !!existingGrp,
-        _dstAddrName: isWan ? 'all' : base._dstAddrName,
+        _dstAddrName: isWan ? 'all' : (dstTarget !== base.dstTarget ? suggestAddrNameFE(dstTarget) : base._dstAddrName),
         _policyName:  `FF_POLICY_${policyId}`,
         srcAddrNames: existingGrp ? null : (multiSrc ? srcSubnets.map(s => `FF_${escSlug(s)}`) : null),
         analysis: {
@@ -2712,6 +2824,12 @@ async function analyzeDeployPolicies() {
   // Tri par srcSubnet pour faciliter la lecture
   analyzed.sort((a, b) => (a.srcSubnet || '').localeCompare(b.srcSubnet || ''));
 
+  // Auto /32 : peu d'hôtes réels = utiliser les /32 par défaut (≤ AUTO32_THRESHOLD hôtes)
+  for (const p of analyzed) {
+    if ((p.srcHosts || []).length >= 1 && (p.srcHosts || []).length <= AUTO32_THRESHOLD) p._use32Src = true;
+    if ((p.dstHosts || []).length >= 1 && (p.dstHosts || []).length <= AUTO32_THRESHOLD) p._use32Dst = true;
+  }
+
   deployState.analyzed          = analyzed;
   deployState._analyzedOriginal = null;
   deployState.generatedCli      = null;
@@ -2735,14 +2853,14 @@ async function analyzeDeployPolicies() {
 
   if (info) info.innerHTML = `${analyzed.length} policies${deniedNote} · `;
 
-  deployState.wizardStep = 3;
+  deployState.wizardStep = 4;
   // Update wizard progress indicators
   document.querySelectorAll('.wizard-step-indicator').forEach(ind => {
     const s = +ind.dataset.step;
-    ind.classList.toggle('active', s <= 3);
-    ind.classList.toggle('done', s < 3);
+    ind.classList.toggle('active', s <= 4);
+    ind.classList.toggle('done', s < 4);
   });
-  document.querySelectorAll('.wizard-connector').forEach((c, i) => c.classList.toggle('done', i < 2));
+  document.querySelectorAll('.wizard-connector').forEach((c, i) => c.classList.toggle('done', i < 3));
 
   resetAnalyzeBtn();
   renderDeployPolicies(analyzed);
@@ -2758,6 +2876,46 @@ function suggestAddrNameFE(cidr) {
   return 'FF_' + cidr.replace(/[./]/g, '_');
 }
 
+// ─── CIDR supernet helpers ────────────────────────────────────────────────────
+
+function ip2intFE(ip) {
+  return ip.split('.').reduce((a, o) => (a * 256) + parseInt(o, 10), 0) >>> 0;
+}
+
+function int2ipFE(n) {
+  return [(n >>> 24) & 0xFF, (n >>> 16) & 0xFF, (n >>> 8) & 0xFF, n & 0xFF].join('.');
+}
+
+// Retourne le plus petit supernet CIDR couvrant tous les CIDRs donnés.
+// Ex : ['10.1.2.0/24','10.1.6.0/24','10.1.16.0/24'] → '10.1.0.0/19'
+function cidrSupernet(cidrs) {
+  if (!cidrs || cidrs.length === 0) return null;
+  const unique = [...new Set(cidrs)];
+  if (unique.length === 1) return unique[0];
+
+  const nets = unique.map(c => {
+    const [ip, p] = c.split('/');
+    const plen = parseInt(p || '32', 10);
+    const mask = plen === 0 ? 0 : (0xFFFFFFFF << (32 - plen)) >>> 0;
+    return { int: ip2intFE(ip) & mask, prefix: plen };
+  });
+
+  let supInt    = nets[0].int;
+  let supPrefix = nets[0].prefix;
+
+  for (let i = 1; i < nets.length; i++) {
+    const xor = (supInt ^ nets[i].int) >>> 0;
+    const common = xor === 0
+      ? Math.min(supPrefix, nets[i].prefix)
+      : Math.min(Math.clz32(xor), supPrefix, nets[i].prefix);
+    supPrefix = common;
+    const mask = supPrefix === 0 ? 0 : (0xFFFFFFFF << (32 - supPrefix)) >>> 0;
+    supInt = supInt & mask;
+  }
+
+  return `${int2ipFE(supInt)}/${supPrefix}`;
+}
+
 function escSlug(s) {
   return (s || '').replace(/[./]/g, '_').replace(/[^a-zA-Z0-9_]/g, '');
 }
@@ -2767,15 +2925,16 @@ function addrCell(addrAnalysis, currentName, idx, field) {
   if (!addrAnalysis?.found) {
     return `<input class="deploy-name-input" data-idx="${idx}" data-field="${field}" value="${escHtml(currentName)}" placeholder="FF_...">`;
   }
-  const matches = addrAnalysis.allMatches || [{ name: addrAnalysis.name }];
+  const matches = addrAnalysis.allMatches || [{ name: addrAnalysis.name, source: addrAnalysis.source }];
+  const srcTip = addrAnalysis.source === 'config' ? 'Objet existant dans la config FortiGate' : '';
   if (matches.length === 1) {
-    return `<span class="match-ok">✓ ${escHtml(matches[0].name)}</span>`;
+    return `<span class="match-ok" ${srcTip ? `title="${escHtml(srcTip)}"` : ''}>✓ ${escHtml(matches[0].name)}</span>`;
   }
   // Multiple matches → select
   const opts = matches.map(m =>
     `<option value="${escHtml(m.name)}" ${m.name === currentName ? 'selected' : ''}>${escHtml(m.name)}</option>`
   ).join('');
-  return `<select class="deploy-name-sel match-ok-sel" data-idx="${idx}" data-field="${field}" title="${matches.length} objets correspondent">
+  return `<select class="deploy-name-sel match-ok-sel" data-idx="${idx}" data-field="${field}" title="${srcTip || matches.length + ' objets correspondent'}">
     ${opts}
   </select>`;
 }
@@ -2784,7 +2943,10 @@ function addrCell(addrAnalysis, currentName, idx, field) {
 function svcMatchCell(svc, idx) {
   const matches  = svc.allMatches || [{ name: svc.name, source: svc.source }];
   const portPart = svc.portHint ? `\nPorts: ${svc.portHint}` : '';
-  const tip1     = `${matches[0].source || ''}${portPart}`;
+  const srcLabel = matches[0].source === 'custom' ? 'Service existant dans la config FortiGate'
+                 : matches[0].source === 'predefined' ? 'Service prédéfini FortiGate'
+                 : (matches[0].source || '');
+  const tip1     = `${srcLabel}${portPart}`;
   if (matches.length === 1) {
     return `<span class="match-ok" data-tip="${escHtml(tip1)}">✓ ${escHtml(matches[0].name)}</span>`;
   }
@@ -2820,6 +2982,24 @@ function countMissingObjects(analyzed) {
 }
 
 // ── F7: Event delegation on the deploy table ──────────────────────────────────
+// Searchable interface dropdown — replaces native <select> for iface fields
+function buildIfaceDropdown(idx, field, currentVal) {
+  const opts = deployState.ifaceOpts || [];
+  const cur = opts.find(o => o.value === currentVal) || opts[0];
+  const btnLabel = cur ? cur.label : '— auto —';
+  const listItems = opts.map(o => `
+    <li data-value="${escHtml(o.value)}" ${o.value === currentVal ? 'class="selected"' : ''}>
+      ${escHtml(o.label)}
+    </li>`).join('');
+  return `<div class="iface-dd" data-idx="${idx}" data-field="${field}">
+    <button class="iface-dd-btn" type="button" title="${escHtml(btnLabel)}">${escHtml(btnLabel)}</button>
+    <div class="iface-dd-panel">
+      <input class="iface-dd-search" type="text" placeholder="Rechercher…" autocomplete="off">
+      <ul class="iface-dd-list">${listItems}</ul>
+    </div>
+  </div>`;
+}
+
 // Called once after the deploy-policy-body container exists.
 // Installs delegated listeners on the stable container — avoids re-attaching
 // hundreds of listeners on every render.
@@ -2853,11 +3033,44 @@ function wireDeployTable() {
     deployState.analyzed[+e.target.dataset.idx]._nat = e.target.checked;
   });
 
-  // ── change: .deploy-iface-sel ──
-  container.addEventListener('change', e => {
-    if (!e.target.matches('.deploy-iface-sel')) return;
-    const { idx, field } = e.target.dataset;
-    deployState.analyzed[+idx][field] = e.target.value;
+  // ── click: .iface-dd-btn (open/close) ──
+  container.addEventListener('click', e => {
+    const btn = e.target.closest('.iface-dd-btn');
+    if (!btn) return;
+    const dd = btn.closest('.iface-dd');
+    const isOpen = dd.classList.contains('open');
+    document.querySelectorAll('.iface-dd.open').forEach(d => d.classList.remove('open'));
+    if (!isOpen) {
+      dd.classList.add('open');
+      dd.querySelector('.iface-dd-search').value = '';
+      dd.querySelectorAll('.iface-dd-list li').forEach(li => { li.hidden = false; });
+      dd.querySelector('.iface-dd-search').focus();
+    }
+    e.stopPropagation();
+  });
+
+  // ── click: .iface-dd-list li (select value) ──
+  container.addEventListener('click', e => {
+    const li = e.target.closest('.iface-dd-list li');
+    if (!li) return;
+    const dd = li.closest('.iface-dd');
+    const { idx, field } = dd.dataset;
+    const value = li.dataset.value;
+    const label = (deployState.ifaceOpts || []).find(o => o.value === value)?.label || '— auto —';
+    dd.querySelector('.iface-dd-btn').textContent = label;
+    dd.querySelector('.iface-dd-btn').title = label;
+    dd.querySelectorAll('.iface-dd-list li').forEach(l => l.classList.toggle('selected', l.dataset.value === value));
+    dd.classList.remove('open');
+    deployState.analyzed[+idx][field] = value || undefined;
+  });
+
+  // ── input: .iface-dd-search (filter list) ──
+  container.addEventListener('input', e => {
+    if (!e.target.matches('.iface-dd-search')) return;
+    const q = e.target.value.toLowerCase();
+    e.target.closest('.iface-dd-panel').querySelectorAll('.iface-dd-list li').forEach(li => {
+      li.hidden = !!q && !li.textContent.toLowerCase().includes(q);
+    });
   });
 
   // ── change: .deploy-name-sel ──
@@ -2899,9 +3112,9 @@ function wireDeployTable() {
     }
   });
 
-  // ── click: .btn-use32 ──
+  // ── click: .btn-toggle32 — toggle /32 mode directement (un clic) ──
   container.addEventListener('click', e => {
-    const btn = e.target.closest('.btn-use32');
+    const btn = e.target.closest('.btn-toggle32');
     if (!btn) return;
     e.stopPropagation();
     const idx  = +btn.dataset.idx;
@@ -2913,21 +3126,32 @@ function wireDeployTable() {
     renderDeployPolicies(filterDeployPolicies(), false);
   });
 
-  // ── click: .src-hosts-badge and .dst-hosts-badge ──
+  // ── input: .host-name-input — mise à jour du nom d'hôte /32 ──
+  container.addEventListener('input', e => {
+    const input = e.target.closest('.host-name-input');
+    if (!input) return;
+    const idx  = +input.dataset.idx;
+    const type = input.dataset.type;
+    const host = input.dataset.host;
+    const p    = deployState.analyzed[idx];
+    if (!p) return;
+    if (type === 'src') {
+      if (!p._srcHostNames) p._srcHostNames = {};
+      p._srcHostNames[host] = input.value;
+    } else {
+      if (!p._dstHostNames) p._dstHostNames = {};
+      p._dstHostNames[host] = input.value;
+    }
+  });
+
+  // ── click: .btn-hosts-edit — afficher/masquer les noms d'objets /32 ──
   container.addEventListener('click', e => {
-    const srcBadge = e.target.closest('.src-hosts-badge');
-    if (srcBadge) {
-      const idx    = srcBadge.dataset.idx;
-      const detail = document.getElementById(`src-hosts-${idx}`);
-      if (detail) detail.style.display = detail.style.display === 'none' ? '' : 'none';
-      return;
-    }
-    const dstBadge = e.target.closest('.dst-hosts-badge');
-    if (dstBadge) {
-      const idx    = dstBadge.dataset.idx;
-      const detail = document.getElementById(`dst-hosts-${idx}`);
-      if (detail) detail.style.display = detail.style.display === 'none' ? '' : 'none';
-    }
+    const btn = e.target.closest('.btn-hosts-edit');
+    if (!btn) return;
+    const idx  = btn.dataset.idx;
+    const type = btn.dataset.type;
+    const detail = document.getElementById(`${type}-hosts-${idx}`);
+    if (detail) detail.style.display = detail.style.display === 'none' ? '' : 'none';
   });
 
   // ── click: .deploy-dst-detail-btn ──
@@ -3036,10 +3260,15 @@ function renderDeployPolicies(analyzed, resetPage = true) {
   for (const z of zones) { for (const m of z.members) ifaceToZone[m] = z.name; }
   // Dropdown: zones first, then interfaces not in any zone
   const ifaceNotInZone = ifaces.filter(n => !ifaceToZone[n]);
-  const allIfOpts = [
-    ...zoneNames.map(n => `<option value="${escHtml(n)}">${escHtml(n)} (zone)</option>`),
-    ...ifaceNotInZone.map(n => `<option value="${escHtml(n)}">${escHtml(n)}</option>`),
-  ].join('');
+  deployState.ifaceOpts = [
+    { value: '', label: '— auto —' },
+    ...zoneNames.map(n => ({ value: n, label: `${n} (zone)` })),
+    ...ifaceNotInZone.map(n => ({ value: n, label: n })),
+  ];
+  const allIfOpts = deployState.ifaceOpts
+    .filter(o => o.value)
+    .map(o => `<option value="${escHtml(o.value)}">${escHtml(o.label)}</option>`)
+    .join('');
 
   // rows use the real index in deployState.analyzed (not filtered position)
   // so that data-idx always references the correct policy in the full array
@@ -3092,15 +3321,11 @@ function renderDeployPolicies(analyzed, resetPage = true) {
       const srcSrcBadge = p._srcIfaceSource && p._srcIfaceSource !== 'auto' && p._srcintf
         ? `<span class="intf-src-badge ${p._srcIfaceSource}" title="Détecté via : ${srcLabels[p._srcIfaceSource] || p._srcIfaceSource}">${srcLabels[p._srcIfaceSource]}</span>`
         : '';
-      srcSel = `<span style="display:inline-flex;align-items:center;gap:4px">${srcSrcBadge}<select class="deploy-iface-sel" data-idx="${idx}" data-field="_srcintf">
-        <option value="">— auto —</option>${allIfOpts}
-      </select></span>`;
+      srcSel = `<span style="display:inline-flex;align-items:center;gap:4px">${srcSrcBadge}${buildIfaceDropdown(idx, '_srcintf', p._srcintf || '')}</span>`;
       const dstSrcBadge = p._dstIfaceSource && p._dstIfaceSource !== 'auto' && p._dstintf
         ? `<span class="intf-src-badge ${p._dstIfaceSource}" title="Détecté via : ${srcLabels[p._dstIfaceSource] || p._dstIfaceSource}">${srcLabels[p._dstIfaceSource]}</span>`
         : '';
-      dstSel = `<span style="display:inline-flex;align-items:center;gap:4px">${dstSrcBadge}<select class="deploy-iface-sel" data-idx="${idx}" data-field="_dstintf">
-        <option value="">— auto —</option>${allIfOpts}
-      </select></span>`;
+      dstSel = `<span style="display:inline-flex;align-items:center;gap:4px">${dstSrcBadge}${buildIfaceDropdown(idx, '_dstintf', p._dstintf || '')}</span>`;
       sameIntfWarn = (p._srcintf && p._dstintf && p._srcintf === p._dstintf)
         ? `<span class="intf-warn" title="⚠ srcintf = dstintf : policy possiblement invalide">⚠</span>` : '';
     }
@@ -3124,15 +3349,14 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     const srcHosts = p.srcHosts || [];
     const use32Src = p._use32Src || false;
     let srcHostsHtml = '';
-    if (srcHosts.length > 1) {
-      const rows = srcHosts.slice(0, 50).map(h => `<div class="mono" style="font-size:10px;color:var(--text2)">${escHtml(h)}</div>`).join('');
+    if (srcHosts.length >= 1) {
+      const rows = srcHosts.slice(0, 50).map(h => buildHostRow(h, p._srcHostNames, idx, 'src')).join('');
       const moreH = srcHosts.length > 50 ? `<div style="font-size:10px;color:var(--text2)">+${srcHosts.length - 50} autres…</div>` : '';
-      srcHostsHtml = `<button class="btn-sm src-hosts-badge ${use32Src ? 'hosts-active' : ''}" data-idx="${idx}" style="font-size:9px;padding:1px 5px;margin-top:2px">${srcHosts.length} hôtes${use32Src ? ' /32 ✓' : ' ▾'}</button>
+      srcHostsHtml = `<span style="display:inline-flex;align-items:center;gap:2px;margin-top:2px">
+        <button class="btn-sm btn-toggle32 ${use32Src ? 'hosts-active' : ''}" data-idx="${idx}" data-type="src" title="${use32Src ? 'Mode /32 actif — cliquer pour revenir en subnet' : 'Cliquer pour activer les objets /32'}" style="font-size:9px;padding:1px 5px">${srcHosts.length} hôtes${use32Src ? ' /32 ✓' : ''}</button><button class="btn-sm btn-hosts-edit" data-idx="${idx}" data-type="src" title="Noms des objets /32" style="font-size:9px;padding:1px 4px;opacity:0.6">✏</button>
+      </span>
       <div class="hosts-detail" id="src-hosts-${idx}" style="display:none;margin-top:4px;max-height:130px;overflow-y:auto;background:var(--bg0);border:1px solid var(--border);border-radius:4px;padding:4px 8px">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;padding-bottom:4px;border-bottom:1px solid var(--border)">
-          <span style="font-size:10px;font-weight:600">${srcHosts.length} hôtes réels</span>
-          <button class="btn-sm btn-use32" data-idx="${idx}" data-type="src" style="font-size:9px">${use32Src ? '↩ /24' : '⇒ /32'}</button>
-        </div>
+        <div style="font-size:10px;font-weight:600;margin-bottom:4px;padding-bottom:4px;border-bottom:1px solid var(--border)">${srcHosts.length} hôtes — noms d'objets</div>
         ${rows}${moreH}
       </div>`;
     }
@@ -3234,7 +3458,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     ${paginationBar}
     <div style="font-size:11px;color:var(--text2);margin-top:6px">* détectée automatiquement — overridable</div>`;
 
-  el('deploy-step3-footer').style.display = '';
+  el('deploy-step4-footer').style.display = '';
 
   // Wire pagination buttons (both top and bottom bars) — re-wired each render
   // because page/pages values change and the buttons are recreated
@@ -3276,12 +3500,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     });
   }
 
-  // Pre-select auto-detected values for interface selects — must happen after innerHTML set
-  body.querySelectorAll('.deploy-iface-sel').forEach(sel => {
-    const { idx, field } = sel.dataset;
-    const auto = deployState.analyzed[+idx]?.[field];
-    if (auto) sel.value = auto;
-  });
+  // (iface dropdowns are pre-selected via buildIfaceDropdown — no post-render step needed)
 
   // Wire event delegation on deploy-policy-body (idempotent — only installed once)
   wireDeployTable();
@@ -3421,6 +3640,11 @@ if (expertToggle) {
     document.body.classList.toggle('simple-mode', !state.expertMode);
   });
 }
+
+// Close any open iface-dd when clicking outside
+document.addEventListener('click', () => {
+  document.querySelectorAll('.iface-dd.open').forEach(d => d.classList.remove('open'));
+});
 
 // Start
 navigateTo('dashboard');

@@ -502,6 +502,50 @@ function buildFullRouteTable(staticRoutes, interfaces) {
   return all;
 }
 
+// Parse output of: get router info routing-table all
+// Handles all route types: C (connected), S (static), O/O IA/O E1/O E2 (OSPF), B (BGP), R (RIP), K (kernel)
+// Two line formats:
+//   with gateway : "S   10.x.x.x/xx [10/0] via 10.x.x.x, portX"
+//   connected    : "C   10.x.x.x/xx is directly connected, portX"
+function parseFullRoutingTable(text) {
+  const distanceMap = { C: 0, K: 0, S: 1, R: 120, O: 110, B: 20 };
+  const routes = [];
+
+  for (const line of text.split('\n')) {
+    // Connected routes: "C   10.x.x.x/xx is directly connected, portX"
+    const mc = line.match(/^\s*C\s+(\d+\.\d+\.\d+\.\d+(?:\/\d+)?)\s+is directly connected,\s*([^\s,]+)/);
+    if (mc) {
+      let dst = mc[1];
+      if (!dst.includes('/')) dst += '/32';
+      routes.push({ dst, gateway: '', device: mc[2], distance: 0, priority: 0, source: 'connected' });
+      continue;
+    }
+
+    // Routed lines: "[S*|S|O|O IA|O E1|O E2|B|R|K] dst [dist/metric] via gw, dev"
+    // Type token may contain spaces (e.g. "O IA", "O E2") — stop at the first digit of the dst IP
+    const mr = line.match(/^\s*([A-Z][A-Z0-9* ]*?)\s{2,}(\d+\.\d+\.\d+\.\d+(?:\/\d+)?)\s+\[(\d+)\/\d+\]\s+via\s+([\d.]+),\s*([^\s,]+)/);
+    if (mr) {
+      let dst = mr[2];
+      if (!dst.includes('/')) dst += '/32';
+      const typeCode = mr[1].trim().replace(/[* ]/g, '')[0]; // first letter: S, O, B, R, K…
+      const distance = parseInt(mr[3], 10);
+      const source = ({ S: 'static', O: 'ospf', B: 'bgp', R: 'rip', K: 'kernel' }[typeCode] || 'static');
+      routes.push({ dst, gateway: mr[4], device: mr[5], distance, priority: 0, source });
+    }
+  }
+
+  return routes;
+
+}
+
+// Keep protocol-specific parsers as thin wrappers (backward compat)
+function parseOspfRoutingTable(text) {
+  return parseFullRoutingTable(text).filter(r => r.source === 'ospf');
+}
+function parseBgpNetworkTable(text) {
+  return parseFullRoutingTable(text).filter(r => r.source === 'bgp');
+}
+
 // Longest-prefix match dans la table de routes
 // skipDefault=true pour les recherches srcintf (pas de fallback 0.0.0.0/0)
 function findInterfaceByRoute(dstCidr, routes, skipDefault) {
@@ -585,14 +629,14 @@ function findAddress(cidr, addresses) {
   if (!cidr) return { found: false };
   const matches = [];
   for (const [name, addr] of Object.entries(addresses)) {
-    if (addr.cidr === cidr) { matches.push({ name, cidr: addr.cidr }); continue; }
+    if (addr.cidr === cidr) { matches.push({ name, cidr: addr.cidr, source: 'config' }); continue; }
     if (cidr.endsWith('/32')) {
       const ip = cidr.slice(0, -3);
-      if (addr.cidr === ip || addr.cidr === `${ip}/32`) matches.push({ name, cidr: addr.cidr });
+      if (addr.cidr === ip || addr.cidr === `${ip}/32`) matches.push({ name, cidr: addr.cidr, source: 'config' });
     }
   }
   if (matches.length === 0) return { found: false };
-  return { found: true, name: matches[0].name, allMatches: matches };
+  return { found: true, name: matches[0].name, source: 'config', allMatches: matches };
 }
 
 // Cherche un groupe d'adresses existant contenant exactement les CIDRs donnés
@@ -818,8 +862,22 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
       || (!dstAddrMatch.found)
       || serviceItems.some(s => !s.found);
 
+    // Pré-résoudre les noms d'objets /32 existants pour chaque hôte src/dst
+    const srcHostNames = {};
+    for (const h of (p.srcHosts || [])) {
+      const m = findAddress(`${h}/32`, addresses);
+      if (m.found) srcHostNames[h] = m.name;
+    }
+    const dstHostNames = {};
+    for (const h of (p.dstHosts || [])) {
+      const m = findAddress(`${h}/32`, addresses);
+      if (m.found) dstHostNames[h] = m.name;
+    }
+
     return {
       ...p,
+      _srcHostNames: Object.keys(srcHostNames).length ? { ...p._srcHostNames, ...srcHostNames } : (p._srcHostNames || undefined),
+      _dstHostNames: Object.keys(dstHostNames).length ? { ...p._dstHostNames, ...dstHostNames } : (p._dstHostNames || undefined),
       analysis: {
         srcAddr:    { ...srcAddrMatch,  cidr: p.srcSubnet, suggestedName: suggestAddrName(p.srcSubnet) },
         dstAddr:    { ...dstAddrMatch,  cidr: p.dstTarget, suggestedName: suggestAddrName(p.dstTarget) },
@@ -878,7 +936,7 @@ function generateConfig(selectedPolicies, opts = {}) {
       if (hostNames.length === 1) {
         srcAddrName = hostNames[0];
       } else {
-        srcAddrGrpName = p._srcAddrName || `FF_HOSTS_${suggestAddrName(p.srcSubnet)}`;
+        srcAddrGrpName = `FF_HOSTS_${suggestAddrName(p.srcSubnet)}`;
         srcAddrNames = hostNames;
         newAddrGroups.set(srcAddrGrpName, hostNames);
       }
@@ -915,7 +973,7 @@ function generateConfig(selectedPolicies, opts = {}) {
       if (hostNames.length === 1) {
         dstAddrName = hostNames[0];
       } else {
-        const grpName = p._dstAddrName || `FF_HOSTS_${suggestAddrName(p.dstTarget)}`;
+        const grpName = `FF_HOSTS_${suggestAddrName(p.dstTarget)}`;
         newAddrGroups.set(grpName, hostNames);
         dstAddrName = grpName;
       }
@@ -990,7 +1048,6 @@ function generateConfig(selectedPolicies, opts = {}) {
       const prefix = parseInt(pfxStr, 10) || 32;
       const mask   = cidrToMask(prefix);
       L.push(`    edit "${name}"`);
-      L.push(`        set type ipmask`);
       L.push(`        set subnet ${ip} ${mask}`);
       L.push(`    next`);
     }
@@ -1079,4 +1136,8 @@ module.exports = {
   findService,
   findServiceGroup,
   PREDEFINED,
+  parseFullRoutingTable,
+  parseOspfRoutingTable,
+  parseBgpNetworkTable,
+  sortRoutes,
 };
