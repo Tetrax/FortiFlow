@@ -926,10 +926,7 @@ function generateConfig(selectedPolicies, opts = {}) {
 
     // Source address(es) — peut être multiple si policy-grouped merge
     let srcAddrName, srcAddrNames, srcAddrGrpName;
-    if (p._srcMode === 'group' && p._srcGroupName) {
-      // Mode groupe : utiliser le groupe d'adresses existant sélectionné
-      srcAddrName = p._srcGroupName;
-    } else if (p._isSvcMerge && p._mergedSrcSubnets && p._mergedSrcSubnets.length > 1) {
+    if (p._isSvcMerge && p._mergedSrcSubnets && p._mergedSrcSubnets.length > 1) {
       // Fusion par service : créer un groupe d'adresses pour les sources fusionnées
       const subnetNames = p._mergedSrcSubnets.map(s => suggestAddrName(s));
       p._mergedSrcSubnets.forEach((cidr, i) => newAddresses.set(cidr, subnetNames[i]));
@@ -973,12 +970,11 @@ function generateConfig(selectedPolicies, opts = {}) {
 
     // Destination address
     let dstAddrName;
-    // ── Mode groupe : utiliser le groupe d'adresses existant sélectionné ──
-    if (p._dstMode === 'group' && p._dstGroupName) {
-      dstAddrName = p._dstGroupName;
-    } else
+    // ── WAN policy : dstaddr toujours "all" ──
+    if (p._isWan || p.dstType === 'public') {
+      dstAddrName = 'all';
     // ── Multi-dst policy : destinations diverses avec seuil /24 vs /32 ──
-    if (p._isMultiDst && p._multiDstSubnets?.length > 0) {
+    } else if (p._isMultiDst && p._multiDstSubnets?.length > 0) {
       const dstNames = [];
       for (const s of p._multiDstSubnets) {
         if (s.useSubnet) {

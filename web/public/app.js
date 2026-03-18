@@ -2519,10 +2519,9 @@ function dstTargetCell(p, idx) {
   const dstHosts   = p.dstHosts || [];
   const use32Dst   = p._use32Dst || false;
   const dstMode    = p._dstMode || (use32Dst ? 'hosts' : 'subnet');
-  const _addrGrps  = deployState.addrGroups ? Object.keys(deployState.addrGroups) : [];
   let dstHostsHtml = '';
   if (p.dstType === 'private') {
-    const dstModePills = buildModePills(idx, 'dst', dstMode, dstHosts.length >= 1, _addrGrps);
+    const dstModePills = buildModePills(idx, 'dst', dstMode, dstHosts.length >= 1);
     dstHostsHtml = `<div style="margin-top:2px;margin-left:4px">${dstModePills}</div>`;
     if (dstHosts.length >= 1 && dstMode === 'hosts') {
       const rows = dstHosts.slice(0, 50).map(h => buildHostRow(h, p._dstHostNames, idx, 'dst')).join('');
@@ -2658,6 +2657,7 @@ function mergeByPolicyId(policies) {
       if (dsts.length > 1) {
         // Plusieurs destinations → multi-dst (union services)
         const base          = ifGroup[0];
+        const isWan         = ifGroup.some(p => p.dstType === 'public' || p.dstTarget === 'all' || p._isWan);
         const allServices   = mergeServices(ifGroup);
         const totalSessions = ifGroup.reduce((s, p) => s + (p.sessions || 0), 0);
         const srcSubnets    = [...new Set(ifGroup.map(p => p.srcSubnet).filter(Boolean))].sort();
@@ -2679,7 +2679,7 @@ function mergeByPolicyId(policies) {
           serviceDesc: allServices.map(s => s.label).join(', '),
           policyIds: allPolicyIds, srcHosts: allSrcHosts, dstHosts: [],
           _use32Src: allSrcHosts.length >= 1 && allSrcHosts.length <= AUTO32_THRESHOLD,
-          _use32Dst: false, _mergedCount: ifGroup.length, _isWan: false, _nat: false,
+          _use32Dst: false, _mergedCount: ifGroup.length, _isWan: isWan, _nat: isWan,
           _srcAddrName: base._srcAddrName || suggestAddrNameFE(srcSubnets[0]),
           _dstAddrName: `GRP_${policyId}_DST`,
           _policyName: `FF_POLICY_${policyId}`,
@@ -3118,18 +3118,11 @@ function escSlug(s) {
   return (s || '').replace(/[./]/g, '_').replace(/[^a-zA-Z0-9_]/g, '');
 }
 
-// ── Per-policy address mode pills (/24 | /32 | grp▾) ──────────────────────────
-function buildModePills(idx, type, currentMode, hasHosts, groups) {
-  const grpSel = groups && groups.length
-    ? `<select class="deploy-grp-sel" data-idx="${idx}" data-type="${type}">
-         <option value="">-- groupe --</option>
-         ${groups.map(g => `<option value="${escHtml(g)}">${escHtml(g)}</option>`).join('')}
-       </select>`
-    : '';
+// ── Per-policy address mode pills (/24 | /32) ──────────────────────────
+function buildModePills(idx, type, currentMode, hasHosts) {
   return `<span class="mode-pills">
     <button class="btn-addr-mode ${currentMode==='subnet'?'active':''}" data-idx="${idx}" data-type="${type}" data-mode="subnet">/24</button>
     <button class="btn-addr-mode ${currentMode==='hosts'?'active':''} ${hasHosts?'':'disabled'}" data-idx="${idx}" data-type="${type}" data-mode="hosts">/32</button>
-    ${grpSel ? `<button class="btn-addr-mode ${currentMode==='group'?'active':''}" data-idx="${idx}" data-type="${type}" data-mode="group">grp▾</button>${currentMode==='group'?grpSel:''}` : ''}
   </span>`;
 }
 
@@ -3358,18 +3351,6 @@ function wireDeployTable() {
     renderDeployPolicies(filterDeployPolicies(), false);
   });
 
-  // ── change: .deploy-grp-sel — group dropdown selection ──
-  container.addEventListener('change', e => {
-    if (!e.target.matches('.deploy-grp-sel')) return;
-    const idx  = +e.target.dataset.idx;
-    const type = e.target.dataset.type;
-    const p    = deployState.analyzed[idx];
-    if (!p) return;
-    if (type === 'src') p._srcGroupName = e.target.value;
-    else                p._dstGroupName = e.target.value;
-    renderDeployPolicies(filterDeployPolicies(), false);
-  });
-
   // ── input: .host-name-input — mise à jour du nom d'hôte /32 ──
   container.addEventListener('input', e => {
     const input = e.target.closest('.host-name-input');
@@ -3570,22 +3551,13 @@ function renderDeployPolicies(analyzed, resetPage = true) {
       srcAddrCell = addrCell(p.analysis?.srcAddr, p._srcAddrName, idx, '_srcAddrName');
     }
     // En mode /32 dst actif : afficher les noms des hôtes /32 au lieu du /24
-    // En mode group : afficher le groupe sélectionné
     const _dstModeResolved = p._dstMode || (p._use32Dst ? 'hosts' : 'subnet');
     let dstAddrCell;
-    if (_dstModeResolved === 'group' && p._dstGroupName) {
-      dstAddrCell = `<span class="match-ok">grp: ${escHtml(p._dstGroupName)}</span>`;
-    } else if (_dstModeResolved === 'hosts' && (p.dstHosts || []).length > 0) {
+    if (_dstModeResolved === 'hosts' && (p.dstHosts || []).length > 0) {
       const names = (p.dstHosts || []).map(h => (p._dstHostNames || {})[h] || `FF_HOST_${h.replace(/\./g,'_')}`);
       dstAddrCell = names.map(n => `<span class="match-ok" style="display:block;font-size:10px">${escHtml(n)}</span>`).join('');
     } else {
       dstAddrCell = addrCell(p.analysis?.dstAddr, p._dstAddrName, idx, '_dstAddrName');
-    }
-
-    // En mode group src : afficher le groupe sélectionné
-    const _srcModeResolved = p._srcMode || (p._use32Src ? 'hosts' : 'subnet');
-    if (_srcModeResolved === 'group' && p._srcGroupName && !(p.srcSubnets && p.srcSubnets.length > 1)) {
-      srcAddrCell = `<span class="match-ok">grp: ${escHtml(p._srcGroupName)}</span>`;
     }
 
     const svcList = p.analysis?.services || [];
@@ -3635,10 +3607,9 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     const srcHosts   = p.srcHosts || [];
     const use32Src   = p._use32Src || false;
     const srcMode    = p._srcMode || (use32Src ? 'hosts' : 'subnet');
-    const addrGroups = deployState.addrGroups ? Object.keys(deployState.addrGroups) : [];
     let srcHostsHtml = '';
     // Mode pills always shown
-    const srcModePills = buildModePills(idx, 'src', srcMode, srcHosts.length >= 1, addrGroups);
+    const srcModePills = buildModePills(idx, 'src', srcMode, srcHosts.length >= 1);
     srcHostsHtml = `<div style="margin-top:2px">${srcModePills}</div>`;
     if (srcHosts.length >= 1 && srcMode === 'hosts') {
       const rows = srcHosts.slice(0, 50).map(h => buildHostRow(h, p._srcHostNames, idx, 'src')).join('');
