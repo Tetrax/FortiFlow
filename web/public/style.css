@@ -1177,3 +1177,10 @@ body.simple-mode [data-expert] { display: none !important; }
 .wizard-connector { width: 48px; height: 1px; background: var(--border2); margin: 0 12px; transition: background 0.2s; }
 .wizard-connector.done { background: var(--brand); }
 .wizard-nav { display: flex; justify-content: space-between; align-items: center; padding: 14px 20px; border-top: 1px solid var(--border); }
+
+/* ── Mode pills (per-policy /24 / /32 / grp selector) ───────────────────────── */
+.mode-pills { display: inline-flex; gap: 2px; align-items: center; }
+.mode-pills .btn-addr-mode { padding: 1px 5px; font-size: 10px; border: 1px solid #4a9eff; border-radius: 3px; cursor: pointer; background: transparent; color: #4a9eff; }
+.mode-pills .btn-addr-mode.active { background: #4a9eff; color: #fff; }
+.mode-pills .btn-addr-mode.disabled { opacity: 0.4; cursor: default; pointer-events: none; }
+.deploy-grp-sel { font-size: 10px; padding: 1px 3px; max-width: 120px; }

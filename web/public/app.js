@@ -415,12 +415,12 @@ async function loadFlows() {
 function renderFlowsTable(data) {
   const COLS = [
     { key: 'srcip',     label: 'Source IP',  mono: true  },
-    { key: 'srcSubnet', label: 'Subnet src', mono: true  },
+    { key: 'srcSubnet', label: 'Subnet src', mono: true,  expert: true },
     { key: 'dstip',     label: 'Dest IP',    mono: true  },
-    { key: 'dstType',   label: 'Type dst',   render: r => typeTag(r.dstType) },
+    { key: 'dstType',   label: 'Type dst',   render: r => typeTag(r.dstType), expert: true },
     { key: 'dstport',   label: 'Port',       mono: true  },
     { key: 'protoName', label: 'Proto',      render: r => protoTag(r.protoName) },
-    { key: 'service',   label: 'Service',    mono: true  },
+    { key: 'service',   label: 'Service',    mono: true,  expert: true },
     { key: 'action',    label: 'Action',     render: r => actionTag(r.action) },
     { key: 'count',     label: 'Sessions',   mono: true, render: r => fmtNum(r.count) },
     { key: 'totalBytes',label: 'Octets',     mono: true, render: r => fmtBytes(r.totalBytes) },
@@ -438,13 +438,15 @@ function renderFlowsTable(data) {
 
   const head = COLS.map(c => {
     const sortIcon = c.key === sort ? (order === 'asc' ? ' ↑' : ' ↓') : '';
-    return `<th class="${c.key === sort ? 'sorted' : ''}" data-col="${c.key}">${c.label}${sortIcon}</th>`;
+    return `<th class="${c.key === sort ? 'sorted' : ''}" data-col="${c.key}"${c.expert ? ' data-expert' : ''}>${c.label}${sortIcon}</th>`;
   }).join('');
 
   const rows = data.data.map(r => {
     const cells = COLS.map(c => {
       const val = c.render ? c.render(r) : (r[c.key] ?? '–');
-      return `<td${c.mono ? ' class="mono"' : ''}>${val}</td>`;
+      const cls = c.mono ? ' class="mono"' : '';
+      const exp = c.expert ? ' data-expert' : '';
+      return `<td${cls}${exp}>${val}</td>`;
     }).join('');
     return `<tr>${cells}</tr>`;
   }).join('');
@@ -992,9 +994,9 @@ function renderPoliciesTable(policies) {
       <td class="mono">${typeTag(p.dstType)} ${p.dstTarget}</td>
       <td style="max-width:260px;white-space:normal;font-family:var(--mono);font-size:11px;">${escHtml(p.serviceDesc)}</td>
       <td class="mono">${p.sessions > 0 ? fmtNum(p.sessions) : '–'}</td>
-      <td class="mono">${fmtBytes(p.sentBytes + p.rcvdBytes)}</td>
+      <td class="mono" data-expert>${fmtBytes(p.sentBytes + p.rcvdBytes)}</td>
       <td>${actionTag(p.action)}</td>
-      <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;font-family:var(--mono);font-size:10px;color:var(--text2)">${escHtml(p.name)}</td>
+      <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;font-family:var(--mono);font-size:10px;color:var(--text2)" data-expert>${escHtml(p.name)}</td>
       <td><button class="drill-btn" onclick="togglePolicyDrill(${i},'${srcB64}','${dstB64}')">▾ Hôtes</button></td>
     </tr>
     <tr id="${pid}" class="policy-drill-row" style="display:none;">
@@ -1015,9 +1017,9 @@ function renderPoliciesTable(policies) {
             <th>Destination</th>
             <th>Services / Ports</th>
             <th>Sessions</th>
-            <th>Volume</th>
+            <th data-expert>Volume</th>
             <th>Action</th>
-            <th>Nom suggéré</th>
+            <th data-expert>Nom suggéré</th>
             <th></th>
           </tr>
         </thead>
@@ -1579,7 +1581,8 @@ function showMergeDiff(mode) {
   const original = deployState._analyzedOriginal || deployState.analyzed;
   if (!original) return;
   let preview;
-  if (mode === 'policy') preview = mergeByPolicyId(original.map(p => ({ ...p })));
+  if (mode === 'policy')   preview = mergeByPolicyId(original.map(p => ({ ...p })));
+  else if (mode === 'service') preview = mergeByService(original.map(p => ({ ...p })));
   else preview = mergeAnalyzedPolicies(original.map(p => ({ ...p })), mode);
 
   const beforeCount = original.length;
@@ -1633,8 +1636,8 @@ function collectMissingObjects() {
     const a = p.analysis;
     if (!a) continue;
 
-    // Src address manquante (seulement si pas en mode /32)
-    if (!p._use32Src && a.srcAddr && !a.srcAddr.found) {
+    // Src address manquante (seulement si pas en mode /32 ni groupe)
+    if (p._srcMode !== 'hosts' && p._srcMode !== 'group' && !p._use32Src && a.srcAddr && !a.srcAddr.found) {
       const cidr = a.srcAddr.cidr;
       if (cidr) {
         if (!addresses.has(cidr)) addresses.set(cidr, { cidr, name: p._srcAddrName || a.srcAddr.suggestedName, policyCount: 0 });
@@ -1642,7 +1645,7 @@ function collectMissingObjects() {
       }
     }
     // Dst address manquante
-    if (!p._use32Dst && p.dstType === 'private' && a.dstAddr && !a.dstAddr.found) {
+    if (p._dstMode !== 'hosts' && p._dstMode !== 'group' && !p._use32Dst && p.dstType === 'private' && a.dstAddr && !a.dstAddr.found) {
       const cidr = a.dstAddr.cidr;
       if (cidr && cidr !== 'all') {
         if (!addresses.has(cidr)) addresses.set(cidr, { cidr, name: p._dstAddrName || a.dstAddr.suggestedName, policyCount: 0 });
@@ -1964,6 +1967,7 @@ async function deploy() {
               <div class="dropdown-item" data-merge="lan">Fusionner LAN</div>
               <div class="dropdown-item" data-merge="all">Tout fusionner</div>
               <div class="dropdown-item" data-merge="policy">Par Policy ID</div>
+              <div class="dropdown-item" data-merge="service">Par service</div>
               <div class="dropdown-sep"></div>
               <div class="dropdown-item" data-merge="reset">↺ Réinitialiser</div>
             </div>
@@ -2481,23 +2485,56 @@ function filterDeployPolicies() {
 
 // Cellule dstTarget avec bouton détails pour les targets fusionnés (all + liste IPs)
 function dstTargetCell(p, idx) {
+  // ── Multi-dst policy (mergeByPolicyId avec destinations diverses) ──
+  if (p._isMultiDst && p._multiDstSubnets?.length) {
+    const subs = p._multiDstSubnets;
+    const rows = subs.map((s, si) => {
+      const badge = s.addrFound
+        ? `<span class="match-ok" style="font-size:9px">✓ ${escHtml(s.addrName)}</span>`
+        : `<span style="color:var(--warn);font-size:9px">+ ${escHtml(s.addrName)}</span>`;
+      const modeBtn = `<button class="btn-sm btn-dst-subnet-toggle" data-idx="${idx}" data-si="${si}"
+        title="${s.useSubnet ? 'Mode /24 — cliquer pour /32' : 'Mode /32 — cliquer pour /24'}"
+        style="font-size:9px;padding:1px 5px">${s.useSubnet ? '/24' : `/32 (${s.hosts.length}h)`}</button>`;
+      const hostsHtml = !s.useSubnet
+        ? `<div style="margin-top:2px;padding-left:8px">${s.hosts.map(h => {
+            const rn = (p._dstHostNames || {})[h];
+            return `<div style="font-size:9px;color:var(--text2)">${escHtml(h)}${rn ? ` <span class="match-ok">✓ ${escHtml(rn)}</span>` : ''}</div>`;
+          }).join('')}</div>` : '';
+      return `<div style="display:flex;align-items:center;gap:4px;padding:2px 0;border-bottom:1px solid var(--border)">
+        <span class="mono" style="font-size:10px;min-width:120px">${escHtml(s.subnet)}</span>
+        ${modeBtn}${badge}
+      </div>${hostsHtml}`;
+    }).join('');
+    return `<button class="btn-sm btn-multidst-toggle" data-idx="${idx}" style="font-size:10px;padding:2px 7px">${subs.length} destinations ▾</button>
+    <div class="hosts-detail" id="multidst-${idx}" style="display:none;margin-top:4px;max-height:200px;overflow-y:auto;background:var(--bg0);border:1px solid var(--border);border-radius:4px;padding:4px 8px">
+      <div style="font-size:10px;font-weight:600;margin-bottom:4px;border-bottom:1px solid var(--border);padding-bottom:4px">${subs.length} destinations — cliquer /24↔/32</div>
+      ${rows}
+    </div>`;
+  }
+
   const label = p.dstTarget === 'all' ? 'all (internet)' : p.dstTarget;
   const ips   = p._dstIPs;
 
-  // Badge hôtes /32 pour destinations privées
-  const dstHosts = p.dstHosts || [];
-  const use32Dst = p._use32Dst || false;
+  // Mode pills + Badge hôtes /32 pour destinations privées
+  const dstHosts   = p.dstHosts || [];
+  const use32Dst   = p._use32Dst || false;
+  const dstMode    = p._dstMode || (use32Dst ? 'hosts' : 'subnet');
+  const _addrGrps  = deployState.addrGroups ? Object.keys(deployState.addrGroups) : [];
   let dstHostsHtml = '';
-  if (p.dstType === 'private' && dstHosts.length >= 1) {
-    const rows = dstHosts.slice(0, 50).map(h => buildHostRow(h, p._dstHostNames, idx, 'dst')).join('');
-    const moreH = dstHosts.length > 50 ? `<div style="font-size:10px;color:var(--text2)">+${dstHosts.length - 50} autres…</div>` : '';
-    dstHostsHtml = `<span style="display:inline-flex;align-items:center;gap:2px;margin-left:4px">
-      <button class="btn-sm btn-toggle32 ${use32Dst ? 'hosts-active' : ''}" data-idx="${idx}" data-type="dst" title="${use32Dst ? 'Mode /32 actif — cliquer pour revenir en subnet' : 'Cliquer pour activer les objets /32'}" style="font-size:9px;padding:1px 5px">${dstHosts.length} hôtes${use32Dst ? ' /32 ✓' : ''}</button><button class="btn-sm btn-hosts-edit" data-idx="${idx}" data-type="dst" title="Noms des objets /32" style="font-size:9px;padding:1px 4px;opacity:0.6">✏</button>
-    </span>
-    <div class="hosts-detail" id="dst-hosts-${idx}" style="display:none;margin-top:4px;max-height:130px;overflow-y:auto;background:var(--bg0);border:1px solid var(--border);border-radius:4px;padding:4px 8px">
-      <div style="font-size:10px;font-weight:600;margin-bottom:4px;padding-bottom:4px;border-bottom:1px solid var(--border)">${dstHosts.length} hôtes — noms d'objets</div>
-      ${rows}${moreH}
-    </div>`;
+  if (p.dstType === 'private') {
+    const dstModePills = buildModePills(idx, 'dst', dstMode, dstHosts.length >= 1, _addrGrps);
+    dstHostsHtml = `<div style="margin-top:2px;margin-left:4px">${dstModePills}</div>`;
+    if (dstHosts.length >= 1 && dstMode === 'hosts') {
+      const rows = dstHosts.slice(0, 50).map(h => buildHostRow(h, p._dstHostNames, idx, 'dst')).join('');
+      const moreH = dstHosts.length > 50 ? `<div style="font-size:10px;color:var(--text2)">+${dstHosts.length - 50} autres…</div>` : '';
+      dstHostsHtml += `<span style="display:inline-flex;align-items:center;gap:2px;margin-left:4px">
+        <button class="btn-sm btn-hosts-edit" data-idx="${idx}" data-type="dst" title="Noms des objets /32" style="font-size:9px;padding:1px 4px;opacity:0.6">✏ ${dstHosts.length}h</button>
+      </span>
+      <div class="hosts-detail" id="dst-hosts-${idx}" style="display:none;margin-top:4px;max-height:130px;overflow-y:auto;background:var(--bg0);border:1px solid var(--border);border-radius:4px;padding:4px 8px">
+        <div style="font-size:10px;font-weight:600;margin-bottom:4px;padding-bottom:4px;border-bottom:1px solid var(--border)">${dstHosts.length} hôtes — noms d'objets</div>
+        ${rows}${moreH}
+      </div>`;
+    }
   }
 
   if (!ips || ips.length === 0) return `<span class="mono">${escHtml(label)}</span>${dstHostsHtml}`;
@@ -2602,9 +2639,62 @@ function mergeByPolicyId(policies) {
   for (const [policyId, group] of groups) {
     if (group.length === 1) { merged.push({ ...group[0] }); continue; }
 
-    // Sous-grouper par ensemble de services identiques
-    const svcSubGroups = new Map(); // serviceSetKey → [policies]
+    // ── Pré-pass : grouper par srcSubnet|srcIntf|dstIntf pour détecter multi-dst ──
+    // Avant même le subgrouping par services, on groupe par interface pair.
+    // Cela évite que des services légèrement différents empêchent la fusion multi-dst.
+    const ifaceGroups = new Map();
     for (const p of group) {
+      const src = p._srcintf || p.srcintf || '';
+      const dst = p._dstintf || p.dstintf || '';
+      const ik  = `${p.srcSubnet}|${src}|${dst}`;
+      if (!ifaceGroups.has(ik)) ifaceGroups.set(ik, []);
+      ifaceGroups.get(ik).push(p);
+    }
+
+    // Pour chaque groupe interface-pair avec plusieurs destinations → multi-dst
+    const remainingForSvcMerge = [];
+    for (const [, ifGroup] of ifaceGroups) {
+      const dsts = [...new Set(ifGroup.map(p => p.dstTarget).filter(Boolean))];
+      if (dsts.length > 1) {
+        // Plusieurs destinations → multi-dst (union services)
+        const base          = ifGroup[0];
+        const allServices   = mergeServices(ifGroup);
+        const totalSessions = ifGroup.reduce((s, p) => s + (p.sessions || 0), 0);
+        const srcSubnets    = [...new Set(ifGroup.map(p => p.srcSubnet).filter(Boolean))].sort();
+        const allPolicyIds  = [...new Set(ifGroup.flatMap(p => p.policyIds || []))].sort((a, b) => Number(a) - Number(b));
+        const allSrcHosts   = [...new Set(ifGroup.flatMap(p => p.srcHosts || []))].sort();
+        const DST_SUBNET_THRESHOLD = 5;
+        const dstSubnets = dsts.map(subnet => {
+          const subnetPols = ifGroup.filter(p => p.dstTarget === subnet);
+          const hosts      = [...new Set(subnetPols.flatMap(p => p.dstHosts || []))].sort();
+          const dstAddr    = subnetPols[0]?.analysis?.dstAddr;
+          return { subnet, hosts, useSubnet: hosts.length >= DST_SUBNET_THRESHOLD,
+            addrName: dstAddr?.found ? dstAddr.name : suggestAddrNameFE(subnet), addrFound: !!(dstAddr?.found) };
+        });
+        merged.push({
+          ...base, srcSubnet: srcSubnets[0], srcSubnets,
+          dstTarget: dsts[0], dstTargets: dsts,
+          _multiDstSubnets: dstSubnets, _isMultiDst: true,
+          dstType: base.dstType, sessions: totalSessions,
+          serviceDesc: allServices.map(s => s.label).join(', '),
+          policyIds: allPolicyIds, srcHosts: allSrcHosts, dstHosts: [],
+          _use32Src: allSrcHosts.length >= 1 && allSrcHosts.length <= AUTO32_THRESHOLD,
+          _use32Dst: false, _mergedCount: ifGroup.length, _isWan: false, _nat: false,
+          _srcAddrName: base._srcAddrName || suggestAddrNameFE(srcSubnets[0]),
+          _dstAddrName: `GRP_${policyId}_DST`,
+          _policyName: `FF_POLICY_${policyId}`,
+          srcAddrNames: srcSubnets.length > 1 ? srcSubnets.map(s => `FF_${escSlug(s)}`) : null,
+          analysis: { ...base.analysis, services: allServices, needsWork: allServices.some(s => !s.found) },
+        });
+      } else {
+        // Une seule destination → traiter via le subgrouping services classique
+        remainingForSvcMerge.push(...ifGroup);
+      }
+    }
+
+    // Sous-grouper par ensemble de services identiques (pour les policies restantes)
+    const svcSubGroups = new Map(); // serviceSetKey → [policies]
+    for (const p of remainingForSvcMerge) {
       const sk = serviceSetKey(p);
       if (!svcSubGroups.has(sk)) svcSubGroups.set(sk, []);
       svcSubGroups.get(sk).push(p);
@@ -2625,31 +2715,80 @@ function mergeByPolicyId(policies) {
       const allPolicyIds  = [...new Set(subGroup.flatMap(p => p.policyIds || []))].sort((a, b) => Number(a) - Number(b));
       const isWan         = subGroup.some(p => p._isWan || p.dstType === 'public');
       const allDstTargets = [...new Set(subGroup.map(p => p.dstTarget).filter(t => t && t !== 'all'))];
-      const dstTarget     = isWan ? 'all' : (cidrSupernet(allDstTargets) || base.dstTarget);
-      const allDstIPs     = [...new Set(subGroup.flatMap(p => p.dstIPs || (p.dstType === 'public' ? [p.dstTarget] : [])).filter(t => t && t !== 'all'))];
-      const allSrcHosts   = [...new Set(subGroup.flatMap(p => p.srcHosts || []))].sort();
-      const allDstHosts   = [...new Set(subGroup.flatMap(p => p.dstHosts || []))].sort();
-      const multiSrc      = srcSubnets.length > 1;
+      // Compute supernet only if it's specific enough (≥ /24) — avoid broad /9, /8 etc.
+      const supernet     = cidrSupernet(allDstTargets);
+      const supernetBits = supernet ? parseInt(supernet.split('/')[1] || '32', 10) : 0;
+      if (!isWan && supernetBits < 24 && allDstTargets.length > 1) {
+        // Too many diverse destinations — split into separate policies per dstTarget
+        for (const sub of subGroup) merged.push({ ...sub });
+        continue;
+      }
+      const allDstIPs   = [...new Set(subGroup.flatMap(p => p.dstIPs || (p.dstType === 'public' ? [p.dstTarget] : [])).filter(t => t && t !== 'all'))];
+      const allSrcHosts = [...new Set(subGroup.flatMap(p => p.srcHosts || []))].sort();
+      const allDstHosts = [...new Set(subGroup.flatMap(p => p.dstHosts || []))].sort();
+      const multiSrc    = srcSubnets.length > 1;
 
-      // Chercher un groupe d'adresses existant contenant ces subnets
+      // Chercher un groupe d'adresses existant pour les sources
       let existingGrp = null;
       if (multiSrc && deployState.addrGroups) {
-        const addrGroups = deployState.addrGroups;
-        // Build a reverse lookup: cidr → address name
-        // We need the analyzed srcAddr names for each subnet
         const subnetAddrNames = subGroup.map(p => p.analysis?.srcAddr?.found ? p.analysis.srcAddr.name : null);
-        const allFound = subnetAddrNames.every(Boolean);
-        if (allFound) {
+        if (subnetAddrNames.every(Boolean)) {
           const memberNames = new Set(subnetAddrNames);
-          for (const [grpName, grp] of Object.entries(addrGroups)) {
+          for (const [grpName, grp] of Object.entries(deployState.addrGroups)) {
             const grpMembers = new Set(grp.members);
             if (grpMembers.size === memberNames.size && [...memberNames].every(m => grpMembers.has(m))) {
-              existingGrp = grpName;
-              break;
+              existingGrp = grpName; break;
             }
           }
         }
       }
+
+      // ── Multi-dst : destinations trop diverses pour un supernet ──
+      if (!isWan && supernetBits < 24 && allDstTargets.length > 1) {
+        const DST_SUBNET_THRESHOLD = 5;
+        const dstSubnets = allDstTargets.map(subnet => {
+          const subnetPols = subGroup.filter(p => p.dstTarget === subnet);
+          const hosts      = [...new Set(subnetPols.flatMap(p => p.dstHosts || []))].sort();
+          const dstAddr    = subnetPols[0]?.analysis?.dstAddr;
+          return {
+            subnet,
+            hosts,
+            useSubnet: hosts.length >= DST_SUBNET_THRESHOLD,
+            addrName:  dstAddr?.found ? dstAddr.name : suggestAddrNameFE(subnet),
+            addrFound: !!(dstAddr?.found),
+          };
+        });
+
+        merged.push({
+          ...base,
+          srcSubnet:        srcSubnets[0],
+          srcSubnets,
+          dstTarget:        allDstTargets[0],
+          dstTargets:       allDstTargets,
+          _multiDstSubnets: dstSubnets,
+          _isMultiDst:      true,
+          dstType:          base.dstType,
+          sessions:         totalSessions,
+          serviceDesc:      allServices.map(s => s.label).join(', '),
+          policyIds:        allPolicyIds,
+          srcHosts:         allSrcHosts,
+          dstHosts:         allDstHosts,
+          _use32Src:        allSrcHosts.length >= 1 && allSrcHosts.length <= AUTO32_THRESHOLD,
+          _use32Dst:        false,
+          _mergedCount:     subGroup.length,
+          _isWan:           false,
+          _nat:             false,
+          _srcAddrName:     existingGrp || (multiSrc ? `FF_POLICY_${policyId}_SRC` : (base._srcAddrName || suggestAddrNameFE(srcSubnets[0]))),
+          _srcAddrGrpFound: !!existingGrp,
+          _dstAddrName:     `GRP_${policyId}_DST`,
+          _policyName:      `FF_POLICY_${policyId}`,
+          srcAddrNames:     existingGrp ? null : (multiSrc ? srcSubnets.map(s => `FF_${escSlug(s)}`) : null),
+          analysis:         { ...base.analysis, services: allServices, needsWork: allServices.some(s => !s.found) },
+        });
+        continue;
+      }
+
+      const dstTarget = isWan ? 'all' : (supernetBits >= 24 ? supernet : base.dstTarget);
 
       merged.push({
         ...base,
@@ -2674,16 +2813,55 @@ function mergeByPolicyId(policies) {
         _dstAddrName: isWan ? 'all' : (dstTarget !== base.dstTarget ? suggestAddrNameFE(dstTarget) : base._dstAddrName),
         _policyName:  `FF_POLICY_${policyId}`,
         srcAddrNames: existingGrp ? null : (multiSrc ? srcSubnets.map(s => `FF_${escSlug(s)}`) : null),
-        analysis: {
-          ...base.analysis,
-          services:  allServices,
-          needsWork: allServices.some(s => !s.found),
-        },
+        analysis: { ...base.analysis, services: allServices, needsWork: allServices.some(s => !s.found) },
       });
     }
   }
 
   return merged;
+}
+
+// Fusionne les policies par ensemble de services + destination + dstintf
+// Crée des policies multi-src pour les politiques avec mêmes services/dst
+function mergeByService(policies) {
+  const groups = new Map();
+  for (const p of policies) {
+    const svcKey    = [...(p.services || [])].sort().join(',');
+    const dstKey    = p._dstAddrName || p.analysis?.dstAddr?.name || p.dstTarget || '';
+    const dstIntfKey = p._dstintf || p.dstintf || '';
+    const k = `${svcKey}|${dstKey}|${dstIntfKey}`;
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(p);
+  }
+  const result = [];
+  for (const [, grp] of groups) {
+    if (grp.length === 1) { result.push(grp[0]); continue; }
+    // Merge: take first policy as base, combine srcSubnet/srcHosts
+    const base = { ...grp[0] };
+    const allSubnets = [...new Set(grp.map(p => p.srcSubnet).filter(Boolean))];
+    const allHosts   = [...new Set(grp.flatMap(p => p.srcHosts || []))];
+    const totalSessions = grp.reduce((s, p) => s + (p.sessions || 0), 0);
+    const allPolicyIds  = [...new Set(grp.flatMap(p => p.policyIds || []))].sort((a, b) => Number(a) - Number(b));
+    base._mergedSrcSubnets = allSubnets;
+    base._mergedSrcHosts   = allHosts;
+    base._mergeCount       = grp.length;
+    base._isSvcMerge       = true;
+    // Display: show all source subnets
+    base.srcSubnet   = allSubnets[0];
+    base.srcSubnets  = allSubnets;
+    base.srcHosts    = allHosts;
+    base.sessions    = totalSessions;
+    base.policyIds   = allPolicyIds;
+    base._mergedCount = grp.length;
+    base.serviceDesc = (grp[0].analysis?.services || []).map(s => s.label || s.name).join(', ');
+    // Src addr name: group if multiple subnets
+    if (allSubnets.length > 1) {
+      base._srcAddrName   = `FF_SVC_MERGE_SRC_${escSlug(allSubnets[0])}`;
+      base.srcAddrNames   = allSubnets.map(s => suggestAddrNameFE(s));
+    }
+    result.push(base);
+  }
+  return result;
 }
 
 function applyMerge(mode) {
@@ -2716,6 +2894,8 @@ function applyMerge(mode) {
     // Always merge from original
     if (mode === 'policy') {
       deployState.analyzed = mergeByPolicyId(deployState._analyzedOriginal);
+    } else if (mode === 'service') {
+      deployState.analyzed = mergeByService(deployState._analyzedOriginal);
     } else {
       deployState.analyzed = mergeAnalyzedPolicies(deployState._analyzedOriginal, mode);
     }
@@ -2786,8 +2966,9 @@ async function analyzeDeployPolicies() {
     }
     const respData = await r.json();
     analyzed = respData.analyzed;
-    deployState.addrGroups = respData.addrGroups || {};
-    deployState.warnings   = respData.warnings  || [];
+    deployState.addrGroups   = respData.addrGroups   || {};
+    deployState.warnings     = respData.warnings     || [];
+    deployState.resolvedHosts = respData.resolvedHosts || {};
     setLoadingPct(95);
     setLoadingText('Enrichissement des données…');
   } catch (err) { resetAnalyzeBtn(); alert(err.message); return; }
@@ -2800,10 +2981,16 @@ async function analyzeDeployPolicies() {
   const resolveZone = (ifName) => _ifToZone[ifName] || ifName || '';
 
   // Enrich with frontend display fields
+  const resolvedHosts = deployState.resolvedHosts || {};
   analyzed = analyzed.map(p => {
     const isWan = p.dstType === 'public' || p.dstTarget === 'all';
     const rawSrcIntf = p.analysis?.srcZone || p.analysis?.srcIface || ifaces.find(i => i.name === p.srcintf)?.name || '';
     const rawDstIntf = p.analysis?.dstZone || p.analysis?.dstIface || ifaces.find(i => i.name === p.dstintf)?.name || '';
+    // Pre-fill host names from global resolved map (existing FortiGate objects)
+    const srcHostNames = {};
+    for (const h of (p.srcHosts || [])) { if (resolvedHosts[h]) srcHostNames[h] = resolvedHosts[h]; }
+    const dstHostNames = {};
+    for (const h of (p.dstHosts || [])) { if (resolvedHosts[h]) dstHostNames[h] = resolvedHosts[h]; }
     return {
       ...p,
       srcAddrExists: p.analysis?.srcAddr?.found ?? false,
@@ -2815,9 +3002,11 @@ async function analyzeDeployPolicies() {
       _srcAddrName:  p.analysis?.srcAddr?.name || suggestAddrNameFE(p.srcSubnet),
       _dstAddrName:  p.analysis?.dstAddr?.name || suggestAddrNameFE(p.dstTarget),
       _policyName:   `FF_${escSlug(p.srcSubnet)}_to_${escSlug(p.dstTarget)}`,
-      _nat:          isWan,   // NAT on par défaut pour WAN uniquement
+      _nat:          isWan,
       _isWan:        isWan,
       _checked:      true,
+      _srcHostNames: Object.keys(srcHostNames).length ? { ...(p._srcHostNames || {}), ...srcHostNames } : (p._srcHostNames || undefined),
+      _dstHostNames: Object.keys(dstHostNames).length ? { ...(p._dstHostNames || {}), ...dstHostNames } : (p._dstHostNames || undefined),
     };
   });
 
@@ -2828,12 +3017,16 @@ async function analyzeDeployPolicies() {
   for (const p of analyzed) {
     if ((p.srcHosts || []).length >= 1 && (p.srcHosts || []).length <= AUTO32_THRESHOLD) p._use32Src = true;
     if ((p.dstHosts || []).length >= 1 && (p.dstHosts || []).length <= AUTO32_THRESHOLD) p._use32Dst = true;
+    // Initialize per-policy mode from _use32 flags
+    p._srcMode = p._use32Src ? 'hosts' : 'subnet';
+    p._dstMode = p._use32Dst ? 'hosts' : 'subnet';
   }
 
-  deployState.analyzed          = analyzed;
-  deployState._analyzedOriginal = null;
-  deployState.generatedCli      = null;
-  deployState.selected          = new Set(analyzed.map((_, i) => i));
+  deployState.analyzed              = analyzed;
+  deployState._analyzedOriginal     = null;
+  deployState.baseAnalyzedPolicies  = analyzed.map(p => ({ ...p })); // snapshot for reset
+  deployState.generatedCli          = null;
+  deployState.selected              = new Set(analyzed.map((_, i) => i));
 
   const bar = el('deploy-merge-bar');
   if (bar) bar.style.display = '';
@@ -2918,6 +3111,21 @@ function cidrSupernet(cidrs) {
 
 function escSlug(s) {
   return (s || '').replace(/[./]/g, '_').replace(/[^a-zA-Z0-9_]/g, '');
+}
+
+// ── Per-policy address mode pills (/24 | /32 | grp▾) ──────────────────────────
+function buildModePills(idx, type, currentMode, hasHosts, groups) {
+  const grpSel = groups && groups.length
+    ? `<select class="deploy-grp-sel" data-idx="${idx}" data-type="${type}">
+         <option value="">-- groupe --</option>
+         ${groups.map(g => `<option value="${escHtml(g)}">${escHtml(g)}</option>`).join('')}
+       </select>`
+    : '';
+  return `<span class="mode-pills">
+    <button class="btn-addr-mode ${currentMode==='subnet'?'active':''}" data-idx="${idx}" data-type="${type}" data-mode="subnet">/24</button>
+    <button class="btn-addr-mode ${currentMode==='hosts'?'active':''} ${hasHosts?'':'disabled'}" data-idx="${idx}" data-type="${type}" data-mode="hosts">/32</button>
+    ${grpSel ? `<button class="btn-addr-mode ${currentMode==='group'?'active':''}" data-idx="${idx}" data-type="${type}" data-mode="group">grp▾</button>${currentMode==='group'?grpSel:''}` : ''}
+  </span>`;
 }
 
 // Build an address cell: green text if 1 match, green select if multiple, red input if none
@@ -3126,6 +3334,37 @@ function wireDeployTable() {
     renderDeployPolicies(filterDeployPolicies(), false);
   });
 
+  // ── click: .btn-addr-mode — per-policy mode pill (/24 | /32 | grp) ──
+  container.addEventListener('click', e => {
+    if (!e.target.matches('.btn-addr-mode')) return;
+    if (e.target.classList.contains('disabled')) return;
+    const idx  = +e.target.dataset.idx;
+    const type = e.target.dataset.type; // 'src' or 'dst'
+    const mode = e.target.dataset.mode;
+    const p    = deployState.analyzed[idx];
+    if (!p) return;
+    if (type === 'src') {
+      p._srcMode  = mode;
+      p._use32Src = mode === 'hosts';
+    } else {
+      p._dstMode  = mode;
+      p._use32Dst = mode === 'hosts';
+    }
+    renderDeployPolicies(filterDeployPolicies(), false);
+  });
+
+  // ── change: .deploy-grp-sel — group dropdown selection ──
+  container.addEventListener('change', e => {
+    if (!e.target.matches('.deploy-grp-sel')) return;
+    const idx  = +e.target.dataset.idx;
+    const type = e.target.dataset.type;
+    const p    = deployState.analyzed[idx];
+    if (!p) return;
+    if (type === 'src') p._srcGroupName = e.target.value;
+    else                p._dstGroupName = e.target.value;
+    renderDeployPolicies(filterDeployPolicies(), false);
+  });
+
   // ── input: .host-name-input — mise à jour du nom d'hôte /32 ──
   container.addEventListener('input', e => {
     const input = e.target.closest('.host-name-input');
@@ -3165,6 +3404,31 @@ function wireDeployTable() {
     detail.style.display = open ? 'none' : '';
     const ips = (deployState.analyzed[+idx]?._dstIPs || []).length;
     btn.textContent = open ? `▸ ${ips} IPs` : '▾ fermer';
+  });
+
+  // ── click: .btn-multidst-toggle — afficher/masquer la liste multi-dst ──
+  container.addEventListener('click', e => {
+    const btn = e.target.closest('.btn-multidst-toggle');
+    if (!btn) return;
+    const idx    = btn.dataset.idx;
+    const detail = document.getElementById(`multidst-${idx}`);
+    if (!detail) return;
+    const open = detail.style.display !== 'none';
+    detail.style.display = open ? 'none' : '';
+    const count = (deployState.analyzed[+idx]?._multiDstSubnets || []).length;
+    btn.textContent = open ? `${count} destinations ▾` : `${count} destinations ▴`;
+  });
+
+  // ── click: .btn-dst-subnet-toggle — basculer /24↔/32 par subnet dans multi-dst ──
+  container.addEventListener('click', e => {
+    const btn = e.target.closest('.btn-dst-subnet-toggle');
+    if (!btn) return;
+    const idx = +btn.dataset.idx;
+    const si  = +btn.dataset.si;
+    const p   = deployState.analyzed[idx];
+    if (!p?._multiDstSubnets?.[si]) return;
+    p._multiDstSubnets[si].useSubnet = !p._multiDstSubnets[si].useSubnet;
+    renderDeployPolicies(filterDeployPolicies(), false);
   });
 
   // ── click: .policy-tag (tag-remove) ──
@@ -3300,7 +3564,24 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     } else {
       srcAddrCell = addrCell(p.analysis?.srcAddr, p._srcAddrName, idx, '_srcAddrName');
     }
-    const dstAddrCell = addrCell(p.analysis?.dstAddr, p._dstAddrName, idx, '_dstAddrName');
+    // En mode /32 dst actif : afficher les noms des hôtes /32 au lieu du /24
+    // En mode group : afficher le groupe sélectionné
+    const _dstModeResolved = p._dstMode || (p._use32Dst ? 'hosts' : 'subnet');
+    let dstAddrCell;
+    if (_dstModeResolved === 'group' && p._dstGroupName) {
+      dstAddrCell = `<span class="match-ok">grp: ${escHtml(p._dstGroupName)}</span>`;
+    } else if (_dstModeResolved === 'hosts' && (p.dstHosts || []).length > 0) {
+      const names = (p.dstHosts || []).map(h => (p._dstHostNames || {})[h] || `FF_HOST_${h.replace(/\./g,'_')}`);
+      dstAddrCell = names.map(n => `<span class="match-ok" style="display:block;font-size:10px">${escHtml(n)}</span>`).join('');
+    } else {
+      dstAddrCell = addrCell(p.analysis?.dstAddr, p._dstAddrName, idx, '_dstAddrName');
+    }
+
+    // En mode group src : afficher le groupe sélectionné
+    const _srcModeResolved = p._srcMode || (p._use32Src ? 'hosts' : 'subnet');
+    if (_srcModeResolved === 'group' && p._srcGroupName && !(p.srcSubnets && p.srcSubnets.length > 1)) {
+      srcAddrCell = `<span class="match-ok">grp: ${escHtml(p._srcGroupName)}</span>`;
+    }
 
     const svcList = p.analysis?.services || [];
     const svcCells = svcList.map(svc => {
@@ -3345,15 +3626,20 @@ function renderDeployPolicies(analyzed, resetPage = true) {
       : '';
 
     const seqBadge = isAgg ? ` <span class="seq-badge" title="${p._sequenceCount} policies agrégées en 1 séquence">×${p._sequenceCount} seq</span>` : '';
-    // Badge hôtes /32 pour source
-    const srcHosts = p.srcHosts || [];
-    const use32Src = p._use32Src || false;
+    // Mode pills + Badge hôtes /32 pour source
+    const srcHosts   = p.srcHosts || [];
+    const use32Src   = p._use32Src || false;
+    const srcMode    = p._srcMode || (use32Src ? 'hosts' : 'subnet');
+    const addrGroups = deployState.addrGroups ? Object.keys(deployState.addrGroups) : [];
     let srcHostsHtml = '';
-    if (srcHosts.length >= 1) {
+    // Mode pills always shown
+    const srcModePills = buildModePills(idx, 'src', srcMode, srcHosts.length >= 1, addrGroups);
+    srcHostsHtml = `<div style="margin-top:2px">${srcModePills}</div>`;
+    if (srcHosts.length >= 1 && srcMode === 'hosts') {
       const rows = srcHosts.slice(0, 50).map(h => buildHostRow(h, p._srcHostNames, idx, 'src')).join('');
       const moreH = srcHosts.length > 50 ? `<div style="font-size:10px;color:var(--text2)">+${srcHosts.length - 50} autres…</div>` : '';
-      srcHostsHtml = `<span style="display:inline-flex;align-items:center;gap:2px;margin-top:2px">
-        <button class="btn-sm btn-toggle32 ${use32Src ? 'hosts-active' : ''}" data-idx="${idx}" data-type="src" title="${use32Src ? 'Mode /32 actif — cliquer pour revenir en subnet' : 'Cliquer pour activer les objets /32'}" style="font-size:9px;padding:1px 5px">${srcHosts.length} hôtes${use32Src ? ' /32 ✓' : ''}</button><button class="btn-sm btn-hosts-edit" data-idx="${idx}" data-type="src" title="Noms des objets /32" style="font-size:9px;padding:1px 4px;opacity:0.6">✏</button>
+      srcHostsHtml += `<span style="display:inline-flex;align-items:center;gap:2px;margin-top:2px">
+        <button class="btn-sm btn-hosts-edit" data-idx="${idx}" data-type="src" title="Noms des objets /32" style="font-size:9px;padding:1px 4px;opacity:0.6">✏ ${srcHosts.length}h</button>
       </span>
       <div class="hosts-detail" id="src-hosts-${idx}" style="display:none;margin-top:4px;max-height:130px;overflow-y:auto;background:var(--bg0);border:1px solid var(--border);border-radius:4px;padding:4px 8px">
         <div style="font-size:10px;font-weight:600;margin-bottom:4px;padding-bottom:4px;border-bottom:1px solid var(--border)">${srcHosts.length} hôtes — noms d'objets</div>

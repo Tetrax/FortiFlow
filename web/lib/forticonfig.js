@@ -926,7 +926,17 @@ function generateConfig(selectedPolicies, opts = {}) {
 
     // Source address(es) — peut être multiple si policy-grouped merge
     let srcAddrName, srcAddrNames, srcAddrGrpName;
-    if (p._use32Src && p.srcHosts && p.srcHosts.length > 0) {
+    if (p._srcMode === 'group' && p._srcGroupName) {
+      // Mode groupe : utiliser le groupe d'adresses existant sélectionné
+      srcAddrName = p._srcGroupName;
+    } else if (p._isSvcMerge && p._mergedSrcSubnets && p._mergedSrcSubnets.length > 1) {
+      // Fusion par service : créer un groupe d'adresses pour les sources fusionnées
+      const subnetNames = p._mergedSrcSubnets.map(s => suggestAddrName(s));
+      p._mergedSrcSubnets.forEach((cidr, i) => newAddresses.set(cidr, subnetNames[i]));
+      srcAddrGrpName = p._srcAddrName || `FF_SVC_GRP_${suggestAddrName(p._mergedSrcSubnets[0])}`;
+      srcAddrNames = subnetNames;
+      newAddrGroups.set(srcAddrGrpName, subnetNames);
+    } else if (p._use32Src && p.srcHosts && p.srcHosts.length > 0) {
       // Mode /32 : utiliser les hôtes réels plutôt que le subnet /24
       const hostNames = p.srcHosts.map(h => {
         const { name, isNew } = resolveHost32(h, p._srcHostNames);
@@ -963,20 +973,47 @@ function generateConfig(selectedPolicies, opts = {}) {
 
     // Destination address
     let dstAddrName;
-    if (p._use32Dst && p.dstHosts && p.dstHosts.length > 0) {
-      // Mode /32 : utiliser les hôtes réels pour la destination
+    // ── Mode groupe : utiliser le groupe d'adresses existant sélectionné ──
+    if (p._dstMode === 'group' && p._dstGroupName) {
+      dstAddrName = p._dstGroupName;
+    } else
+    // ── Multi-dst policy : destinations diverses avec seuil /24 vs /32 ──
+    if (p._isMultiDst && p._multiDstSubnets?.length > 0) {
+      const dstNames = [];
+      for (const s of p._multiDstSubnets) {
+        if (s.useSubnet) {
+          // /24 mode: use subnet address
+          if (s.addrFound) {
+            dstNames.push(s.addrName);
+          } else {
+            dstNames.push(s.addrName);
+            newAddresses.set(s.subnet, s.addrName);
+          }
+        } else {
+          // /32 mode: list individual hosts
+          for (const h of (s.hosts || [])) {
+            const { name, isNew } = resolveHost32(h, p._dstHostNames);
+            if (isNew) newAddresses.set(`${h}/32`, name);
+            dstNames.push(name);
+          }
+        }
+      }
+      if (dstNames.length === 1) {
+        dstAddrName = dstNames[0];
+      } else if (dstNames.length > 1) {
+        const grpName = p.dstAddrName || `GRP_${(p.policyIds||['0'])[0]}_DST`;
+        newAddrGroups.set(grpName, [...new Set(dstNames)]);
+        dstAddrName = grpName;
+      }
+    } else if (p._use32Dst && p.dstHosts && p.dstHosts.length > 0) {
+      // Mode /32 : utiliser les hôtes réels — set dstaddr "h1" "h2" directement, sans groupe
       const hostNames = p.dstHosts.map(h => {
         const { name, isNew } = resolveHost32(h, p._dstHostNames);
         if (isNew) newAddresses.set(`${h}/32`, name);
         return name;
       });
-      if (hostNames.length === 1) {
-        dstAddrName = hostNames[0];
-      } else {
-        const grpName = `FF_HOSTS_${suggestAddrName(p.dstTarget)}`;
-        newAddrGroups.set(grpName, hostNames);
-        dstAddrName = grpName;
-      }
+      // On stocke comme tableau pour que le serialiseur génère plusieurs valeurs
+      dstAddrName = hostNames.length === 1 ? hostNames[0] : hostNames;
     } else if (analysis.dstAddr.found) {
       dstAddrName = analysis.dstAddr.name;
     } else {
@@ -1107,7 +1144,10 @@ function generateConfig(selectedPolicies, opts = {}) {
         ? pol.srcAddrNames.map(n => `"${n}"`).join(' ')
         : `"${pol.srcAddrName}"`;
       L.push(`        set srcaddr ${srcAddrStr}`);
-      L.push(`        set dstaddr "${pol.dstAddrName}"`);
+      const dstAddrStr = Array.isArray(pol.dstAddrName)
+        ? pol.dstAddrName.map(n => `"${n}"`).join(' ')
+        : `"${pol.dstAddrName}"`;
+      L.push(`        set dstaddr ${dstAddrStr}`);
       L.push(`        set service ${svcStr}`);
       L.push(`        set action ${actionVerb}`);
       L.push(`        set schedule "always"`);

@@ -543,10 +543,32 @@ app.post('/api/deploy/generate', (req, res) => {
       res.setHeader('Content-Type', 'application/json');
     }
 
+    // Build global resolvedHosts map {ip → name} for all /32 hosts across all policies
+    const addresses = s.fortiConfig.addresses || {};
+    const resolvedHosts = {};
+    for (const p of analyzed) {
+      for (const h of (p.srcHosts || [])) {
+        if (!resolvedHosts[h]) {
+          const m = Object.entries(addresses).find(([, a]) =>
+            a.cidr === `${h}/32` || a.cidr === h
+          );
+          if (m) resolvedHosts[h] = m[0];
+        }
+      }
+      for (const h of (p.dstHosts || [])) {
+        if (!resolvedHosts[h]) {
+          const m = Object.entries(addresses).find(([, a]) =>
+            a.cidr === `${h}/32` || a.cidr === h
+          );
+          if (m) resolvedHosts[h] = m[0];
+        }
+      }
+    }
+
     if (download) {
       res.send(cli);
     } else {
-      res.json({ cli, analyzed, addrGroups: s.fortiConfig.addressGroups || {}, warnings });
+      res.json({ cli, analyzed, addrGroups: s.fortiConfig.addressGroups || {}, warnings, resolvedHosts });
     }
   } catch (err) {
     res.status(500).json({ error: err.message });
