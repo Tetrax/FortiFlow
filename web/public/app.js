@@ -2091,7 +2091,7 @@ function populateDrawer(idx) {
         <span class="drawer-multidst-subnet">${escHtml(s.subnet)}</span>
         <button class="btn-sm drawer-multidst-mode" data-si="${si}" style="font-size:9px;padding:2px 8px">${isSubnet ? '/24' : `/32 (${s.hosts?.length || 0}h)`}</button>
         ${isSubnet ? statusIcon : ''}
-        ${isSubnet ? nameInput : ''}
+        ${isSubnet ? (s.addrFound ? `<span style="color:var(--success);font-size:10px">${escHtml(s.addrName)}</span>` : nameInput) : ''}
       </div>${hostsHtml}`;
     }).join('');
     dstSection = `<div class="drawer-section">
@@ -3057,11 +3057,13 @@ function mergeByPolicyId(policies) {
           return { subnet, hosts, useSubnet: hosts.length >= DST_SUBNET_THRESHOLD,
             addrName: dstAddr?.found ? dstAddr.name : suggestAddrNameFE(subnet), addrFound: !!(dstAddr?.found) };
         });
-        // Fusionner _dstHostNames et _hostsFound de TOUTES les policies du groupe
+        // Fusionner _srcHostNames/_dstHostNames et _hostsFound de TOUTES les policies du groupe
         const mergedDstHostNames = {};
+        const mergedSrcHostNames1 = {};
         const mergedSrcHostsFound = new Set();
         const mergedDstHostsFound = new Set();
         for (const p of ifGroup) {
+          Object.assign(mergedSrcHostNames1, p._srcHostNames || {});
           Object.assign(mergedDstHostNames, p._dstHostNames || {});
           (p._srcHostsFound || []).forEach(h => mergedSrcHostsFound.add(h));
           (p._dstHostsFound || []).forEach(h => mergedDstHostsFound.add(h));
@@ -3094,6 +3096,7 @@ function mergeByPolicyId(policies) {
           _dstAddrName: existingDstGrp1 || `GRP_${policyId}_DST`,
           _dstAddrGrpFound: !!existingDstGrp1,
           _policyName: `FF_POLICY_${policyId}`,
+          _srcHostNames: Object.keys(mergedSrcHostNames1).length ? mergedSrcHostNames1 : undefined,
           _dstHostNames: Object.keys(mergedDstHostNames).length ? mergedDstHostNames : undefined,
           _srcHostsFound: mergedSrcHostsFound.size ? [...mergedSrcHostsFound] : undefined,
           _dstHostsFound: mergedDstHostsFound.size ? [...mergedDstHostsFound] : undefined,
