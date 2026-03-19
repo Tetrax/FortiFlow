@@ -1667,6 +1667,18 @@ function collectMissingObjects() {
         }
       }
     }
+    // Multi-src : collecter les subnets manquants
+    if (p._multiSrcSubnets?.length) {
+      for (const s of p._multiSrcSubnets) {
+        if (!s.addrFound) {
+          const cidr = s.subnet;
+          if (cidr) {
+            if (!addresses.has(cidr)) addresses.set(cidr, { cidr, name: s.addrName, policyCount: 0 });
+            addresses.get(cidr).policyCount++;
+          }
+        }
+      }
+    }
     // Hôtes /32 src — TOUS les hôtes non trouvés dans la config
     if (p.srcHosts?.length > 0) {
       for (const h of p.srcHosts) {
@@ -1781,6 +1793,12 @@ function applyObjectNames(addrMap, hostsMap, svcMap) {
         if (addrMap[s.subnet]) s.addrName = addrMap[s.subnet];
       }
     }
+    // Multi-src : propager les noms aux subnets individuels
+    if (p._multiSrcSubnets?.length) {
+      for (const s of p._multiSrcSubnets) {
+        if (addrMap[s.subnet]) s.addrName = addrMap[s.subnet];
+      }
+    }
     // Host names — propager à TOUTES les policies (pas seulement mode /32)
     if (p.srcHosts?.length > 0) {
       p._srcHostNames = p._srcHostNames || {};
@@ -1847,6 +1865,14 @@ function mountDrawer() {
       const si = +e.target.dataset.si;
       if (p._multiDstSubnets?.[si]) p._multiDstSubnets[si].addrName = e.target.value;
     }
+    if (e.target.matches('.drawer-multisrc-name')) {
+      const si = +e.target.dataset.si;
+      if (p._multiSrcSubnets?.[si]) {
+        p._multiSrcSubnets[si].addrName = e.target.value;
+        // Also update srcAddrNames array for CLI generation
+        if (p.srcAddrNames && p.srcAddrNames[si] !== undefined) p.srcAddrNames[si] = e.target.value;
+      }
+    }
     if (e.target.matches('.drawer-grp-name')) {
       p._dstAddrName = e.target.value;
     }
@@ -1881,6 +1907,17 @@ function mountDrawer() {
       if (p._multiDstSubnets?.[si]) {
         const cur = p._multiDstSubnets[si].useSubnet;
         p._multiDstSubnets[si].useSubnet = (cur === false) ? true : false;
+        populateDrawer(_drawerIdx);
+      }
+      return;
+    }
+    const msBtn = e.target.closest('.drawer-multisrc-mode');
+    if (msBtn) {
+      e.stopPropagation();
+      const si = +msBtn.dataset.si;
+      if (p._multiSrcSubnets?.[si]) {
+        const cur = p._multiSrcSubnets[si].useSubnet;
+        p._multiSrcSubnets[si].useSubnet = (cur === false) ? true : false;
         populateDrawer(_drawerIdx);
       }
       return;
@@ -1937,26 +1974,90 @@ function populateDrawer(idx) {
   const srcHosts = p.srcHosts || [];
   const dstHosts = p.dstHosts || [];
 
-  // Source hosts section
-  let srcHostsHtml = '';
-  if (srcHosts.length > 0 && srcMode === 'hosts') {
-    srcHostsHtml = `<div class="drawer-host-list">${srcHosts.slice(0, 80).map(h => {
-      const name = (p._srcHostNames || {})[h] || `FF_HOST_${h.replace(/\./g,'_')}`;
-      return `<div class="drawer-host-row">
-        <span class="drawer-host-ip">${escHtml(h)}</span>
-        <input class="drawer-host-input" data-type="src" data-host="${escHtml(h)}" value="${escHtml(name)}" placeholder="FF_HOST_...">
-      </div>`;
-    }).join('')}</div>`;
-    if (srcHosts.length > 1) {
-      const srcGrpFound = p._srcAddrGrpFound;
-      srcHostsHtml += `<div class="drawer-toggle-row" style="margin-top:4px">
+  // Source section — depends on multi-src or single
+  let srcSection = '';
+  if (p._multiSrcSubnets?.length) {
+    // ── Multi-src : several source subnets ──
+    const srcSubs = p._multiSrcSubnets;
+    const srcSubRows = srcSubs.map((s, si) => {
+      const isSubnet = s.useSubnet !== false;
+      const statusIcon = s.addrFound ? `<span style="color:var(--success)">&#10003;</span>` : `<span style="color:var(--warn)">+</span>`;
+      const nameInput = `<input class="drawer-input drawer-multisrc-name" data-si="${si}" value="${escHtml(s.addrName)}" style="flex:1;font-size:10px">`;
+      let hostsHtml = '';
+      if (!isSubnet && s.hosts?.length > 0) {
+        hostsHtml = `<div style="padding-left:16px;margin-top:2px;margin-bottom:6px">${s.hosts.slice(0, 50).map(h => {
+          const foundSet = new Set(p._srcHostsFound || []);
+          const hostName = (p._srcHostNames || {})[h] || `FF_HOST_${h.replace(/\./g,'_')}`;
+          const hostFound = foundSet.has(h);
+          return `<div class="drawer-host-row">
+            <span class="drawer-host-ip">${escHtml(h)}</span>
+            ${hostFound
+              ? `<span style="color:var(--success);font-size:10px">&#10003; ${escHtml(hostName)}</span>`
+              : `<input class="drawer-host-input" data-type="src" data-host="${escHtml(h)}" value="${escHtml(hostName)}" placeholder="FF_HOST_...">`}
+          </div>`;
+        }).join('')}${s.hosts.length > 50 ? `<div style="font-size:10px;color:var(--text2)">+${s.hosts.length - 50} autres…</div>` : ''}</div>`;
+      }
+      return `<div class="drawer-multisrc-row" style="display:flex;align-items:center;gap:6px;padding:3px 0">
+        <span class="drawer-multisrc-subnet" style="font-family:var(--mono);font-size:11px;min-width:120px">${escHtml(s.subnet)}</span>
+        <button class="btn-sm drawer-multisrc-mode" data-si="${si}" style="font-size:9px;padding:2px 8px">${isSubnet ? '/24' : `/32 (${s.hosts?.length || 0}h)`}</button>
+        ${isSubnet ? statusIcon : ''}
+        ${isSubnet ? (s.addrFound ? `<span style="color:var(--success);font-size:10px">${escHtml(s.addrName)}</span>` : nameInput) : ''}
+      </div>${hostsHtml}`;
+    }).join('');
+    srcSection = `<div class="drawer-section">
+      <div class="drawer-section-title">Sources (${srcSubs.length} subnets)</div>
+      ${srcSubRows}
+      <div class="drawer-toggle-row" style="margin-top:8px">
         <button class="drawer-toggle-btn drawer-grp-toggle ${p._useSrcGroup ? 'active' : ''}" data-type="src">Grouper (addrgrp)</button>
-        ${p._useSrcGroup ? (srcGrpFound
+        ${p._useSrcGroup ? (p._srcAddrGrpFound
           ? `<span style="color:var(--success);font-size:11px">&#10003; ${escHtml(p._srcAddrName)}</span>`
           : `<input class="drawer-input drawer-src-grp-name" value="${escHtml(p._srcAddrName || '')}" placeholder="GRP_SRC_..." style="width:160px">`)
           : ''}
-      </div>`;
+      </div>
+      <div class="drawer-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-srcintf">${ifOpts}</select></div>
+    </div>`;
+  } else {
+    // ── Single source subnet ──
+    let srcHostsHtml = '';
+    if (srcHosts.length > 0 && srcMode === 'hosts') {
+      srcHostsHtml = `<div class="drawer-host-list">${srcHosts.slice(0, 80).map(h => {
+        const foundSet = new Set(p._srcHostsFound || []);
+        const hostFound = foundSet.has(h);
+        const name = (p._srcHostNames || {})[h] || `FF_HOST_${h.replace(/\./g,'_')}`;
+        return `<div class="drawer-host-row">
+          <span class="drawer-host-ip">${escHtml(h)}</span>
+          ${hostFound
+            ? `<span style="color:var(--success);font-size:10px">&#10003; ${escHtml(name)}</span>`
+            : `<input class="drawer-host-input" data-type="src" data-host="${escHtml(h)}" value="${escHtml(name)}" placeholder="FF_HOST_...">`}
+        </div>`;
+      }).join('')}</div>`;
+      if (srcHosts.length > 1) {
+        const srcGrpFound = p._srcAddrGrpFound;
+        srcHostsHtml += `<div class="drawer-toggle-row" style="margin-top:4px">
+          <button class="drawer-toggle-btn drawer-grp-toggle ${p._useSrcGroup ? 'active' : ''}" data-type="src">Grouper (addrgrp)</button>
+          ${p._useSrcGroup ? (srcGrpFound
+            ? `<span style="color:var(--success);font-size:11px">&#10003; ${escHtml(p._srcAddrName)}</span>`
+            : `<input class="drawer-input drawer-src-grp-name" value="${escHtml(p._srcAddrName || '')}" placeholder="GRP_SRC_..." style="width:160px">`)
+            : ''}
+        </div>`;
+      }
     }
+    srcSection = `<div class="drawer-section">
+      <div class="drawer-section-title">Source</div>
+      <div class="drawer-field"><span class="drawer-field-label">Subnet</span><span class="drawer-field-value">${escHtml(p.srcSubnet || '')}</span></div>
+      <div class="drawer-toggle-row">
+        <span style="font-size:11px;color:var(--text2)">Mode :</span>
+        <button class="drawer-toggle-btn drawer-mode-btn ${srcMode==='subnet'?'active':''}" data-type="src" data-mode="subnet">/24 subnet</button>
+        <button class="drawer-toggle-btn drawer-mode-btn ${srcMode==='hosts'?'active':''} ${srcHosts.length<1?'disabled':''}" data-type="src" data-mode="hosts">/32 hôtes (${srcHosts.length})</button>
+      </div>
+      ${srcMode === 'subnet' ? `<div class="drawer-field">
+        <span class="drawer-field-label">Objet addr</span>
+        ${srcFound ? `<span class="drawer-field-value" style="color:var(--success)">&#10003; ${escHtml(srcAddrName)}</span>`
+          : `<input class="drawer-input drawer-src-name" value="${escHtml(srcAddrName)}" placeholder="FF_...">`}
+      </div>` : ''}
+      ${srcHostsHtml}
+      <div class="drawer-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-srcintf">${ifOpts}</select></div>
+    </div>`;
   }
 
   // Dst section — depends on multi-dst or single
@@ -2052,22 +2153,7 @@ function populateDrawer(idx) {
       <div class="drawer-field"><span class="drawer-field-label">NAT</span><label style="display:flex;align-items:center;gap:6px"><input type="checkbox" class="drawer-nat" ${p._nat ? 'checked' : ''}> <span style="font-size:11px;color:var(--text2)">Activer le NAT</span></label></div>
       <div class="drawer-field"><span class="drawer-field-label">Nom policy</span><input class="drawer-input drawer-policy-name" value="${escHtml(p._policyName || '')}" placeholder="FF_POLICY_..."></div>
     </div>
-    <div class="drawer-section">
-      <div class="drawer-section-title">Source</div>
-      <div class="drawer-field"><span class="drawer-field-label">Subnet</span><span class="drawer-field-value">${escHtml(p.srcSubnet || (p.srcSubnets||[]).join(', '))}</span></div>
-      <div class="drawer-toggle-row">
-        <span style="font-size:11px;color:var(--text2)">Mode :</span>
-        <button class="drawer-toggle-btn drawer-mode-btn ${srcMode==='subnet'?'active':''}" data-type="src" data-mode="subnet">/24 subnet</button>
-        <button class="drawer-toggle-btn drawer-mode-btn ${srcMode==='hosts'?'active':''} ${srcHosts.length<1?'disabled':''}" data-type="src" data-mode="hosts">/32 hôtes (${srcHosts.length})</button>
-      </div>
-      ${srcMode === 'subnet' ? `<div class="drawer-field">
-        <span class="drawer-field-label">Objet addr</span>
-        ${srcFound ? `<span class="drawer-field-value" style="color:var(--success)">&#10003; ${escHtml(srcAddrName)}</span>`
-          : `<input class="drawer-input drawer-src-name" value="${escHtml(srcAddrName)}" placeholder="FF_...">`}
-      </div>` : ''}
-      ${srcHostsHtml}
-      <div class="drawer-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-srcintf">${ifOpts}</select></div>
-    </div>
+    ${srcSection}
     ${dstSection}
     <div class="drawer-section">
       <div class="drawer-section-title">Interfaces destination</div>
@@ -3042,6 +3128,26 @@ function mergeByPolicyId(policies) {
       const allDstHosts = [...new Set(subGroup.flatMap(p => p.dstHosts || []))].sort();
       const multiSrc    = srcSubnets.length > 1;
 
+      // Fusionner _srcHostNames de TOUTES les policies du sous-groupe
+      const mergedSrcHostNames = {};
+      for (const pp of subGroup) Object.assign(mergedSrcHostNames, pp._srcHostNames || {});
+
+      // Build multi-src subnets info (like _multiDstSubnets but for sources)
+      let multiSrcSubnets = null;
+      if (multiSrc) {
+        multiSrcSubnets = srcSubnets.map(subnet => {
+          const subnetPols = subGroup.filter(pp => pp.srcSubnet === subnet);
+          const hosts = [...new Set(subnetPols.flatMap(pp => pp.srcHosts || []))].sort();
+          const srcAddr = subnetPols.find(pp => pp.analysis?.srcAddr?.found)?.analysis?.srcAddr
+                        || subnetPols[0]?.analysis?.srcAddr;
+          return {
+            subnet, hosts, useSubnet: true,
+            addrName: srcAddr?.found ? srcAddr.name : suggestAddrNameFE(subnet),
+            addrFound: !!(srcAddr?.found),
+          };
+        });
+      }
+
       // Chercher un groupe d'adresses existant pour les sources
       let existingGrp = null;
       if (multiSrc && deployState.addrGroups) {
@@ -3117,6 +3223,8 @@ function mergeByPolicyId(policies) {
           _dstAddrGrpFound: !!existingDstGrp,
           _policyName:      `FF_POLICY_${policyId}`,
           _dstHostNames:    Object.keys(mergedDstHostNames2).length ? mergedDstHostNames2 : undefined,
+          _srcHostNames:    Object.keys(mergedSrcHostNames).length ? mergedSrcHostNames : undefined,
+          _multiSrcSubnets: multiSrcSubnets,
           srcAddrNames:     existingGrp ? null : (multiSrc ? srcSubnets.map(s => `FF_${escSlug(s)}`) : null),
           analysis:         { ...base.analysis, services: allServices, needsWork: allServices.some(s => !s.found) },
         });
@@ -3145,6 +3253,8 @@ function mergeByPolicyId(policies) {
         _nat:         isWan,
         _srcAddrName: existingGrp || (multiSrc ? `FF_POLICY_${policyId}_SRC` : (base._srcAddrName || suggestAddrNameFE(srcSubnets[0]))),
         _srcAddrGrpFound: !!existingGrp,
+        _multiSrcSubnets: multiSrcSubnets,
+        _srcHostNames:    Object.keys(mergedSrcHostNames).length ? mergedSrcHostNames : undefined,
         _dstAddrName: isWan ? 'all' : (dstTarget !== base.dstTarget ? suggestAddrNameFE(dstTarget) : base._dstAddrName),
         _policyName:  `FF_POLICY_${policyId}`,
         srcAddrNames: existingGrp ? null : (multiSrc ? srcSubnets.map(s => `FF_${escSlug(s)}`) : null),
@@ -3189,10 +3299,26 @@ function mergeByService(policies) {
     base.policyIds   = allPolicyIds;
     base._mergedCount = grp.length;
     base.serviceDesc = (grp[0].analysis?.services || []).map(s => s.label || s.name).join(', ');
+    // Fusionner _srcHostNames
+    const mergedSrcHN = {};
+    for (const pp of grp) Object.assign(mergedSrcHN, pp._srcHostNames || {});
+    if (Object.keys(mergedSrcHN).length) base._srcHostNames = mergedSrcHN;
     // Src addr name: group if multiple subnets
     if (allSubnets.length > 1) {
       base._srcAddrName   = `FF_SVC_MERGE_SRC_${escSlug(allSubnets[0])}`;
       base.srcAddrNames   = allSubnets.map(s => suggestAddrNameFE(s));
+      // Build multi-src subnets (like _multiDstSubnets)
+      base._multiSrcSubnets = allSubnets.map(subnet => {
+        const subnetPols = grp.filter(pp => pp.srcSubnet === subnet);
+        const hosts = [...new Set(subnetPols.flatMap(pp => pp.srcHosts || []))].sort();
+        const srcAddr = subnetPols.find(pp => pp.analysis?.srcAddr?.found)?.analysis?.srcAddr
+                      || subnetPols[0]?.analysis?.srcAddr;
+        return {
+          subnet, hosts, useSubnet: true,
+          addrName: srcAddr?.found ? srcAddr.name : suggestAddrNameFE(subnet),
+          addrFound: !!(srcAddr?.found),
+        };
+      });
     }
     result.push(base);
   }

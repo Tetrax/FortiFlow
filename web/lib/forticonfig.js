@@ -949,7 +949,33 @@ function generateConfig(selectedPolicies, opts = {}) {
 
     // Source address(es) — peut être multiple si policy-grouped merge
     let srcAddrName, srcAddrNames, srcAddrGrpName;
-    if (p._isSvcMerge && p._mergedSrcSubnets && p._mergedSrcSubnets.length > 1) {
+    if (p._multiSrcSubnets?.length > 0) {
+      // ── Multi-src subnets : per-subnet /24 vs /32 (like _multiDstSubnets) ──
+      const allSrcNames = [];
+      for (const s of p._multiSrcSubnets) {
+        if (s.useSubnet !== false) {
+          // /24 mode: use subnet address
+          if (s.addrFound) {
+            allSrcNames.push(s.addrName);
+          } else {
+            allSrcNames.push(s.addrName);
+            newAddresses.set(s.subnet, s.addrName);
+          }
+        } else {
+          // /32 mode: list individual hosts
+          for (const h of (s.hosts || [])) {
+            const { name, isNew } = resolveHost32(h, p._srcHostNames);
+            if (isNew) newAddresses.set(`${h}/32`, name);
+            allSrcNames.push(name);
+          }
+        }
+      }
+      srcAddrNames = allSrcNames;
+      if (p._useSrcGroup) {
+        srcAddrGrpName = p._srcAddrName || `FF_GRP_SRC_${suggestAddrName(p._multiSrcSubnets[0].subnet)}`;
+        newAddrGroups.set(srcAddrGrpName, allSrcNames);
+      }
+    } else if (p._isSvcMerge && p._mergedSrcSubnets && p._mergedSrcSubnets.length > 1) {
       // Fusion par service : créer un groupe d'adresses pour les sources fusionnées
       const subnetNames = p._mergedSrcSubnets.map(s => suggestAddrName(s));
       p._mergedSrcSubnets.forEach((cidr, i) => newAddresses.set(cidr, subnetNames[i]));
@@ -974,8 +1000,8 @@ function generateConfig(selectedPolicies, opts = {}) {
         // Par défaut : lister inline dans set srcaddr
         srcAddrName = hostNames;
       }
-    } else if (p.srcAddrNames && p.srcAddrNames.length > 1) {
-      // Multi-src : enregistrer chaque adresse + créer un groupe
+    } else if (p.srcAddrNames && p.srcAddrNames.length > 1 && !p._multiSrcSubnets) {
+      // Multi-src legacy : enregistrer chaque adresse + créer un groupe
       srcAddrNames = p.srcAddrNames;
       const subnets = p.srcSubnets || [p.srcSubnet];
       subnets.forEach((cidr, i) => {
