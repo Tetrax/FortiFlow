@@ -1192,7 +1192,7 @@ function generateConfig(selectedPolicies, opts = {}) {
     for (const pol of policyBlocks) {
       const svcStr = pol.serviceNames.map(s => `"${s}"`).join(' ');
       L.push(`    edit 0`);
-      L.push(`        set name "${pol.name}"`);
+      if (pol.name) L.push(`        set name "${pol.name}"`);
       const srcintfStr = Array.isArray(pol.srcintf)
         ? pol.srcintf.map(i => `"${i}"`).join(' ')
         : `"${pol.srcintf}"`;

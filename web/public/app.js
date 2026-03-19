@@ -1582,7 +1582,6 @@ function showMergeDiff(mode) {
   if (!original) return;
   let preview;
   if (mode === 'policy')   preview = mergeByPolicyId(original.map(p => ({ ...p })));
-  else if (mode === 'service') preview = mergeByService(original.map(p => ({ ...p })));
   else preview = mergeAnalyzedPolicies(original.map(p => ({ ...p })), mode);
 
   const beforeCount = original.length;
@@ -2357,8 +2356,7 @@ async function deploy() {
               <div class="dropdown-item" data-merge="internet">Fusionner Internet</div>
               <div class="dropdown-item" data-merge="lan">Fusionner LAN</div>
               <div class="dropdown-item" data-merge="all">Tout fusionner</div>
-              <div class="dropdown-item" data-merge="policy">Par Policy ID</div>
-              <div class="dropdown-item" data-merge="service">Par service</div>
+              <div class="dropdown-item" data-merge="policy">Fusionner par policy</div>
               <div class="dropdown-sep"></div>
               <div class="dropdown-item" data-merge="reset">↺ Réinitialiser</div>
             </div>
@@ -2819,7 +2817,7 @@ function mergeAnalyzedPolicies(policies, mode) {
       _mergedCount: group.length,
       _srcAddrName: base._srcAddrName || suggestAddrNameFE(srcSubnet),
       _dstAddrName: 'all',
-      _policyName:  `FF_${escSlug(srcSubnet)}_to_INTERNET`,
+      _policyName:  '',
       analysis: {
         ...base.analysis,
         dstAddr:   { found: true, name: 'all', cidr: 'all' },
@@ -3095,7 +3093,7 @@ function mergeByPolicyId(policies) {
           _srcAddrName: base._srcAddrName || suggestAddrNameFE(srcSubnets[0]),
           _dstAddrName: existingDstGrp1 || `GRP_${policyId}_DST`,
           _dstAddrGrpFound: !!existingDstGrp1,
-          _policyName: `FF_POLICY_${policyId}`,
+          _policyName: '',
           _srcHostNames: Object.keys(mergedSrcHostNames1).length ? mergedSrcHostNames1 : undefined,
           _dstHostNames: Object.keys(mergedDstHostNames).length ? mergedDstHostNames : undefined,
           _srcHostsFound: mergedSrcHostsFound.size ? [...mergedSrcHostsFound] : undefined,
@@ -3246,7 +3244,7 @@ function mergeByPolicyId(policies) {
           _srcAddrGrpFound: !!existingGrp,
           _dstAddrName:     existingDstGrp || `GRP_${policyId}_DST`,
           _dstAddrGrpFound: !!existingDstGrp,
-          _policyName:      `FF_POLICY_${policyId}`,
+          _policyName:      '',
           _dstHostNames:    Object.keys(mergedDstHostNames2).length ? mergedDstHostNames2 : undefined,
           _srcHostNames:    Object.keys(mergedSrcHostNames).length ? mergedSrcHostNames : undefined,
           _srcHostsFound:   mergedSrcHF.size ? [...mergedSrcHF] : undefined,
@@ -3286,7 +3284,7 @@ function mergeByPolicyId(policies) {
         _srcHostsFound:   mergedSrcHF.size ? [...mergedSrcHF] : undefined,
         _dstHostsFound:   mergedDstHF.size ? [...mergedDstHF] : undefined,
         _dstAddrName: isWan ? 'all' : (dstTarget !== base.dstTarget ? suggestAddrNameFE(dstTarget) : base._dstAddrName),
-        _policyName:  `FF_POLICY_${policyId}`,
+        _policyName:  '',
         srcAddrNames: existingGrp ? null : (multiSrc ? srcSubnets.map(s => `FF_${escSlug(s)}`) : null),
         analysis: { ...base.analysis, services: allServices, needsWork: allServices.some(s => !s.found) },
       });
@@ -3294,76 +3292,6 @@ function mergeByPolicyId(policies) {
   }
 
   return merged;
-}
-
-// Fusionne les policies par ensemble de services + destination + dstintf
-// Crée des policies multi-src pour les politiques avec mêmes services/dst
-function mergeByService(policies) {
-  const groups = new Map();
-  for (const p of policies) {
-    const svcKey    = [...(p.services || [])].sort().join(',');
-    const dstKey    = p._dstAddrName || p.analysis?.dstAddr?.name || p.dstTarget || '';
-    const dstIntfKey = p._dstintf || p.dstintf || '';
-    const k = `${svcKey}|${dstKey}|${dstIntfKey}`;
-    if (!groups.has(k)) groups.set(k, []);
-    groups.get(k).push(p);
-  }
-  const result = [];
-  for (const [, grp] of groups) {
-    if (grp.length === 1) { result.push(grp[0]); continue; }
-    // Merge: take first policy as base, combine srcSubnet/srcHosts
-    const base = { ...grp[0] };
-    const allSubnets = [...new Set(grp.map(p => p.srcSubnet).filter(Boolean))];
-    const allHosts   = [...new Set(grp.flatMap(p => p.srcHosts || []))];
-    const totalSessions = grp.reduce((s, p) => s + (p.sessions || 0), 0);
-    const allPolicyIds  = [...new Set(grp.flatMap(p => p.policyIds || []))].sort((a, b) => Number(a) - Number(b));
-    base._mergedSrcSubnets = allSubnets;
-    base._mergedSrcHosts   = allHosts;
-    base._mergeCount       = grp.length;
-    base._isSvcMerge       = true;
-    // Display: show all source subnets
-    base.srcSubnet   = allSubnets[0];
-    base.srcSubnets  = allSubnets;
-    base.srcHosts    = allHosts;
-    base.sessions    = totalSessions;
-    base.policyIds   = allPolicyIds;
-    base._mergedCount = grp.length;
-    base.serviceDesc = (grp[0].analysis?.services || []).map(s => s.label || s.name).join(', ');
-    // Fusionner _srcHostNames/_dstHostNames et _hostsFound
-    const mergedSrcHN = {};
-    const mergedDstHN = {};
-    const mergedSrcHF2 = new Set();
-    const mergedDstHF2 = new Set();
-    for (const pp of grp) {
-      Object.assign(mergedSrcHN, pp._srcHostNames || {});
-      Object.assign(mergedDstHN, pp._dstHostNames || {});
-      (pp._srcHostsFound || []).forEach(h => mergedSrcHF2.add(h));
-      (pp._dstHostsFound || []).forEach(h => mergedDstHF2.add(h));
-    }
-    if (Object.keys(mergedSrcHN).length) base._srcHostNames = mergedSrcHN;
-    if (Object.keys(mergedDstHN).length) base._dstHostNames = mergedDstHN;
-    if (mergedSrcHF2.size) base._srcHostsFound = [...mergedSrcHF2];
-    if (mergedDstHF2.size) base._dstHostsFound = [...mergedDstHF2];
-    // Src addr name: group if multiple subnets
-    if (allSubnets.length > 1) {
-      base._srcAddrName   = `FF_SVC_MERGE_SRC_${escSlug(allSubnets[0])}`;
-      base.srcAddrNames   = allSubnets.map(s => suggestAddrNameFE(s));
-      // Build multi-src subnets (like _multiDstSubnets)
-      base._multiSrcSubnets = allSubnets.map(subnet => {
-        const subnetPols = grp.filter(pp => pp.srcSubnet === subnet);
-        const hosts = [...new Set(subnetPols.flatMap(pp => pp.srcHosts || []))].sort();
-        const srcAddr = subnetPols.find(pp => pp.analysis?.srcAddr?.found)?.analysis?.srcAddr
-                      || subnetPols[0]?.analysis?.srcAddr;
-        return {
-          subnet, hosts, useSubnet: true,
-          addrName: srcAddr?.found ? srcAddr.name : suggestAddrNameFE(subnet),
-          addrFound: !!(srcAddr?.found),
-        };
-      });
-    }
-    result.push(base);
-  }
-  return result;
 }
 
 function applyMerge(mode) {
@@ -3396,8 +3324,6 @@ function applyMerge(mode) {
     // Always merge from original
     if (mode === 'policy') {
       deployState.analyzed = mergeByPolicyId(deployState._analyzedOriginal);
-    } else if (mode === 'service') {
-      deployState.analyzed = mergeByService(deployState._analyzedOriginal);
     } else {
       deployState.analyzed = mergeAnalyzedPolicies(deployState._analyzedOriginal, mode);
     }
@@ -3517,7 +3443,7 @@ async function analyzeDeployPolicies() {
       _dstIfaceSource:   p.analysis?.dstIfaceSource || 'auto',
       _srcAddrName:  p.analysis?.srcAddr?.name || suggestAddrNameFE(p.srcSubnet),
       _dstAddrName:  p.analysis?.dstAddr?.name || suggestAddrNameFE(p.dstTarget),
-      _policyName:   `FF_${escSlug(p.srcSubnet)}_to_${escSlug(p.dstTarget)}`,
+      _policyName:   '',
       _nat:          isWan,
       _isWan:        isWan,
       _checked:      true,
