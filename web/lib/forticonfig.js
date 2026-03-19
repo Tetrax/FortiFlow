@@ -874,6 +874,24 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
       if (m.found) dstHostNames[h] = m.name;
     }
 
+    // Résoudre aussi les hosts dans _multiDstSubnets (round-trip multi-dst)
+    if (p._multiDstSubnets) {
+      for (const s of p._multiDstSubnets) {
+        for (const h of (s.hosts || [])) {
+          if (!dstHostNames[h]) {
+            const m = findAddress(`${h}/32`, addresses);
+            if (m.found) dstHostNames[h] = m.name;
+          }
+        }
+        // Réévaluer le match subnet pour chaque sous-groupe
+        const subnetMatch = findAddress(s.subnet, addresses);
+        if (subnetMatch.found && !s.addrFound) {
+          s.addrName  = subnetMatch.name;
+          s.addrFound = true;
+        }
+      }
+    }
+
     return {
       ...p,
       _srcHostNames: Object.keys(srcHostNames).length ? { ...p._srcHostNames, ...srcHostNames } : (p._srcHostNames || undefined),
@@ -904,6 +922,7 @@ function generateConfig(selectedPolicies, opts = {}) {
     actionVerb     = 'accept',
     logTraffic     = 'all',
     addresses      = {},
+    addressGroups  = {},
     zones          = {},
   } = opts;
 
@@ -942,10 +961,14 @@ function generateConfig(selectedPolicies, opts = {}) {
       });
       if (hostNames.length === 1) {
         srcAddrName = hostNames[0];
-      } else {
-        srcAddrGrpName = `FF_HOSTS_${suggestAddrName(p.srcSubnet)}`;
+      } else if (p._useSrcGroup) {
+        // Utilisateur a demandé un groupe
+        srcAddrGrpName = p.srcAddrName || `FF_HOSTS_${suggestAddrName(p.srcSubnet)}`;
         srcAddrNames = hostNames;
         newAddrGroups.set(srcAddrGrpName, hostNames);
+      } else {
+        // Par défaut : lister inline dans set srcaddr
+        srcAddrName = hostNames;
       }
     } else if (p.srcAddrNames && p.srcAddrNames.length > 1) {
       // Multi-src : enregistrer chaque adresse + créer un groupe
@@ -994,12 +1017,24 @@ function generateConfig(selectedPolicies, opts = {}) {
           }
         }
       }
-      if (dstNames.length === 1) {
-        dstAddrName = dstNames[0];
-      } else if (dstNames.length > 1) {
-        const grpName = p.dstAddrName || `GRP_${(p.policyIds||['0'])[0]}_DST`;
-        newAddrGroups.set(grpName, [...new Set(dstNames)]);
-        dstAddrName = grpName;
+      const uniqueDstNames = [...new Set(dstNames)];
+      if (uniqueDstNames.length === 1) {
+        dstAddrName = uniqueDstNames[0];
+      } else if (uniqueDstNames.length > 1) {
+        // Chercher un groupe existant contenant exactement ces membres
+        const dstCidrs = uniqueDstNames.map(n => addresses[n]?.cidr || n).filter(Boolean);
+        const existingGrp = findAddressGroup(dstCidrs, addressGroups, addresses);
+        if (existingGrp) {
+          dstAddrName = existingGrp.name;
+        } else if (p._useDstGroup) {
+          // Utilisateur a demandé un groupe → le créer
+          const grpName = p.dstAddrName || `GRP_${(p.policyIds||['0'])[0]}_DST`;
+          newAddrGroups.set(grpName, uniqueDstNames);
+          dstAddrName = grpName;
+        } else {
+          // Par défaut : lister inline dans set dstaddr
+          dstAddrName = uniqueDstNames;
+        }
       }
     } else if (p._use32Dst && p.dstHosts && p.dstHosts.length > 0) {
       // Mode /32 : utiliser les hôtes réels — set dstaddr "h1" "h2" directement, sans groupe
@@ -1138,7 +1173,9 @@ function generateConfig(selectedPolicies, opts = {}) {
       L.push(`        set dstintf ${dstintfStr}`);
       const srcAddrStr = pol.srcAddrNames && pol.srcAddrNames.length > 1
         ? pol.srcAddrNames.map(n => `"${n}"`).join(' ')
-        : `"${pol.srcAddrName}"`;
+        : (Array.isArray(pol.srcAddrName)
+          ? pol.srcAddrName.map(n => `"${n}"`).join(' ')
+          : `"${pol.srcAddrName}"`);
       L.push(`        set srcaddr ${srcAddrStr}`);
       const dstAddrStr = Array.isArray(pol.dstAddrName)
         ? pol.dstAddrName.map(n => `"${n}"`).join(' ')

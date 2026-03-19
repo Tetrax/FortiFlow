@@ -542,6 +542,7 @@ app.post('/api/deploy/generate', (req, res) => {
       logTraffic:     o.log     || 'all',
       serviceGroups:  s.fortiConfig.serviceGroups || {},
       addresses:      s.fortiConfig.addresses || {},
+      addressGroups:  s.fortiConfig.addressGroups || {},
       zones:          s.fortiConfig.zones || {},
     };
     const cli = generateConfig(analyzed, genOpts);

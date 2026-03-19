@@ -1652,6 +1652,18 @@ function collectMissingObjects() {
         addresses.get(cidr).policyCount++;
       }
     }
+    // Multi-dst : collecter les subnets manquants individuellement
+    if (p._isMultiDst && p._multiDstSubnets?.length) {
+      for (const s of p._multiDstSubnets) {
+        if (s.useSubnet !== false && !s.addrFound) {
+          const cidr = s.subnet;
+          if (cidr && cidr !== 'all') {
+            if (!addresses.has(cidr)) addresses.set(cidr, { cidr, name: s.addrName, policyCount: 0 });
+            addresses.get(cidr).policyCount++;
+          }
+        }
+      }
+    }
     // Hôtes /32 src
     if (p._use32Src && p.srcHosts?.length > 0) {
       for (const h of p.srcHosts) {
@@ -1758,6 +1770,12 @@ function applyObjectNames(addrMap, hostsMap, svcMap) {
     // Dst address
     const dstCidr = a.dstAddr?.cidr;
     if (dstCidr && dstCidr !== 'all' && addrMap[dstCidr]) p._dstAddrName = addrMap[dstCidr];
+    // Multi-dst : propager les noms aux subnets individuels
+    if (p._isMultiDst && p._multiDstSubnets?.length) {
+      for (const s of p._multiDstSubnets) {
+        if (addrMap[s.subnet]) s.addrName = addrMap[s.subnet];
+      }
+    }
     // Host names (stored per-policy for CLI generation)
     if (p._use32Src && p.srcHosts?.length > 0) {
       p._srcHostNames = p._srcHostNames || {};
@@ -2004,7 +2022,7 @@ async function deploy() {
               <button class="btn-sm" id="btn-download-cli">⬇ Télécharger</button>
               <button class="btn-sm" id="btn-cli-toggle" style="margin-left:auto">▾ Réduire</button>
             </div>
-            <pre id="deploy-cli-pre" class="deploy-cli-pre"></pre>
+            <textarea id="deploy-cli-pre" class="deploy-cli-pre" spellcheck="false" style="width:100%;min-height:300px;resize:vertical;font-family:monospace;white-space:pre;overflow-x:auto;tab-size:2"></textarea>
           </div>
         </div>
       </div>
@@ -2215,7 +2233,7 @@ async function deploy() {
     if (deployState.generatedCli) {
       const wrap = el('deploy-cli-wrap');
       const pre  = el('deploy-cli-pre');
-      if (pre)  pre.textContent = deployState.generatedCli;
+      if (pre)  pre.value = deployState.generatedCli;
       if (wrap) wrap.style.display = '';
     }
   }
@@ -2505,10 +2523,21 @@ function dstTargetCell(p, idx) {
         ${modeBtn}${badge}
       </div>${hostsHtml}`;
     }).join('');
-    return `<button class="btn-sm btn-multidst-toggle" data-idx="${idx}" style="font-size:10px;padding:2px 7px">${subs.length} destinations ▾</button>
+    const grpActive = p._useDstGroup || false;
+    const grpBtn = `<button class="btn-sm btn-dst-grp-toggle" data-idx="${idx}"
+      title="${grpActive ? 'Grouper dans un objet addrgrp — cliquer pour lister inline' : 'Lister inline dans set dstaddr — cliquer pour grouper'}"
+      style="font-size:9px;padding:1px 5px;margin-left:4px;${grpActive ? 'background:var(--accent);color:#fff' : ''}">${grpActive ? '⊞ GRP' : '⊞'}</button>`;
+    const grpNameHtml = grpActive
+      ? `<div style="margin-top:2px;display:flex;align-items:center;gap:4px">
+          <span style="font-size:9px;color:var(--text2)">Nom :</span>
+          <input class="deploy-name-input dst-grp-name-input" data-idx="${idx}"
+            value="${escHtml(p._dstAddrName || `GRP_${(p.policyIds||['0'])[0]}_DST`)}"
+            style="font-size:10px;width:180px;padding:2px 6px" placeholder="GRP_…">
+         </div>` : '';
+    return `<button class="btn-sm btn-multidst-toggle" data-idx="${idx}" style="font-size:10px;padding:2px 7px">${subs.length} destinations ▾</button>${grpBtn}
     <div class="hosts-detail" id="multidst-${idx}" style="display:none;margin-top:4px;max-height:200px;overflow-y:auto;background:var(--bg0);border:1px solid var(--border);border-radius:4px;padding:4px 8px">
       <div style="font-size:10px;font-weight:600;margin-bottom:4px;border-bottom:1px solid var(--border);padding-bottom:4px">${subs.length} destinations — cliquer /24↔/32</div>
-      ${rows}
+      ${rows}${grpNameHtml}
     </div>`;
   }
 
@@ -2667,22 +2696,28 @@ function mergeByPolicyId(policies) {
         const dstSubnets = dsts.map(subnet => {
           const subnetPols = ifGroup.filter(p => p.dstTarget === subnet);
           const hosts      = [...new Set(subnetPols.flatMap(p => p.dstHosts || []))].sort();
-          const dstAddr    = subnetPols[0]?.analysis?.dstAddr;
+          const dstAddr    = subnetPols.find(p => p.analysis?.dstAddr?.found)?.analysis?.dstAddr
+                          || subnetPols[0]?.analysis?.dstAddr;
           return { subnet, hosts, useSubnet: hosts.length >= DST_SUBNET_THRESHOLD,
             addrName: dstAddr?.found ? dstAddr.name : suggestAddrNameFE(subnet), addrFound: !!(dstAddr?.found) };
         });
+        // Fusionner _dstHostNames de TOUTES les policies du groupe
+        const mergedDstHostNames = {};
+        for (const p of ifGroup) Object.assign(mergedDstHostNames, p._dstHostNames || {});
+        const allDstHosts = [...new Set(ifGroup.flatMap(p => p.dstHosts || []))].sort();
         merged.push({
           ...base, srcSubnet: srcSubnets[0], srcSubnets,
           dstTarget: dsts[0], dstTargets: dsts,
           _multiDstSubnets: dstSubnets, _isMultiDst: true,
           dstType: base.dstType, sessions: totalSessions,
           serviceDesc: allServices.map(s => s.label).join(', '),
-          policyIds: allPolicyIds, srcHosts: allSrcHosts, dstHosts: [],
+          policyIds: allPolicyIds, srcHosts: allSrcHosts, dstHosts: allDstHosts,
           _use32Src: allSrcHosts.length >= 1 && allSrcHosts.length <= AUTO32_THRESHOLD,
           _use32Dst: false, _mergedCount: ifGroup.length, _isWan: isWan, _nat: isWan,
           _srcAddrName: base._srcAddrName || suggestAddrNameFE(srcSubnets[0]),
           _dstAddrName: `GRP_${policyId}_DST`,
           _policyName: `FF_POLICY_${policyId}`,
+          _dstHostNames: Object.keys(mergedDstHostNames).length ? mergedDstHostNames : undefined,
           srcAddrNames: srcSubnets.length > 1 ? srcSubnets.map(s => `FF_${escSlug(s)}`) : null,
           analysis: { ...base.analysis, services: allServices, needsWork: allServices.some(s => !s.found) },
         });
@@ -2749,7 +2784,8 @@ function mergeByPolicyId(policies) {
         const dstSubnets = allDstTargets.map(subnet => {
           const subnetPols = subGroup.filter(p => p.dstTarget === subnet);
           const hosts      = [...new Set(subnetPols.flatMap(p => p.dstHosts || []))].sort();
-          const dstAddr    = subnetPols[0]?.analysis?.dstAddr;
+          const dstAddr    = subnetPols.find(p => p.analysis?.dstAddr?.found)?.analysis?.dstAddr
+                          || subnetPols[0]?.analysis?.dstAddr;
           return {
             subnet,
             hosts,
@@ -2758,6 +2794,9 @@ function mergeByPolicyId(policies) {
             addrFound: !!(dstAddr?.found),
           };
         });
+        // Fusionner _dstHostNames de TOUTES les policies du sous-groupe
+        const mergedDstHostNames2 = {};
+        for (const p of subGroup) Object.assign(mergedDstHostNames2, p._dstHostNames || {});
 
         merged.push({
           ...base,
@@ -2782,6 +2821,7 @@ function mergeByPolicyId(policies) {
           _srcAddrGrpFound: !!existingGrp,
           _dstAddrName:     `GRP_${policyId}_DST`,
           _policyName:      `FF_POLICY_${policyId}`,
+          _dstHostNames:    Object.keys(mergedDstHostNames2).length ? mergedDstHostNames2 : undefined,
           srcAddrNames:     existingGrp ? null : (multiSrc ? srcSubnets.map(s => `FF_${escSlug(s)}`) : null),
           analysis:         { ...base.analysis, services: allServices, needsWork: allServices.some(s => !s.found) },
         });
@@ -3417,6 +3457,36 @@ function wireDeployTable() {
     renderDeployPolicies(filterDeployPolicies(), false);
   });
 
+  // ── click: .btn-dst-grp-toggle — basculer inline ↔ groupe pour multi-dst ──
+  container.addEventListener('click', e => {
+    const btn = e.target.closest('.btn-dst-grp-toggle');
+    if (!btn) return;
+    const idx = +btn.dataset.idx;
+    const p   = deployState.analyzed[idx];
+    if (!p) return;
+    p._useDstGroup = !p._useDstGroup;
+    renderDeployPolicies(filterDeployPolicies(), false);
+  });
+
+  // ── change: .dst-grp-name-input — nom custom du groupe destination ──
+  container.addEventListener('input', e => {
+    if (!e.target.classList.contains('dst-grp-name-input')) return;
+    const idx = +e.target.dataset.idx;
+    const p   = deployState.analyzed[idx];
+    if (p) p._dstAddrName = e.target.value.trim();
+  });
+
+  // ── click: .btn-src-grp-toggle — basculer inline ↔ groupe pour source /32 ──
+  container.addEventListener('click', e => {
+    const btn = e.target.closest('.btn-src-grp-toggle');
+    if (!btn) return;
+    const idx = +btn.dataset.idx;
+    const p   = deployState.analyzed[idx];
+    if (!p) return;
+    p._useSrcGroup = !p._useSrcGroup;
+    renderDeployPolicies(filterDeployPolicies(), false);
+  });
+
   // ── click: .policy-tag (tag-remove) ──
   container.addEventListener('click', e => {
     const tag = e.target.closest('.policy-tag');
@@ -3610,7 +3680,12 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     let srcHostsHtml = '';
     // Mode pills always shown
     const srcModePills = buildModePills(idx, 'src', srcMode, srcHosts.length >= 1);
-    srcHostsHtml = `<div style="margin-top:2px">${srcModePills}</div>`;
+    const srcGrpActive = p._useSrcGroup || false;
+    const srcGrpBtn = (srcMode === 'hosts' && srcHosts.length > 1)
+      ? `<button class="btn-sm btn-src-grp-toggle" data-idx="${idx}"
+          title="${srcGrpActive ? 'Grouper dans un addrgrp — cliquer pour lister inline' : 'Lister inline — cliquer pour grouper'}"
+          style="font-size:9px;padding:1px 5px;margin-left:2px;${srcGrpActive ? 'background:var(--accent);color:#fff' : ''}">${srcGrpActive ? '⊞ GRP' : '⊞'}</button>` : '';
+    srcHostsHtml = `<div style="margin-top:2px">${srcModePills}${srcGrpBtn}</div>`;
     if (srcHosts.length >= 1 && srcMode === 'hosts') {
       const rows = srcHosts.slice(0, 50).map(h => buildHostRow(h, p._srcHostNames, idx, 'src')).join('');
       const moreH = srcHosts.length > 50 ? `<div style="font-size:10px;color:var(--text2)">+${srcHosts.length - 50} autres…</div>` : '';
@@ -3830,19 +3905,24 @@ async function generateDeployConf() {
     const wrap = el('deploy-cli-wrap');
     const pre  = el('deploy-cli-pre');
     const info = el('deploy-gen-info');
-    if (pre)  pre.textContent = cli;
+    if (pre)  pre.value = cli;
     if (wrap) wrap.style.display = '';
     if (info) info.textContent = `${selectedPolicies.length} policies · ${cli.split('\n').length} lignes`;
 
+    // Sync textarea edits back to state
+    pre.addEventListener('input', () => { deployState.generatedCli = pre.value; });
+
     // Wire copy + download buttons (idempotent — replace each time)
     el('btn-copy-cli')?.addEventListener('click', () => {
-      navigator.clipboard.writeText(deployState.generatedCli || '').then(() => {
+      const text = el('deploy-cli-pre')?.value || deployState.generatedCli || '';
+      navigator.clipboard.writeText(text).then(() => {
         const b = el('btn-copy-cli');
         if (b) { const old = b.textContent; b.textContent = '✓ Copié !'; setTimeout(() => { b.textContent = old; }, 1800); }
       });
     });
     el('btn-download-cli')?.addEventListener('click', () => {
-      const blob = new Blob([deployState.generatedCli || ''], { type: 'text/plain' });
+      const text = el('deploy-cli-pre')?.value || deployState.generatedCli || '';
+      const blob = new Blob([text], { type: 'text/plain' });
       const url  = URL.createObjectURL(blob);
       const a    = document.createElement('a');
       a.href = url; a.download = 'fortiflow_deploy.conf'; a.click();
