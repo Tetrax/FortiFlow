@@ -1857,23 +1857,26 @@ function mountDrawer() {
   drawer.addEventListener('click', e => {
     const p = _drawerIdx !== null ? deployState.analyzed[_drawerIdx] : null;
     if (!p) return;
-    if (e.target.matches('.drawer-mode-btn')) {
-      const type = e.target.dataset.type;
-      const mode = e.target.dataset.mode;
+    const modeBtn = e.target.closest('.drawer-mode-btn');
+    if (modeBtn) {
+      const type = modeBtn.dataset.type;
+      const mode = modeBtn.dataset.mode;
       if (type === 'src') { p._srcMode = mode; p._use32Src = mode === 'hosts'; }
       else { p._dstMode = mode; p._use32Dst = mode === 'hosts'; }
       populateDrawer(_drawerIdx);
       renderDeployPolicies(filterDeployPolicies(), false);
     }
-    if (e.target.matches('.drawer-grp-toggle')) {
-      const type = e.target.dataset.type;
+    const grpBtn = e.target.closest('.drawer-grp-toggle');
+    if (grpBtn) {
+      const type = grpBtn.dataset.type;
       if (type === 'src') p._useSrcGroup = !p._useSrcGroup;
       else p._useDstGroup = !p._useDstGroup;
       populateDrawer(_drawerIdx);
       renderDeployPolicies(filterDeployPolicies(), false);
     }
-    if (e.target.matches('.drawer-multidst-mode')) {
-      const si = +e.target.dataset.si;
+    const mdBtn = e.target.closest('.drawer-multidst-mode');
+    if (mdBtn) {
+      const si = +mdBtn.dataset.si;
       if (p._multiDstSubnets?.[si]) {
         p._multiDstSubnets[si].useSubnet = !p._multiDstSubnets[si].useSubnet;
         populateDrawer(_drawerIdx);
