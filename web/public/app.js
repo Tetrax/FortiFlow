@@ -1796,6 +1796,250 @@ function applyObjectNames(addrMap, hostsMap, svcMap) {
   renderDeployPolicies(filterDeployPolicies(), false);
 }
 
+// ── Policy Drawer (side panel) ───────────────────────────────────────────────
+
+let _drawerMounted = false;
+let _drawerIdx = null;
+
+function mountDrawer() {
+  if (_drawerMounted) return;
+  _drawerMounted = true;
+  const overlay = document.createElement('div');
+  overlay.className = 'policy-drawer-overlay';
+  overlay.id = 'drawer-overlay';
+  const drawer = document.createElement('div');
+  drawer.className = 'policy-drawer';
+  drawer.id = 'policy-drawer';
+  drawer.innerHTML = `<div class="drawer-header">
+    <h3 id="drawer-title">Policy</h3>
+    <button class="drawer-close" id="drawer-close">&times;</button>
+  </div>
+  <div class="drawer-body" id="drawer-body"></div>`;
+  document.body.appendChild(overlay);
+  document.body.appendChild(drawer);
+  overlay.addEventListener('click', closeDrawer);
+  drawer.querySelector('#drawer-close').addEventListener('click', closeDrawer);
+
+  // Delegated events inside drawer
+  drawer.addEventListener('input', e => {
+    const p = _drawerIdx !== null ? deployState.analyzed[_drawerIdx] : null;
+    if (!p) return;
+    if (e.target.matches('.drawer-src-name'))  { p._srcAddrName = e.target.value; syncInlineCell(_drawerIdx, '_srcAddrName', e.target.value); }
+    if (e.target.matches('.drawer-dst-name'))  { p._dstAddrName = e.target.value; syncInlineCell(_drawerIdx, '_dstAddrName', e.target.value); }
+    if (e.target.matches('.drawer-policy-name')) p._policyName = e.target.value;
+    if (e.target.matches('.drawer-host-input')) {
+      const host = e.target.dataset.host;
+      const type = e.target.dataset.type;
+      if (type === 'src') { if (!p._srcHostNames) p._srcHostNames = {}; p._srcHostNames[host] = e.target.value; }
+      else { if (!p._dstHostNames) p._dstHostNames = {}; p._dstHostNames[host] = e.target.value; }
+    }
+    if (e.target.matches('.drawer-svc-name')) {
+      const port = e.target.dataset.port, proto = e.target.dataset.proto;
+      const svc = (p.analysis?.services || []).find(s => String(s.port) === port && s.proto === proto);
+      if (svc) svc.suggestedName = e.target.value;
+    }
+    if (e.target.matches('.drawer-multidst-name')) {
+      const si = +e.target.dataset.si;
+      if (p._multiDstSubnets?.[si]) p._multiDstSubnets[si].addrName = e.target.value;
+    }
+    if (e.target.matches('.drawer-grp-name')) {
+      p._dstAddrName = e.target.value;
+    }
+  });
+  drawer.addEventListener('click', e => {
+    const p = _drawerIdx !== null ? deployState.analyzed[_drawerIdx] : null;
+    if (!p) return;
+    if (e.target.matches('.drawer-mode-btn')) {
+      const type = e.target.dataset.type;
+      const mode = e.target.dataset.mode;
+      if (type === 'src') { p._srcMode = mode; p._use32Src = mode === 'hosts'; }
+      else { p._dstMode = mode; p._use32Dst = mode === 'hosts'; }
+      populateDrawer(_drawerIdx);
+      renderDeployPolicies(filterDeployPolicies(), false);
+    }
+    if (e.target.matches('.drawer-grp-toggle')) {
+      const type = e.target.dataset.type;
+      if (type === 'src') p._useSrcGroup = !p._useSrcGroup;
+      else p._useDstGroup = !p._useDstGroup;
+      populateDrawer(_drawerIdx);
+      renderDeployPolicies(filterDeployPolicies(), false);
+    }
+    if (e.target.matches('.drawer-multidst-mode')) {
+      const si = +e.target.dataset.si;
+      if (p._multiDstSubnets?.[si]) {
+        p._multiDstSubnets[si].useSubnet = !p._multiDstSubnets[si].useSubnet;
+        populateDrawer(_drawerIdx);
+        renderDeployPolicies(filterDeployPolicies(), false);
+      }
+    }
+  });
+  drawer.addEventListener('change', e => {
+    const p = _drawerIdx !== null ? deployState.analyzed[_drawerIdx] : null;
+    if (!p) return;
+    if (e.target.matches('.drawer-srcintf')) { p._srcintf = e.target.value || undefined; renderDeployPolicies(filterDeployPolicies(), false); }
+    if (e.target.matches('.drawer-dstintf')) { p._dstintf = e.target.value || undefined; renderDeployPolicies(filterDeployPolicies(), false); }
+    if (e.target.matches('.drawer-nat')) { p._nat = e.target.checked; }
+  });
+}
+
+function openDrawer(idx) {
+  mountDrawer();
+  _drawerIdx = idx;
+  populateDrawer(idx);
+  document.getElementById('drawer-overlay').classList.add('open');
+  document.getElementById('policy-drawer').classList.add('open');
+  // Mark row
+  document.querySelectorAll('.deploy-policy-row.selected-row').forEach(r => r.classList.remove('selected-row'));
+  document.querySelector(`.deploy-policy-row[data-idx="${idx}"]`)?.classList.add('selected-row');
+}
+
+function closeDrawer() {
+  document.getElementById('drawer-overlay')?.classList.remove('open');
+  document.getElementById('policy-drawer')?.classList.remove('open');
+  document.querySelectorAll('.deploy-policy-row.selected-row').forEach(r => r.classList.remove('selected-row'));
+  _drawerIdx = null;
+}
+
+function syncInlineCell(idx, field, value) {
+  const cell = document.querySelector(`.inline-editable[data-idx="${idx}"][data-field="${field}"]`);
+  if (cell) cell.textContent = value || '—';
+}
+
+function populateDrawer(idx) {
+  const p = deployState.analyzed[idx];
+  if (!p) return;
+  const a = p.analysis || {};
+  const title = document.getElementById('drawer-title');
+  title.textContent = `Policy ${p._policyName || (p.policyIds || [])[0] || idx}`;
+
+  const ifOpts = (deployState.ifaceOpts || []).map(o =>
+    `<option value="${escHtml(o.value)}" ${(o.value === (p._srcintf || '')) ? 'selected' : ''}>${escHtml(o.label)}</option>`
+  ).join('');
+  const ifOptsDst = (deployState.ifaceOpts || []).map(o =>
+    `<option value="${escHtml(o.value)}" ${(o.value === (p._dstintf || '')) ? 'selected' : ''}>${escHtml(o.label)}</option>`
+  ).join('');
+
+  const srcMode = p._srcMode || (p._use32Src ? 'hosts' : 'subnet');
+  const dstMode = p._dstMode || (p._use32Dst ? 'hosts' : 'subnet');
+  const srcHosts = p.srcHosts || [];
+  const dstHosts = p.dstHosts || [];
+
+  // Source hosts section
+  let srcHostsHtml = '';
+  if (srcHosts.length > 0 && srcMode === 'hosts') {
+    srcHostsHtml = `<div class="drawer-host-list">${srcHosts.slice(0, 80).map(h => {
+      const name = (p._srcHostNames || {})[h] || `FF_HOST_${h.replace(/\./g,'_')}`;
+      return `<div class="drawer-host-row">
+        <span class="drawer-host-ip">${escHtml(h)}</span>
+        <input class="drawer-host-input" data-type="src" data-host="${escHtml(h)}" value="${escHtml(name)}" placeholder="FF_HOST_...">
+      </div>`;
+    }).join('')}</div>`;
+    if (srcHosts.length > 1) {
+      srcHostsHtml += `<div class="drawer-toggle-row" style="margin-top:4px">
+        <button class="drawer-toggle-btn drawer-grp-toggle ${p._useSrcGroup ? 'active' : ''}" data-type="src">Grouper (addrgrp)</button>
+      </div>`;
+    }
+  }
+
+  // Dst section — depends on multi-dst or single
+  let dstSection = '';
+  if (p._isMultiDst && p._multiDstSubnets?.length) {
+    const subs = p._multiDstSubnets;
+    const subRows = subs.map((s, si) => {
+      const statusIcon = s.addrFound ? `<span style="color:var(--success)">&#10003;</span>` : `<span style="color:var(--warn)">+</span>`;
+      return `<div class="drawer-multidst-row">
+        <span class="drawer-multidst-subnet">${escHtml(s.subnet)}</span>
+        <button class="btn-sm drawer-multidst-mode" data-si="${si}" style="font-size:9px;padding:2px 8px">${s.useSubnet !== false ? '/24' : '/32'}</button>
+        ${statusIcon}
+        <input class="drawer-input drawer-multidst-name" data-si="${si}" value="${escHtml(s.addrName)}" style="flex:1;font-size:10px">
+      </div>`;
+    }).join('');
+    dstSection = `<div class="drawer-section">
+      <div class="drawer-section-title">Destinations (${subs.length})</div>
+      ${subRows}
+      <div class="drawer-toggle-row" style="margin-top:8px">
+        <button class="drawer-toggle-btn drawer-grp-toggle ${p._useDstGroup ? 'active' : ''}" data-type="dst">Grouper (addrgrp)</button>
+        ${p._useDstGroup ? `<input class="drawer-input drawer-grp-name" value="${escHtml(p._dstAddrName || '')}" placeholder="GRP_..." style="width:160px">` : ''}
+      </div>
+    </div>`;
+  } else {
+    const dstAddrName = p._dstAddrName || a.dstAddr?.name || '';
+    const dstFound = a.dstAddr?.found;
+    let dstHostsHtml = '';
+    if (dstHosts.length > 0 && dstMode === 'hosts') {
+      dstHostsHtml = `<div class="drawer-host-list">${dstHosts.slice(0, 80).map(h => {
+        const name = (p._dstHostNames || {})[h] || `FF_HOST_${h.replace(/\./g,'_')}`;
+        return `<div class="drawer-host-row">
+          <span class="drawer-host-ip">${escHtml(h)}</span>
+          <input class="drawer-host-input" data-type="dst" data-host="${escHtml(h)}" value="${escHtml(name)}" placeholder="FF_HOST_...">
+        </div>`;
+      }).join('')}</div>`;
+    }
+    dstSection = `<div class="drawer-section">
+      <div class="drawer-section-title">Destination</div>
+      <div class="drawer-field">
+        <span class="drawer-field-label">Target</span>
+        <span class="drawer-field-value">${escHtml(p.dstTarget || '—')}</span>
+      </div>
+      ${p.dstType === 'private' ? `<div class="drawer-toggle-row">
+        <span style="font-size:11px;color:var(--text2)">Mode :</span>
+        <button class="drawer-toggle-btn drawer-mode-btn ${dstMode==='subnet'?'active':''}" data-type="dst" data-mode="subnet">/24 subnet</button>
+        <button class="drawer-toggle-btn drawer-mode-btn ${dstMode==='hosts'?'active':''} ${dstHosts.length<1?'disabled':''}" data-type="dst" data-mode="hosts">/32 hôtes (${dstHosts.length})</button>
+      </div>` : ''}
+      ${dstMode === 'subnet' ? `<div class="drawer-field">
+        <span class="drawer-field-label">Objet addr</span>
+        ${dstFound ? `<span class="drawer-field-value" style="color:var(--success)">&#10003; ${escHtml(dstAddrName)}</span>`
+          : `<input class="drawer-input drawer-dst-name" value="${escHtml(dstAddrName)}" placeholder="FF_...">`}
+      </div>` : ''}
+      ${dstHostsHtml}
+    </div>`;
+  }
+
+  // Services
+  const svcList = a.services || [];
+  const svcsHtml = svcList.map(svc => {
+    if (svc.found) return `<div class="drawer-field"><span class="drawer-field-label">${escHtml(svc.label || svc.name)}</span><span class="drawer-field-value" style="color:var(--success)">&#10003; ${escHtml(svc.name)}</span></div>`;
+    return `<div class="drawer-field"><span class="drawer-field-label">${escHtml(svc.label || `${svc.port}/${svc.proto}`)}</span><input class="drawer-input drawer-svc-name" data-port="${svc.port}" data-proto="${svc.proto}" value="${escHtml(svc.suggestedName || '')}" placeholder="FF_SVC_..."></div>`;
+  }).join('');
+
+  const srcAddrName = p._srcAddrName || a.srcAddr?.name || '';
+  const srcFound = a.srcAddr?.found;
+
+  const body = document.getElementById('drawer-body');
+  body.innerHTML = `
+    <div class="drawer-section">
+      <div class="drawer-section-title">General</div>
+      <div class="drawer-field"><span class="drawer-field-label">Direction</span><span class="drawer-field-value">${p._isWan ? '<span class="dir-badge wan">WAN</span>' : '<span class="dir-badge lan">LAN</span>'}</span></div>
+      <div class="drawer-field"><span class="drawer-field-label">Policy IDs</span><span class="drawer-field-value">${(p.policyIds||[]).join(', ') || '—'}</span></div>
+      <div class="drawer-field"><span class="drawer-field-label">Sessions</span><span class="drawer-field-value">${fmtNum(p.sessions||0)}</span></div>
+      <div class="drawer-field"><span class="drawer-field-label">NAT</span><label style="display:flex;align-items:center;gap:6px"><input type="checkbox" class="drawer-nat" ${p._nat ? 'checked' : ''}> <span style="font-size:11px;color:var(--text2)">Activer le NAT</span></label></div>
+      <div class="drawer-field"><span class="drawer-field-label">Nom policy</span><input class="drawer-input drawer-policy-name" value="${escHtml(p._policyName || '')}" placeholder="FF_POLICY_..."></div>
+    </div>
+    <div class="drawer-section">
+      <div class="drawer-section-title">Source</div>
+      <div class="drawer-field"><span class="drawer-field-label">Subnet</span><span class="drawer-field-value">${escHtml(p.srcSubnet || (p.srcSubnets||[]).join(', '))}</span></div>
+      <div class="drawer-toggle-row">
+        <span style="font-size:11px;color:var(--text2)">Mode :</span>
+        <button class="drawer-toggle-btn drawer-mode-btn ${srcMode==='subnet'?'active':''}" data-type="src" data-mode="subnet">/24 subnet</button>
+        <button class="drawer-toggle-btn drawer-mode-btn ${srcMode==='hosts'?'active':''} ${srcHosts.length<1?'disabled':''}" data-type="src" data-mode="hosts">/32 hôtes (${srcHosts.length})</button>
+      </div>
+      ${srcMode === 'subnet' ? `<div class="drawer-field">
+        <span class="drawer-field-label">Objet addr</span>
+        ${srcFound ? `<span class="drawer-field-value" style="color:var(--success)">&#10003; ${escHtml(srcAddrName)}</span>`
+          : `<input class="drawer-input drawer-src-name" value="${escHtml(srcAddrName)}" placeholder="FF_...">`}
+      </div>` : ''}
+      ${srcHostsHtml}
+      <div class="drawer-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-srcintf">${ifOpts}</select></div>
+    </div>
+    ${dstSection}
+    <div class="drawer-section">
+      <div class="drawer-section-title">Interfaces destination</div>
+      <div class="drawer-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-dstintf">${ifOptsDst}</select></div>
+    </div>
+    ${svcList.length ? `<div class="drawer-section"><div class="drawer-section-title">Services (${svcList.length})</div>${svcsHtml}</div>` : ''}
+  `;
+}
+
 // ═══════════════════════════════════════════════════════════════
 // View: Analyse (wrapper — sub-tabs: Flux, Matrice, Groupes, Ports)
 // ═══════════════════════════════════════════════════════════════
@@ -1976,7 +2220,7 @@ async function deploy() {
             <button class="btn-accent" id="btn-analyze">Analyser les policies</button>
           </div>
         </div>
-        <div class="deploy-merge-bar" id="deploy-merge-bar" style="display:none">
+        <div class="deploy-toolbar" id="deploy-merge-bar" style="display:none">
           <span id="deploy-merge-info" style="font-size:11px;color:var(--text2)"></span>
           <div class="dropdown-wrap">
             <button class="btn-sm dropdown-trigger">⚡ Fusion ▾</button>
@@ -1998,10 +2242,19 @@ async function deploy() {
               <div class="dropdown-item ${deployState.viewMode === 'sequence' ? 'active' : ''}" data-view-mode="sequence">⊞ Séquences</div>
             </div>
           </div>
-          <button class="btn-sm ${deployState.use32Global ? 'btn-active' : ''}" id="btn-32-global" title="Basculer toutes les policies : /24 subnets ↔ /32 hôtes réels">${deployState.use32Global ? '/32 ✓' : '/24'} ↔ /32</button>
-          <button class="btn-sm btn-warn" id="btn-missing-objects" style="display:none" title="Nommer les objets manquants avant de générer le CLI">⚠ …</button>
+          <span class="toolbar-sep"></span>
           <span style="margin-left:auto"></span>
           <input type="text" id="deploy-search" class="deploy-search-input" placeholder="Rechercher (IP, subnet, service, policy...)" value="${escHtml(deployState.searchFilter || '')}" title="Filtrer les policies par texte libre">
+        </div>
+        <div class="missing-bar" id="deploy-missing-bar" style="display:none">
+          <span id="deploy-missing-text"></span>
+          <button class="missing-bar-btn" id="btn-missing-objects">Nommer les objets</button>
+        </div>
+        <div class="deploy-legend" id="deploy-legend" style="display:none">
+          <div class="deploy-legend-item"><span class="deploy-legend-dot found"></span> Objet existant</div>
+          <div class="deploy-legend-item"><span class="deploy-legend-dot missing"></span> A créer</div>
+          <div class="deploy-legend-item"><span class="deploy-legend-dot auto"></span> Auto-détecté</div>
+          <span style="margin-left:auto;font-size:10px;color:var(--text2)">Cliquez sur une ligne pour la personnaliser</span>
         </div>
         <div class="deploy-step-body" id="deploy-policy-body">
           <div class="empty-state" style="padding:24px">Cliquez sur <strong>Analyser les policies</strong> pour commencer</div>
@@ -2501,78 +2754,53 @@ function filterDeployPolicies() {
   });
 }
 
-// Cellule dstTarget avec bouton détails pour les targets fusionnés (all + liste IPs)
+// Cellule dstTarget — simplified: compact summary, details in drawer
 function dstTargetCell(p, idx) {
-  // ── Multi-dst policy (mergeByPolicyId avec destinations diverses) ──
+  // ── Multi-dst policy ──
   if (p._isMultiDst && p._multiDstSubnets?.length) {
     const subs = p._multiDstSubnets;
-    const rows = subs.map((s, si) => {
-      const badge = s.addrFound
-        ? `<span class="match-ok" style="font-size:9px">✓ ${escHtml(s.addrName)}</span>`
-        : `<span style="color:var(--warn);font-size:9px">+ ${escHtml(s.addrName)}</span>`;
-      const modeBtn = `<button class="btn-sm btn-dst-subnet-toggle" data-idx="${idx}" data-si="${si}"
-        title="${s.useSubnet ? 'Mode /24 — cliquer pour /32' : 'Mode /32 — cliquer pour /24'}"
-        style="font-size:9px;padding:1px 5px">${s.useSubnet ? '/24' : `/32 (${s.hosts.length}h)`}</button>`;
-      const hostsHtml = !s.useSubnet
-        ? `<div style="margin-top:2px;padding-left:8px">${s.hosts.map(h => {
-            const rn = (p._dstHostNames || {})[h];
-            return `<div style="font-size:9px;color:var(--text2)">${escHtml(h)}${rn ? ` <span class="match-ok">✓ ${escHtml(rn)}</span>` : ''}</div>`;
-          }).join('')}</div>` : '';
-      return `<div style="display:flex;align-items:center;gap:4px;padding:2px 0;border-bottom:1px solid var(--border)">
-        <span class="mono" style="font-size:10px;min-width:120px">${escHtml(s.subnet)}</span>
-        ${modeBtn}${badge}
-      </div>${hostsHtml}`;
-    }).join('');
-    const grpActive = p._useDstGroup || false;
-    const grpBtn = `<button class="btn-sm btn-dst-grp-toggle" data-idx="${idx}"
-      title="${grpActive ? 'Grouper dans un objet addrgrp — cliquer pour lister inline' : 'Lister inline dans set dstaddr — cliquer pour grouper'}"
-      style="font-size:9px;padding:1px 5px;margin-left:4px;${grpActive ? 'background:var(--accent);color:#fff' : ''}">${grpActive ? '⊞ GRP' : '⊞'}</button>`;
-    const grpNameHtml = grpActive
-      ? `<div style="margin-top:2px;display:flex;align-items:center;gap:4px">
-          <span style="font-size:9px;color:var(--text2)">Nom :</span>
-          <input class="deploy-name-input dst-grp-name-input" data-idx="${idx}"
-            value="${escHtml(p._dstAddrName || `GRP_${(p.policyIds||['0'])[0]}_DST`)}"
-            style="font-size:10px;width:180px;padding:2px 6px" placeholder="GRP_…">
-         </div>` : '';
-    return `<button class="btn-sm btn-multidst-toggle" data-idx="${idx}" style="font-size:10px;padding:2px 7px">${subs.length} destinations ▾</button>${grpBtn}
-    <div class="hosts-detail" id="multidst-${idx}" style="display:none;margin-top:4px;max-height:200px;overflow-y:auto;background:var(--bg0);border:1px solid var(--border);border-radius:4px;padding:4px 8px">
-      <div style="font-size:10px;font-weight:600;margin-bottom:4px;border-bottom:1px solid var(--border);padding-bottom:4px">${subs.length} destinations — cliquer /24↔/32</div>
-      ${rows}${grpNameHtml}
-    </div>`;
+    const firstTwo = subs.slice(0, 2).map(s => escHtml(s.subnet));
+    const more = subs.length > 2 ? ` <span class="dst-count-badge">+${subs.length - 2}</span>` : '';
+    return `<span class="mono" style="font-size:10px">${firstTwo.join(', ')}${more}</span>`;
   }
 
   const label = p.dstTarget === 'all' ? 'all (internet)' : p.dstTarget;
   const ips   = p._dstIPs;
+  const dstHosts = p.dstHosts || [];
+  const dstMode  = p._dstMode || (p._use32Dst ? 'hosts' : 'subnet');
 
-  // Mode pills + Badge hôtes /32 pour destinations privées
-  const dstHosts   = p.dstHosts || [];
-  const use32Dst   = p._use32Dst || false;
-  const dstMode    = p._dstMode || (use32Dst ? 'hosts' : 'subnet');
-  let dstHostsHtml = '';
-  if (p.dstType === 'private') {
-    const dstModePills = buildModePills(idx, 'dst', dstMode, dstHosts.length >= 1);
-    dstHostsHtml = `<div style="margin-top:2px;margin-left:4px">${dstModePills}</div>`;
-    if (dstHosts.length >= 1 && dstMode === 'hosts') {
-      const rows = dstHosts.slice(0, 50).map(h => buildHostRow(h, p._dstHostNames, idx, 'dst')).join('');
-      const moreH = dstHosts.length > 50 ? `<div style="font-size:10px;color:var(--text2)">+${dstHosts.length - 50} autres…</div>` : '';
-      dstHostsHtml += `<span style="display:inline-flex;align-items:center;gap:2px;margin-left:4px">
-        <button class="btn-sm btn-hosts-edit" data-idx="${idx}" data-type="dst" title="Noms des objets /32" style="font-size:9px;padding:1px 4px;opacity:0.6">✏ ${dstHosts.length}h</button>
-      </span>
-      <div class="hosts-detail" id="dst-hosts-${idx}" style="display:none;margin-top:4px;max-height:130px;overflow-y:auto;background:var(--bg0);border:1px solid var(--border);border-radius:4px;padding:4px 8px">
-        <div style="font-size:10px;font-weight:600;margin-bottom:4px;padding-bottom:4px;border-bottom:1px solid var(--border)">${dstHosts.length} hôtes — noms d'objets</div>
-        ${rows}${moreH}
-      </div>`;
-    }
+  let modeBadge = '';
+  if (p.dstType === 'private' && dstHosts.length > 0) {
+    modeBadge = dstMode === 'hosts'
+      ? ` <span class="dst-count-badge" title="${dstHosts.length} hôtes /32">/32 · ${dstHosts.length}h</span>`
+      : '';
   }
 
-  if (!ips || ips.length === 0) return `<span class="mono">${escHtml(label)}</span>${dstHostsHtml}`;
-  const ipRows = ips.slice(0, 50).map(ip => `<div class="mono" style="font-size:10px;color:var(--text2)">${escHtml(ip)}</div>`).join('');
-  const more   = ips.length > 50 ? `<div style="color:var(--text2);font-size:10px">+${ips.length - 50} autres…</div>` : '';
-  return `<span class="mono">${escHtml(label)}</span>
-    <button class="btn-sm deploy-dst-detail-btn" data-idx="${idx}" style="font-size:9px;padding:1px 5px;margin-left:4px">▸ ${ips.length} IPs</button>
-    <div class="deploy-dst-detail" id="dst-detail-${idx}" style="display:none;margin-top:4px;max-height:150px;overflow-y:auto;background:var(--bg0);border:1px solid var(--border);border-radius:4px;padding:4px 8px">
-      ${ipRows}${more}
-    </div>${dstHostsHtml}`;
+  const ipsBadge = ips && ips.length > 0 ? ` <span class="dst-count-badge">${ips.length} IPs</span>` : '';
+
+  return `<span class="mono">${escHtml(label)}</span>${modeBadge}${ipsBadge}`;
+}
+
+// Legacy dstTargetCell for contexts that still need full inline controls
+function dstTargetCellFull(p, idx) {
+  if (p._isMultiDst && p._multiDstSubnets?.length) {
+    const subs = p._multiDstSubnets;
+    const rows = subs.map((s, si) => {
+      const badge = s.addrFound
+        ? `<span class="match-ok" style="font-size:9px">&#10003; ${escHtml(s.addrName)}</span>`
+        : `<span style="color:var(--warn);font-size:9px">+ ${escHtml(s.addrName)}</span>`;
+      const modeBtn = `<button class="btn-sm btn-dst-subnet-toggle" data-idx="${idx}" data-si="${si}"
+        title="${s.useSubnet ? 'Mode /24' : 'Mode /32'}"
+        style="font-size:9px;padding:1px 5px">${s.useSubnet ? '/24' : `/32 (${s.hosts.length}h)`}</button>`;
+      return `<div style="display:flex;align-items:center;gap:4px;padding:2px 0;border-bottom:1px solid var(--border)">
+        <span class="mono" style="font-size:10px;min-width:120px">${escHtml(s.subnet)}</span>
+        ${modeBtn}${badge}
+      </div>`;
+    }).join('');
+    return `<div style="max-height:200px;overflow-y:auto">${rows}</div>`;
+  }
+  const label = p.dstTarget === 'all' ? 'all (internet)' : p.dstTarget;
+  return `<span class="mono">${escHtml(label)}</span>`;
 }
 
 // Render one host row inside a /32 popup: green ✓ if object exists, editable input otherwise
@@ -3166,8 +3394,22 @@ function buildModePills(idx, type, currentMode, hasHosts) {
   </span>`;
 }
 
-// Build an address cell: green text if 1 match, green select if multiple, red input if none
+// Build an address cell — simplified: inline-editable text (click to edit in drawer)
 function addrCell(addrAnalysis, currentName, idx, field) {
+  if (!addrAnalysis?.found) {
+    const display = currentName || 'FF_...';
+    return `<span class="inline-editable missing" data-idx="${idx}" data-field="${field}" title="Cliquer pour modifier">${escHtml(display)}</span>`;
+  }
+  const matches = addrAnalysis.allMatches || [{ name: addrAnalysis.name, source: addrAnalysis.source }];
+  if (matches.length === 1) {
+    return `<span class="inline-editable found" data-idx="${idx}" data-field="${field}" title="Objet existant — cliquer pour détails">${escHtml(matches[0].name)}</span>`;
+  }
+  // Multiple matches → still show first, click to see options in drawer
+  return `<span class="inline-editable found" data-idx="${idx}" data-field="${field}" title="${matches.length} objets correspondent — cliquer pour choisir">${escHtml(matches[0].name)}</span>`;
+}
+
+// Legacy addrCell for drawer/modal contexts (with full input)
+function addrCellInput(addrAnalysis, currentName, idx, field) {
   if (!addrAnalysis?.found) {
     return `<input class="deploy-name-input" data-idx="${idx}" data-field="${field}" value="${escHtml(currentName)}" placeholder="FF_...">`;
   }
@@ -3176,7 +3418,6 @@ function addrCell(addrAnalysis, currentName, idx, field) {
   if (matches.length === 1) {
     return `<span class="match-ok" ${srcTip ? `title="${escHtml(srcTip)}"` : ''}>✓ ${escHtml(matches[0].name)}</span>`;
   }
-  // Multiple matches → select
   const opts = matches.map(m =>
     `<option value="${escHtml(m.name)}" ${m.name === currentName ? 'selected' : ''}>${escHtml(m.name)}</option>`
   ).join('');
@@ -3220,6 +3461,9 @@ function countMissingObjects(analyzed) {
   for (const p of analyzed) {
     if (!p.analysis?.srcAddr?.found && p.analysis?.srcAddr?.cidr) addrs.add(p.analysis.srcAddr.cidr);
     if (!p.analysis?.dstAddr?.found && p.analysis?.dstAddr?.cidr && p.analysis?.dstAddr?.cidr !== 'all') addrs.add(p.analysis.dstAddr.cidr);
+    if (p._isMultiDst && p._multiDstSubnets?.length) {
+      for (const s of p._multiDstSubnets) { if (!s.addrFound && s.subnet) addrs.add(s.subnet); }
+    }
     for (const svc of p.analysis?.services || []) {
       if (!svc.found) svcs.add(svc.port ? `${svc.port}/${svc.proto}` : svc.label || svc.name);
     }
@@ -3257,6 +3501,50 @@ function wireDeployTable() {
   const container = el('deploy-policy-body');
   if (!container || _deployTableWired) return;
   _deployTableWired = true;
+
+  // ── click: row → open drawer ──
+  container.addEventListener('click', e => {
+    // Don't open drawer for checkboxes, inputs, selects, or buttons
+    if (e.target.closest('input, select, button, .deploy-chk, .inline-editing')) return;
+    const row = e.target.closest('.deploy-policy-row');
+    if (!row) return;
+    const idx = +row.dataset.idx;
+    if (isNaN(idx) || idx < 0) return;
+    openDrawer(idx);
+  });
+
+  // ── click: .inline-editable → inline editing ──
+  container.addEventListener('click', e => {
+    const cell = e.target.closest('.inline-editable');
+    if (!cell || cell.classList.contains('found')) return; // Only edit missing objects
+    e.stopPropagation(); // Don't open drawer
+    const idx   = +cell.dataset.idx;
+    const field = cell.dataset.field;
+    const p     = deployState.analyzed[idx];
+    if (!p) return;
+    const currentVal = p[field] || cell.textContent;
+    const input = document.createElement('input');
+    input.className = 'inline-editing';
+    input.value = currentVal;
+    input.dataset.idx = idx;
+    input.dataset.field = field;
+    cell.replaceWith(input);
+    input.focus();
+    input.select();
+    const commit = () => {
+      const val = input.value.trim();
+      if (val) p[field] = val;
+      const span = document.createElement('span');
+      span.className = 'inline-editable missing';
+      span.dataset.idx = idx;
+      span.dataset.field = field;
+      span.textContent = val || currentVal;
+      span.title = 'Cliquer pour modifier';
+      input.replaceWith(span);
+    };
+    input.addEventListener('blur', commit);
+    input.addEventListener('keydown', e2 => { if (e2.key === 'Enter') { e2.preventDefault(); input.blur(); } if (e2.key === 'Escape') { input.value = currentVal; input.blur(); } });
+  });
 
   // ── change: .deploy-chk ──
   container.addEventListener('change', e => {
@@ -3590,6 +3878,10 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     .map(o => `<option value="${escHtml(o.value)}">${escHtml(o.label)}</option>`)
     .join('');
 
+  // Adaptive columns: hide intf columns if all are auto (computed before buildRow)
+  const allSrcAutoFlag = analyzed.every(p => !p._srcintf);
+  const allDstAutoFlag = analyzed.every(p => !p._dstintf);
+
   // rows use the real index in deployState.analyzed (not filtered position)
   // so that data-idx always references the correct policy in the full array
   const maxSessions = displayList.reduce((m, pp) => Math.max(m, pp.sessions || 0), 1);
@@ -3598,7 +3890,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     const isAgg = p._isAggregated;
     const idx = isAgg ? (p._sequenceMembers?.[0] ?? -1) : deployState.analyzed.indexOf(p);
 
-    // Checkbox: for aggregated rows, use a special data-seq-members attribute
+    // Checkbox
     const chkChecked = isAgg
       ? p._sequenceMembers.every(i => deployState.selected.has(i))
       : deployState.selected.has(idx);
@@ -3606,123 +3898,86 @@ function renderDeployPolicies(analyzed, resetPage = true) {
       ? `class="deploy-chk deploy-chk-seq" data-seq-members="${p._sequenceMembers.join(',')}" ${chkChecked ? 'checked' : ''}`
       : `class="deploy-chk" data-idx="${idx}" ${chkChecked ? 'checked' : ''}`;
 
-    // Pour les policies multi-src : afficher le groupe d'adresses (existant ou à créer)
+    // Src addr — simplified inline-editable
     let srcAddrCell;
     if (p.srcSubnets && p.srcSubnets.length > 1) {
-      if (p._srcAddrGrpFound) {
-        srcAddrCell = `<span class="match-ok" title="Groupe existant contenant les ${p.srcSubnets.length} subnets">✓ ${escHtml(p._srcAddrName)}</span>`;
-      } else {
-        srcAddrCell = `<span style="display:inline-flex;align-items:center;gap:4px">
-          <span class="match-miss" title="Aucun groupe existant — à créer">grp</span>
-          <input class="deploy-name-input" data-idx="${idx}" data-field="_srcAddrName" value="${escHtml(p._srcAddrName)}" placeholder="FF_GRP_..." title="Nom du groupe d'adresses à créer (${p.srcSubnets.length} membres)">
-        </span>`;
-      }
+      srcAddrCell = p._srcAddrGrpFound
+        ? `<span class="inline-editable found" data-idx="${idx}" data-field="_srcAddrName">${escHtml(p._srcAddrName)}</span>`
+        : `<span class="inline-editable missing" data-idx="${idx}" data-field="_srcAddrName">${escHtml(p._srcAddrName)}</span>`;
     } else {
       srcAddrCell = addrCell(p.analysis?.srcAddr, p._srcAddrName, idx, '_srcAddrName');
     }
-    // En mode /32 dst actif : afficher les noms des hôtes /32 au lieu du /24
+
+    // Dst addr — simplified
     const _dstModeResolved = p._dstMode || (p._use32Dst ? 'hosts' : 'subnet');
     let dstAddrCell;
     if (_dstModeResolved === 'hosts' && (p.dstHosts || []).length > 0) {
-      const names = (p.dstHosts || []).map(h => (p._dstHostNames || {})[h] || `FF_HOST_${h.replace(/\./g,'_')}`);
-      dstAddrCell = names.map(n => `<span class="match-ok" style="display:block;font-size:10px">${escHtml(n)}</span>`).join('');
+      const count = p.dstHosts.length;
+      dstAddrCell = `<span class="inline-editable found" data-idx="${idx}" data-field="_dstAddrName" title="${count} hôtes /32">${count} hôtes /32</span>`;
     } else {
       dstAddrCell = addrCell(p.analysis?.dstAddr, p._dstAddrName, idx, '_dstAddrName');
     }
 
+    // Services — compact
     const svcList = p.analysis?.services || [];
     const svcCells = svcList.map(svc => {
-      if (svc.found) return svcMatchCell(svc, idx);
-      const tip = svc.portHint ? `${svc.label}\nPorts: ${svc.portHint}` : svc.label;
-      return `<span data-tip="${escHtml(tip)}" style="display:inline-flex;align-items:center;gap:2px"><span class="match-miss">✗</span><input class="deploy-name-input sm" data-idx="${idx}" data-field="svc_${svc.port}_${svc.proto}" value="${escHtml(svc.suggestedName || '')}" placeholder="FF_SVC_..."></span>`;
+      if (svc.found) {
+        return `<span class="match-ok" style="font-size:10px" title="${escHtml(svc.label || svc.name)}">&#10003; ${escHtml(svc.name)}</span>`;
+      }
+      const name = svc.suggestedName || `FF_SVC_${svc.port}_${svc.proto}`;
+      return `<span class="inline-editable missing" style="font-size:10px" title="${escHtml(svc.label || '')}">${escHtml(name)}</span>`;
     }).join(' ');
 
-    // Interface cells: read-only for aggregated policies, dropdown otherwise
-    let srcSel, dstSel, sameIntfWarn = '';
+    // Interfaces — read-only text, editable in drawer
+    let srcIntf, dstIntf;
     if (isAgg) {
-      const srcList = (p._srcintfList || []).join(', ') || '?';
-      const dstList = (p._dstintfList || []).join(', ') || '?';
-      srcSel = `<span class="mono seq-intf" title="${escHtml(srcList)}">${escHtml(srcList)}</span>`;
-      dstSel = `<span class="mono seq-intf" title="${escHtml(dstList)}">${escHtml(dstList)}</span>`;
+      srcIntf = `<span class="mono" style="font-size:10px;color:var(--accent2)">${escHtml((p._srcintfList || []).join(', ') || '—')}</span>`;
+      dstIntf = `<span class="mono" style="font-size:10px;color:var(--accent2)">${escHtml((p._dstintfList || []).join(', ') || '—')}</span>`;
     } else {
-      const srcLabels = { route: '🛣 route', sdwan: '⚡ sdwan', subnet: '🔗 subnet', 'wan-candidate': '📡 wan', auto: '' };
-      const srcSrcBadge = p._srcIfaceSource && p._srcIfaceSource !== 'auto' && p._srcintf
-        ? `<span class="intf-src-badge ${p._srcIfaceSource}" title="Détecté via : ${srcLabels[p._srcIfaceSource] || p._srcIfaceSource}">${srcLabels[p._srcIfaceSource]}</span>`
-        : '';
-      srcSel = `<span style="display:inline-flex;align-items:center;gap:4px">${srcSrcBadge}${buildIfaceDropdown(idx, '_srcintf', p._srcintf || '')}</span>`;
-      const dstSrcBadge = p._dstIfaceSource && p._dstIfaceSource !== 'auto' && p._dstintf
-        ? `<span class="intf-src-badge ${p._dstIfaceSource}" title="Détecté via : ${srcLabels[p._dstIfaceSource] || p._dstIfaceSource}">${srcLabels[p._dstIfaceSource]}</span>`
-        : '';
-      dstSel = `<span style="display:inline-flex;align-items:center;gap:4px">${dstSrcBadge}${buildIfaceDropdown(idx, '_dstintf', p._dstintf || '')}</span>`;
-      sameIntfWarn = (p._srcintf && p._dstintf && p._srcintf === p._dstintf)
-        ? `<span class="intf-warn" title="⚠ srcintf = dstintf : policy possiblement invalide">⚠</span>` : '';
+      const srcLabel = p._srcintf || 'auto';
+      const dstLabel = p._dstintf || 'auto';
+      const sameWarn = (p._srcintf && p._dstintf && p._srcintf === p._dstintf) ? ' ⚠' : '';
+      srcIntf = `<span class="mono" style="font-size:10px;color:${p._srcintf ? 'var(--text)' : 'var(--text2)'}">${escHtml(srcLabel)}</span>`;
+      dstIntf = `<span class="mono" style="font-size:10px;color:${p._dstintf ? 'var(--text)' : 'var(--text2)'}">${escHtml(dstLabel)}${sameWarn}</span>`;
     }
 
     const dirBadge = p._isWan
-      ? `<span class="dir-badge wan" title="Vers internet">WAN</span>`
-      : `<span class="dir-badge lan" title="Trafic interne">LAN</span>`;
-    const natChk = `<input type="checkbox" class="deploy-nat-chk" data-idx="${idx}" ${p._nat ? 'checked' : ''} title="NAT pour cette policy">`;
+      ? `<span class="dir-badge wan">WAN</span>`
+      : `<span class="dir-badge lan">LAN</span>`;
 
-    // Impact / sessions
+    // Impact
     const barW = Math.round(((p.sessions || 0) / maxSessions) * 100);
 
-    // Warnings (conflict with existing policies)
+    // Warnings
     const rowWarnings = (deployState.warnings || []).filter(w => w.generatedIdx === idx);
     const warnBadge = rowWarnings.length > 0
       ? `<span class="conflict-warn" title="${escHtml(rowWarnings.map(w => w.detail).join('\n'))}">${rowWarnings[0].type === 'duplicate' ? '⚠ doublon' : '⚠ conflit'}</span>`
       : '';
 
-    const seqBadge = isAgg ? ` <span class="seq-badge" title="${p._sequenceCount} policies agrégées en 1 séquence">×${p._sequenceCount} seq</span>` : '';
-    // Mode pills + Badge hôtes /32 pour source
-    const srcHosts   = p.srcHosts || [];
-    const use32Src   = p._use32Src || false;
-    const srcMode    = p._srcMode || (use32Src ? 'hosts' : 'subnet');
-    let srcHostsHtml = '';
-    // Mode pills always shown
-    const srcModePills = buildModePills(idx, 'src', srcMode, srcHosts.length >= 1);
-    const srcGrpActive = p._useSrcGroup || false;
-    const srcGrpBtn = (srcMode === 'hosts' && srcHosts.length > 1)
-      ? `<button class="btn-sm btn-src-grp-toggle" data-idx="${idx}"
-          title="${srcGrpActive ? 'Grouper dans un addrgrp — cliquer pour lister inline' : 'Lister inline — cliquer pour grouper'}"
-          style="font-size:9px;padding:1px 5px;margin-left:2px;${srcGrpActive ? 'background:var(--accent);color:#fff' : ''}">${srcGrpActive ? '⊞ GRP' : '⊞'}</button>` : '';
-    srcHostsHtml = `<div style="margin-top:2px">${srcModePills}${srcGrpBtn}</div>`;
-    if (srcHosts.length >= 1 && srcMode === 'hosts') {
-      const rows = srcHosts.slice(0, 50).map(h => buildHostRow(h, p._srcHostNames, idx, 'src')).join('');
-      const moreH = srcHosts.length > 50 ? `<div style="font-size:10px;color:var(--text2)">+${srcHosts.length - 50} autres…</div>` : '';
-      srcHostsHtml += `<span style="display:inline-flex;align-items:center;gap:2px;margin-top:2px">
-        <button class="btn-sm btn-hosts-edit" data-idx="${idx}" data-type="src" title="Noms des objets /32" style="font-size:9px;padding:1px 4px;opacity:0.6">✏ ${srcHosts.length}h</button>
-      </span>
-      <div class="hosts-detail" id="src-hosts-${idx}" style="display:none;margin-top:4px;max-height:130px;overflow-y:auto;background:var(--bg0);border:1px solid var(--border);border-radius:4px;padding:4px 8px">
-        <div style="font-size:10px;font-weight:600;margin-bottom:4px;padding-bottom:4px;border-bottom:1px solid var(--border)">${srcHosts.length} hôtes — noms d'objets</div>
-        ${rows}${moreH}
-      </div>`;
-    }
-    const srcSubnetCell = p.srcSubnets && p.srcSubnets.length > 1
-      ? `<div>${p.srcSubnets.map(s => `<span class="mono" style="display:block;font-size:11px">${escHtml(s)}</span>`).join('')}</div>${srcHostsHtml}`
-      : `<div><span class="mono">${escHtml(p.srcSubnet)}${p._mergedCount > 1 ? ` <span class="merge-badge" title="${p._mergedCount} policies fusionnées">×${p._mergedCount}</span>` : ''}</span></div>${srcHostsHtml}`;
+    const seqBadge = isAgg ? `<span class="seq-badge">×${p._sequenceCount}</span> ` : '';
+    const mergeBadge = (!isAgg && p._mergedCount > 1) ? ` <span class="merge-badge">×${p._mergedCount}</span>` : '';
 
-    // Tags
-    const tags = p._tags || [];
-    const tagBadges = tags.map(t => `<span class="policy-tag" data-idx="${idx}" data-tag="${escHtml(t)}">${escHtml(t)} ✕</span>`).join('');
-    const tagOpts = POLICY_TAGS.filter(t => !tags.includes(t)).map(t => `<option value="${escHtml(t)}">${escHtml(t)}</option>`).join('');
-    const tagCell = `<td class="tag-cell">${tagBadges}<select class="tag-select" data-idx="${idx}"><option value="">+</option>${tagOpts}<option value="__custom">autre…</option></select></td>`;
+    // Src subnet — compact
+    const srcSubnetText = p.srcSubnets && p.srcSubnets.length > 1
+      ? `${escHtml(p.srcSubnets[0])} <span class="dst-count-badge">+${p.srcSubnets.length - 1}</span>`
+      : `${escHtml(p.srcSubnet)}${mergeBadge}`;
+
+    // Mode indicator
+    const srcMode = p._srcMode || (p._use32Src ? 'hosts' : 'subnet');
+    const srcModeBadge = srcMode === 'hosts' ? ` <span class="dst-count-badge">/32</span>` : '';
 
     return `
       <tr class="deploy-policy-row ${isAgg ? 'seq-row' : ''}" data-idx="${idx}" ${isAgg ? `data-seq-members="${p._sequenceMembers.join(',')}"` : ''}>
-        <td class="${isAgg ? '' : 'drag-handle'}" ${isAgg ? '' : `draggable="true" data-idx="${idx}"`} data-expert>${isAgg ? '' : '⠿'}</td>
         <td><input type="checkbox" ${chkAttr}></td>
         <td>${dirBadge}</td>
-        <td style="text-align:center" data-expert>${natChk}</td>
-        <td data-expert>${policyIdsCell(p)}</td>
-        <td>${warnBadge}${seqBadge}${srcSubnetCell}</td>
+        <td>${warnBadge}${seqBadge}${srcSubnetText}${srcModeBadge}</td>
         <td>${srcAddrCell}</td>
-        <td>${srcSel}</td>
+        ${allSrcAutoFlag ? '' : `<td>${srcIntf}</td>`}
         <td>${dstTargetCell(p, idx)}</td>
         <td>${dstAddrCell}</td>
-        <td>${dstSel}${sameIntfWarn}</td>
+        ${allDstAutoFlag ? '' : `<td>${dstIntf}</td>`}
         <td>${svcCells || '<span style="color:var(--text2)">–</span>'}</td>
-        <td class="impact-cell" data-expert><div class="impact-bar" style="width:${barW}%"></div><span class="impact-val">${fmtNum(p.sessions || 0)}</span></td>
-        ${tagCell.replace('<td class="tag-cell">', '<td class="tag-cell" data-expert>')}
+        <td class="impact-cell"><div class="impact-bar" style="width:${barW}%"></div><span class="impact-val">${fmtNum(p.sessions || 0)}</span></td>
       </tr>`;
   }
 
@@ -3734,7 +3989,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     for (const [pair, members] of groups) {
       const collapsed = deployState.collapsedGroups.has(pair);
       parts.push(`<tr class="intf-pair-header ${collapsed ? 'collapsed' : ''}" data-pair="${escHtml(pair)}">
-        <td colspan="14"><div class="intf-pair-header-inner">
+        <td colspan="10"><div class="intf-pair-header-inner">
           <span class="intf-pair-toggle">${collapsed ? '▸' : '▾'}</span>
           <span class="intf-pair-name">${escHtml(pair)}</span>
           <span class="intf-pair-count">${members.length} policy(s)</span>
@@ -3762,14 +4017,13 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     </div>` : '';
 
   const { addrs: missingAddrs, svcs: missingSvcs } = countMissingObjects(analyzed);
-  const missingNote = (missingAddrs + missingSvcs) > 0
-    ? ` · <span style="color:var(--accent2)">+${missingAddrs} adresse${missingAddrs > 1 ? 's' : ''} · +${missingSvcs} service${missingSvcs > 1 ? 's' : ''} à créer</span>`
-    : ' · <span style="color:var(--ok)">✓ tous les objets existent</span>';
+
+  // (adaptive column flags computed above as allSrcAutoFlag / allDstAutoFlag)
 
   const body = el('deploy-policy-body');
   body.innerHTML = `
     <div style="margin-bottom:8px;font-size:12px;color:var(--text2);display:flex;align-items:center;gap:12px">
-      <span>${total} policy(s) · <strong>${selCount}</strong> sélectionnées${hasMerge ? ' · <span style="color:var(--accent2)">⚡ fusion active</span>' : ''}${missingNote}${
+      <span>${total} policy(s) · <strong>${selCount}</strong> sélectionnées${hasMerge ? ' · <span style="color:var(--accent2)">⚡ fusion</span>' : ''}${
         (deployState.warnings || []).length > 0
           ? ` · <span style="color:var(--warn)">⚠ ${deployState.warnings.length} conflit${deployState.warnings.length > 1 ? 's' : ''}</span>`
           : ''
@@ -3779,21 +4033,17 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     <div style="overflow-x:auto">
       <table class="deploy-policy-table">
         <thead><tr>
-          <th style="width:20px" data-expert></th>
           <th><input type="checkbox" id="chk-all-deploy"></th>
-          <th>Dir.</th><th data-expert>NAT</th>
-          <th data-expert title="Policy(s) FortiGate dans lesquelles ce trafic a été observé">Policy</th>
-          <th>Src Subnet</th><th>Src addr</th><th>Src intf*</th>
-          <th>Dst Target</th><th>Dst addr</th><th>Dst intf*</th>
+          <th>Dir.</th>
+          <th>Source</th><th>Src addr</th>${allSrcAutoFlag ? '' : '<th>Src intf</th>'}
+          <th>Destination</th><th>Dst addr</th>${allDstAutoFlag ? '' : '<th>Dst intf</th>'}
           <th>Services</th>
-          <th data-expert title="Sessions observées dans les logs">Sessions</th>
-          <th data-expert>Tags</th>
+          <th>Sessions</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>
-    ${paginationBar}
-    <div style="font-size:11px;color:var(--text2);margin-top:6px">* détectée automatiquement — overridable</div>`;
+    ${paginationBar}`;
 
   el('deploy-step4-footer').style.display = '';
 
@@ -3808,13 +4058,18 @@ function renderDeployPolicies(analyzed, resetPage = true) {
   document.querySelectorAll('.pg-next') .forEach(b => b.addEventListener('click', () => goPage(Math.min(pages, page + 1))));
   document.querySelectorAll('.pg-last') .forEach(b => b.addEventListener('click', () => goPage(pages)));
 
-  // Update missing objects button
+  // Update missing objects notification bar
+  const missingBar = el('deploy-missing-bar');
   const missingBtn = el('btn-missing-objects');
-  if (missingBtn) {
+  if (missingBar) {
     const missing = collectMissingObjects();
-    missingBtn.style.display = missing.total > 0 ? '' : 'none';
-    missingBtn.textContent = `⚠ ${missing.total} objet${missing.total > 1 ? 's' : ''} manquant${missing.total > 1 ? 's' : ''}`;
+    missingBar.style.display = missing.total > 0 ? '' : 'none';
+    const missingText = el('deploy-missing-text');
+    if (missingText) missingText.textContent = `${missing.total} objet${missing.total > 1 ? 's' : ''} à nommer avant le déploiement (${missing.addresses.length + missing.hosts.length} adresses, ${missing.services.length} services)`;
   }
+  // Show legend
+  const legend = el('deploy-legend');
+  if (legend) legend.style.display = '';
 
   // Wire select-all (current page only) — re-wired each render (pageIdxs change)
   const chkAll = el('chk-all-deploy');
