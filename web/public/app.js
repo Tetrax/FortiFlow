@@ -1891,6 +1891,7 @@ function mountDrawer() {
       else { p._dstMode = mode; p._use32Dst = mode === 'hosts'; }
       populateDrawer(_drawerIdx);
       renderDeployPolicies(filterDeployPolicies(), false);
+      return;
     }
     const grpBtn = e.target.closest('.drawer-grp-toggle');
     if (grpBtn) {
@@ -1899,6 +1900,7 @@ function mountDrawer() {
       else p._useDstGroup = !p._useDstGroup;
       populateDrawer(_drawerIdx);
       renderDeployPolicies(filterDeployPolicies(), false);
+      return;
     }
     const mdBtn = e.target.closest('.drawer-multidst-mode');
     if (mdBtn) {
@@ -3055,9 +3057,15 @@ function mergeByPolicyId(policies) {
           return { subnet, hosts, useSubnet: hosts.length >= DST_SUBNET_THRESHOLD,
             addrName: dstAddr?.found ? dstAddr.name : suggestAddrNameFE(subnet), addrFound: !!(dstAddr?.found) };
         });
-        // Fusionner _dstHostNames de TOUTES les policies du groupe
+        // Fusionner _dstHostNames et _hostsFound de TOUTES les policies du groupe
         const mergedDstHostNames = {};
-        for (const p of ifGroup) Object.assign(mergedDstHostNames, p._dstHostNames || {});
+        const mergedSrcHostsFound = new Set();
+        const mergedDstHostsFound = new Set();
+        for (const p of ifGroup) {
+          Object.assign(mergedDstHostNames, p._dstHostNames || {});
+          (p._srcHostsFound || []).forEach(h => mergedSrcHostsFound.add(h));
+          (p._dstHostsFound || []).forEach(h => mergedDstHostsFound.add(h));
+        }
         const allDstHosts = [...new Set(ifGroup.flatMap(p => p.dstHosts || []))].sort();
         // Chercher un groupe d'adresses existant pour les destinations
         let existingDstGrp1 = null;
@@ -3087,6 +3095,8 @@ function mergeByPolicyId(policies) {
           _dstAddrGrpFound: !!existingDstGrp1,
           _policyName: `FF_POLICY_${policyId}`,
           _dstHostNames: Object.keys(mergedDstHostNames).length ? mergedDstHostNames : undefined,
+          _srcHostsFound: mergedSrcHostsFound.size ? [...mergedSrcHostsFound] : undefined,
+          _dstHostsFound: mergedDstHostsFound.size ? [...mergedDstHostsFound] : undefined,
           srcAddrNames: srcSubnets.length > 1 ? srcSubnets.map(s => `FF_${escSlug(s)}`) : null,
           analysis: { ...base.analysis, services: allServices, needsWork: allServices.some(s => !s.found) },
         });
@@ -3132,9 +3142,17 @@ function mergeByPolicyId(policies) {
       const allDstHosts = [...new Set(subGroup.flatMap(p => p.dstHosts || []))].sort();
       const multiSrc    = srcSubnets.length > 1;
 
-      // Fusionner _srcHostNames de TOUTES les policies du sous-groupe
+      // Fusionner _srcHostNames/_dstHostNames et _hostsFound de TOUTES les policies du sous-groupe
       const mergedSrcHostNames = {};
-      for (const pp of subGroup) Object.assign(mergedSrcHostNames, pp._srcHostNames || {});
+      const mergedDstHostNames3 = {};
+      const mergedSrcHF = new Set();
+      const mergedDstHF = new Set();
+      for (const pp of subGroup) {
+        Object.assign(mergedSrcHostNames, pp._srcHostNames || {});
+        Object.assign(mergedDstHostNames3, pp._dstHostNames || {});
+        (pp._srcHostsFound || []).forEach(h => mergedSrcHF.add(h));
+        (pp._dstHostsFound || []).forEach(h => mergedDstHF.add(h));
+      }
 
       // Build multi-src subnets info (like _multiDstSubnets but for sources)
       let multiSrcSubnets = null;
@@ -3228,6 +3246,8 @@ function mergeByPolicyId(policies) {
           _policyName:      `FF_POLICY_${policyId}`,
           _dstHostNames:    Object.keys(mergedDstHostNames2).length ? mergedDstHostNames2 : undefined,
           _srcHostNames:    Object.keys(mergedSrcHostNames).length ? mergedSrcHostNames : undefined,
+          _srcHostsFound:   mergedSrcHF.size ? [...mergedSrcHF] : undefined,
+          _dstHostsFound:   mergedDstHF.size ? [...mergedDstHF] : undefined,
           _multiSrcSubnets: multiSrcSubnets,
           srcAddrNames:     existingGrp ? null : (multiSrc ? srcSubnets.map(s => `FF_${escSlug(s)}`) : null),
           analysis:         { ...base.analysis, services: allServices, needsWork: allServices.some(s => !s.found) },
@@ -3259,6 +3279,9 @@ function mergeByPolicyId(policies) {
         _srcAddrGrpFound: !!existingGrp,
         _multiSrcSubnets: multiSrcSubnets,
         _srcHostNames:    Object.keys(mergedSrcHostNames).length ? mergedSrcHostNames : undefined,
+        _dstHostNames:    Object.keys(mergedDstHostNames3).length ? mergedDstHostNames3 : undefined,
+        _srcHostsFound:   mergedSrcHF.size ? [...mergedSrcHF] : undefined,
+        _dstHostsFound:   mergedDstHF.size ? [...mergedDstHF] : undefined,
         _dstAddrName: isWan ? 'all' : (dstTarget !== base.dstTarget ? suggestAddrNameFE(dstTarget) : base._dstAddrName),
         _policyName:  `FF_POLICY_${policyId}`,
         srcAddrNames: existingGrp ? null : (multiSrc ? srcSubnets.map(s => `FF_${escSlug(s)}`) : null),
@@ -3303,10 +3326,21 @@ function mergeByService(policies) {
     base.policyIds   = allPolicyIds;
     base._mergedCount = grp.length;
     base.serviceDesc = (grp[0].analysis?.services || []).map(s => s.label || s.name).join(', ');
-    // Fusionner _srcHostNames
+    // Fusionner _srcHostNames/_dstHostNames et _hostsFound
     const mergedSrcHN = {};
-    for (const pp of grp) Object.assign(mergedSrcHN, pp._srcHostNames || {});
+    const mergedDstHN = {};
+    const mergedSrcHF2 = new Set();
+    const mergedDstHF2 = new Set();
+    for (const pp of grp) {
+      Object.assign(mergedSrcHN, pp._srcHostNames || {});
+      Object.assign(mergedDstHN, pp._dstHostNames || {});
+      (pp._srcHostsFound || []).forEach(h => mergedSrcHF2.add(h));
+      (pp._dstHostsFound || []).forEach(h => mergedDstHF2.add(h));
+    }
     if (Object.keys(mergedSrcHN).length) base._srcHostNames = mergedSrcHN;
+    if (Object.keys(mergedDstHN).length) base._dstHostNames = mergedDstHN;
+    if (mergedSrcHF2.size) base._srcHostsFound = [...mergedSrcHF2];
+    if (mergedDstHF2.size) base._dstHostsFound = [...mergedDstHF2];
     // Src addr name: group if multiple subnets
     if (allSubnets.length > 1) {
       base._srcAddrName   = `FF_SVC_MERGE_SRC_${escSlug(allSubnets[0])}`;
