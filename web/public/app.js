@@ -1976,6 +1976,9 @@ function populateDrawer(idx) {
   const srcHosts = p.srcHosts || [];
   const dstHosts = p.dstHosts || [];
 
+  const srcAddrName = p._srcAddrName || a.srcAddr?.name || '';
+  const srcFound = a.srcAddr?.found;
+
   // Source section — depends on multi-src or single
   let srcSection = '';
   if (p._multiSrcSubnets?.length) {
@@ -2145,9 +2148,6 @@ function populateDrawer(idx) {
     if (svc.found) return `<div class="drawer-field"><span class="drawer-field-label">${escHtml(svc.label || svc.name)}</span><span class="drawer-field-value" style="color:var(--success)">&#10003; ${escHtml(svc.name)}</span></div>`;
     return `<div class="drawer-field"><span class="drawer-field-label">${escHtml(svc.label || `${svc.port}/${svc.proto}`)}</span><input class="drawer-input drawer-svc-name" data-port="${svc.port}" data-proto="${svc.proto}" value="${escHtml(svc.suggestedName || '')}" placeholder="FF_SVC_..."></div>`;
   }).join('');
-
-  const srcAddrName = p._srcAddrName || a.srcAddr?.name || '';
-  const srcFound = a.srcAddr?.found;
 
   const body = document.getElementById('drawer-body');
   body.innerHTML = `
