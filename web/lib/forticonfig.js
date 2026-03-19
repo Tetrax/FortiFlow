@@ -864,14 +864,16 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
 
     // Pré-résoudre les noms d'objets /32 existants pour chaque hôte src/dst
     const srcHostNames = {};
+    const srcHostsFound = new Set();
     for (const h of (p.srcHosts || [])) {
       const m = findAddress(`${h}/32`, addresses);
-      if (m.found) srcHostNames[h] = m.name;
+      if (m.found) { srcHostNames[h] = m.name; srcHostsFound.add(h); }
     }
     const dstHostNames = {};
+    const dstHostsFound = new Set();
     for (const h of (p.dstHosts || [])) {
       const m = findAddress(`${h}/32`, addresses);
-      if (m.found) dstHostNames[h] = m.name;
+      if (m.found) { dstHostNames[h] = m.name; dstHostsFound.add(h); }
     }
 
     // Résoudre aussi les hosts dans _multiDstSubnets (round-trip multi-dst)
@@ -880,7 +882,7 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
         for (const h of (s.hosts || [])) {
           if (!dstHostNames[h]) {
             const m = findAddress(`${h}/32`, addresses);
-            if (m.found) dstHostNames[h] = m.name;
+            if (m.found) { dstHostNames[h] = m.name; dstHostsFound.add(h); }
           }
         }
         // Réévaluer le match subnet pour chaque sous-groupe
@@ -896,6 +898,8 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
       ...p,
       _srcHostNames: Object.keys(srcHostNames).length ? { ...p._srcHostNames, ...srcHostNames } : (p._srcHostNames || undefined),
       _dstHostNames: Object.keys(dstHostNames).length ? { ...p._dstHostNames, ...dstHostNames } : (p._dstHostNames || undefined),
+      _srcHostsFound: srcHostsFound.size ? [...srcHostsFound] : (p._srcHostsFound || undefined),
+      _dstHostsFound: dstHostsFound.size ? [...dstHostsFound] : (p._dstHostsFound || undefined),
       analysis: {
         srcAddr:    { ...srcAddrMatch,  cidr: p.srcSubnet, suggestedName: suggestAddrName(p.srcSubnet) },
         dstAddr:    { ...dstAddrMatch,  cidr: p.dstTarget, suggestedName: suggestAddrName(p.dstTarget) },

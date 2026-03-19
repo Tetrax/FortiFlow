@@ -1629,15 +1629,18 @@ function collectMissingObjects() {
   if (!deployState.analyzed) return { addresses: [], hosts: [], services: [], total: 0 };
 
   const addresses = new Map(); // cidr → { cidr, name, policyCount }
-  const hosts     = new Map(); // ip   → { ip, name, policyCount }
+  const hosts     = new Map(); // ip   → { ip, name, policyCount, found }
   const services  = new Map(); // key  → { key, port, proto, label, name, policyCount }
 
   for (const p of deployState.analyzed) {
     const a = p.analysis;
     if (!a) continue;
 
-    // Src address manquante (seulement si pas en mode /32 ni groupe)
-    if (p._srcMode !== 'hosts' && p._srcMode !== 'group' && !p._use32Src && a.srcAddr && !a.srcAddr.found) {
+    const srcFoundHosts = new Set(p._srcHostsFound || []);
+    const dstFoundHosts = new Set(p._dstHostsFound || []);
+
+    // Src address manquante
+    if (a.srcAddr && !a.srcAddr.found) {
       const cidr = a.srcAddr.cidr;
       if (cidr) {
         if (!addresses.has(cidr)) addresses.set(cidr, { cidr, name: p._srcAddrName || a.srcAddr.suggestedName, policyCount: 0 });
@@ -1645,17 +1648,17 @@ function collectMissingObjects() {
       }
     }
     // Dst address manquante
-    if (p._dstMode !== 'hosts' && p._dstMode !== 'group' && !p._use32Dst && p.dstType === 'private' && a.dstAddr && !a.dstAddr.found) {
+    if (p.dstType === 'private' && a.dstAddr && !a.dstAddr.found) {
       const cidr = a.dstAddr.cidr;
       if (cidr && cidr !== 'all') {
         if (!addresses.has(cidr)) addresses.set(cidr, { cidr, name: p._dstAddrName || a.dstAddr.suggestedName, policyCount: 0 });
         addresses.get(cidr).policyCount++;
       }
     }
-    // Multi-dst : collecter les subnets manquants individuellement
+    // Multi-dst : collecter les subnets manquants
     if (p._isMultiDst && p._multiDstSubnets?.length) {
       for (const s of p._multiDstSubnets) {
-        if (s.useSubnet !== false && !s.addrFound) {
+        if (!s.addrFound) {
           const cidr = s.subnet;
           if (cidr && cidr !== 'all') {
             if (!addresses.has(cidr)) addresses.set(cidr, { cidr, name: s.addrName, policyCount: 0 });
@@ -1664,9 +1667,10 @@ function collectMissingObjects() {
         }
       }
     }
-    // Hôtes /32 src
-    if (p._use32Src && p.srcHosts?.length > 0) {
+    // Hôtes /32 src — TOUS les hôtes non trouvés dans la config
+    if (p.srcHosts?.length > 0) {
       for (const h of p.srcHosts) {
+        if (srcFoundHosts.has(h)) continue; // existe dans la config — ne pas lister
         if (!hosts.has(h)) {
           const suggested = (p._srcHostNames?.[h]) || `FF_HOST_${h.replace(/\./g, '_')}`;
           hosts.set(h, { ip: h, name: suggested, policyCount: 0 });
@@ -1674,9 +1678,10 @@ function collectMissingObjects() {
         hosts.get(h).policyCount++;
       }
     }
-    // Hôtes /32 dst
-    if (p._use32Dst && p.dstHosts?.length > 0) {
+    // Hôtes /32 dst — TOUS les hôtes non trouvés dans la config
+    if (p.dstHosts?.length > 0) {
       for (const h of p.dstHosts) {
+        if (dstFoundHosts.has(h)) continue; // existe dans la config
         if (!hosts.has(h)) {
           const suggested = (p._dstHostNames?.[h]) || `FF_HOST_${h.replace(/\./g, '_')}`;
           hosts.set(h, { ip: h, name: suggested, policyCount: 0 });
@@ -1776,12 +1781,12 @@ function applyObjectNames(addrMap, hostsMap, svcMap) {
         if (addrMap[s.subnet]) s.addrName = addrMap[s.subnet];
       }
     }
-    // Host names (stored per-policy for CLI generation)
-    if (p._use32Src && p.srcHosts?.length > 0) {
+    // Host names — propager à TOUTES les policies (pas seulement mode /32)
+    if (p.srcHosts?.length > 0) {
       p._srcHostNames = p._srcHostNames || {};
       for (const h of p.srcHosts) if (hostsMap[h]) p._srcHostNames[h] = hostsMap[h];
     }
-    if (p._use32Dst && p.dstHosts?.length > 0) {
+    if (p.dstHosts?.length > 0) {
       p._dstHostNames = p._dstHostNames || {};
       for (const h of p.dstHosts) if (hostsMap[h]) p._dstHostNames[h] = hostsMap[h];
     }
