@@ -2253,7 +2253,7 @@ async function deploy() {
         </div>
         <div class="missing-bar" id="deploy-missing-bar" style="display:none">
           <span id="deploy-missing-text"></span>
-          <button class="missing-bar-btn" id="btn-missing-objects">Nommer les objets</button>
+          <span style="margin-left:auto;font-size:10px;opacity:0.7">Cliquez sur une policy pour éditer</span>
         </div>
         <div class="deploy-legend" id="deploy-legend" style="display:none">
           <div class="deploy-legend-item"><span class="deploy-legend-dot found"></span> Objet existant</div>
@@ -2462,8 +2462,7 @@ async function deploy() {
     if (f) importSession(f);
   });
 
-  // Missing objects modal (wired once — button persists in DOM)
-  el('btn-missing-objects')?.addEventListener('click', showObjectsModal);
+  // (missing objects bar is now info-only — no modal, edit via drawer)
 
   // Global /32 toggle (wired once — button persists in DOM)
   el('btn-32-global')?.addEventListener('click', () => {
@@ -4063,9 +4062,8 @@ function renderDeployPolicies(analyzed, resetPage = true) {
   document.querySelectorAll('.pg-next') .forEach(b => b.addEventListener('click', () => goPage(Math.min(pages, page + 1))));
   document.querySelectorAll('.pg-last') .forEach(b => b.addEventListener('click', () => goPage(pages)));
 
-  // Update missing objects notification bar
+  // Update missing objects notification bar (info only)
   const missingBar = el('deploy-missing-bar');
-  const missingBtn = el('btn-missing-objects');
   if (missingBar) {
     const missing = collectMissingObjects();
     missingBar.style.display = missing.total > 0 ? '' : 'none';
