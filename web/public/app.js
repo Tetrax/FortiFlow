@@ -1964,13 +1964,29 @@ function populateDrawer(idx) {
   if (p._isMultiDst && p._multiDstSubnets?.length) {
     const subs = p._multiDstSubnets;
     const subRows = subs.map((s, si) => {
+      const isSubnet = s.useSubnet !== false;
       const statusIcon = s.addrFound ? `<span style="color:var(--success)">&#10003;</span>` : `<span style="color:var(--warn)">+</span>`;
+      const nameInput = `<input class="drawer-input drawer-multidst-name" data-si="${si}" value="${escHtml(s.addrName)}" style="flex:1;font-size:10px">`;
+      let hostsHtml = '';
+      if (!isSubnet && s.hosts?.length > 0) {
+        hostsHtml = `<div style="padding-left:16px;margin-top:2px;margin-bottom:6px">${s.hosts.slice(0, 50).map(h => {
+          const foundSet = new Set(p._dstHostsFound || []);
+          const hostName = (p._dstHostNames || {})[h] || `FF_HOST_${h.replace(/\./g,'_')}`;
+          const hostFound = foundSet.has(h);
+          return `<div class="drawer-host-row">
+            <span class="drawer-host-ip">${escHtml(h)}</span>
+            ${hostFound
+              ? `<span style="color:var(--success);font-size:10px">&#10003; ${escHtml(hostName)}</span>`
+              : `<input class="drawer-host-input" data-type="dst" data-host="${escHtml(h)}" value="${escHtml(hostName)}" placeholder="FF_HOST_...">`}
+          </div>`;
+        }).join('')}${s.hosts.length > 50 ? `<div style="font-size:10px;color:var(--text2)">+${s.hosts.length - 50} autres…</div>` : ''}</div>`;
+      }
       return `<div class="drawer-multidst-row">
         <span class="drawer-multidst-subnet">${escHtml(s.subnet)}</span>
-        <button class="btn-sm drawer-multidst-mode" data-si="${si}" style="font-size:9px;padding:2px 8px">${s.useSubnet !== false ? '/24' : '/32'}</button>
-        ${statusIcon}
-        <input class="drawer-input drawer-multidst-name" data-si="${si}" value="${escHtml(s.addrName)}" style="flex:1;font-size:10px">
-      </div>`;
+        <button class="btn-sm drawer-multidst-mode" data-si="${si}" style="font-size:9px;padding:2px 8px">${isSubnet ? '/24' : `/32 (${s.hosts?.length || 0}h)`}</button>
+        ${isSubnet ? statusIcon : ''}
+        ${isSubnet ? nameInput : ''}
+      </div>${hostsHtml}`;
     }).join('');
     dstSection = `<div class="drawer-section">
       <div class="drawer-section-title">Destinations (${subs.length})</div>
