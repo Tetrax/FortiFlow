@@ -1850,6 +1850,9 @@ function mountDrawer() {
     if (e.target.matches('.drawer-grp-name')) {
       p._dstAddrName = e.target.value;
     }
+    if (e.target.matches('.drawer-src-grp-name')) {
+      p._srcAddrName = e.target.value;
+    }
   });
   drawer.addEventListener('click', e => {
     const p = _drawerIdx !== null ? deployState.analyzed[_drawerIdx] : null;
@@ -1940,8 +1943,13 @@ function populateDrawer(idx) {
       </div>`;
     }).join('')}</div>`;
     if (srcHosts.length > 1) {
+      const srcGrpFound = p._srcAddrGrpFound;
       srcHostsHtml += `<div class="drawer-toggle-row" style="margin-top:4px">
         <button class="drawer-toggle-btn drawer-grp-toggle ${p._useSrcGroup ? 'active' : ''}" data-type="src">Grouper (addrgrp)</button>
+        ${p._useSrcGroup ? (srcGrpFound
+          ? `<span style="color:var(--success);font-size:11px">&#10003; ${escHtml(p._srcAddrName)}</span>`
+          : `<input class="drawer-input drawer-src-grp-name" value="${escHtml(p._srcAddrName || '')}" placeholder="GRP_SRC_..." style="width:160px">`)
+          : ''}
       </div>`;
     }
   }
@@ -1964,7 +1972,10 @@ function populateDrawer(idx) {
       ${subRows}
       <div class="drawer-toggle-row" style="margin-top:8px">
         <button class="drawer-toggle-btn drawer-grp-toggle ${p._useDstGroup ? 'active' : ''}" data-type="dst">Grouper (addrgrp)</button>
-        ${p._useDstGroup ? `<input class="drawer-input drawer-grp-name" value="${escHtml(p._dstAddrName || '')}" placeholder="GRP_..." style="width:160px">` : ''}
+        ${p._useDstGroup ? (p._dstAddrGrpFound
+          ? `<span style="color:var(--success);font-size:11px">&#10003; ${escHtml(p._dstAddrName)}</span>`
+          : `<input class="drawer-input drawer-grp-name" value="${escHtml(p._dstAddrName || '')}" placeholder="GRP_..." style="width:160px">`)
+          : ''}
       </div>
     </div>`;
   } else {
@@ -2937,6 +2948,20 @@ function mergeByPolicyId(policies) {
         const mergedDstHostNames = {};
         for (const p of ifGroup) Object.assign(mergedDstHostNames, p._dstHostNames || {});
         const allDstHosts = [...new Set(ifGroup.flatMap(p => p.dstHosts || []))].sort();
+        // Chercher un groupe d'adresses existant pour les destinations
+        let existingDstGrp1 = null;
+        if (dstSubnets.length > 1 && deployState.addrGroups) {
+          const dstAddrNames = dstSubnets.filter(s => s.addrFound).map(s => s.addrName);
+          if (dstAddrNames.length === dstSubnets.length) {
+            const memberNames = new Set(dstAddrNames);
+            for (const [grpName, grp] of Object.entries(deployState.addrGroups)) {
+              const grpMembers = new Set(grp.members);
+              if (grpMembers.size === memberNames.size && [...memberNames].every(m => grpMembers.has(m))) {
+                existingDstGrp1 = grpName; break;
+              }
+            }
+          }
+        }
         merged.push({
           ...base, srcSubnet: srcSubnets[0], srcSubnets,
           dstTarget: dsts[0], dstTargets: dsts,
@@ -2947,7 +2972,8 @@ function mergeByPolicyId(policies) {
           _use32Src: allSrcHosts.length >= 1 && allSrcHosts.length <= AUTO32_THRESHOLD,
           _use32Dst: false, _mergedCount: ifGroup.length, _isWan: isWan, _nat: isWan,
           _srcAddrName: base._srcAddrName || suggestAddrNameFE(srcSubnets[0]),
-          _dstAddrName: `GRP_${policyId}_DST`,
+          _dstAddrName: existingDstGrp1 || `GRP_${policyId}_DST`,
+          _dstAddrGrpFound: !!existingDstGrp1,
           _policyName: `FF_POLICY_${policyId}`,
           _dstHostNames: Object.keys(mergedDstHostNames).length ? mergedDstHostNames : undefined,
           srcAddrNames: srcSubnets.length > 1 ? srcSubnets.map(s => `FF_${escSlug(s)}`) : null,
@@ -3030,6 +3056,21 @@ function mergeByPolicyId(policies) {
         const mergedDstHostNames2 = {};
         for (const p of subGroup) Object.assign(mergedDstHostNames2, p._dstHostNames || {});
 
+        // Chercher un groupe d'adresses existant pour les destinations
+        let existingDstGrp = null;
+        if (dstSubnets.length > 1 && deployState.addrGroups) {
+          const dstAddrNames = dstSubnets.filter(s => s.addrFound).map(s => s.addrName);
+          if (dstAddrNames.length === dstSubnets.length) {
+            const memberNames = new Set(dstAddrNames);
+            for (const [grpName, grp] of Object.entries(deployState.addrGroups)) {
+              const grpMembers = new Set(grp.members);
+              if (grpMembers.size === memberNames.size && [...memberNames].every(m => grpMembers.has(m))) {
+                existingDstGrp = grpName; break;
+              }
+            }
+          }
+        }
+
         merged.push({
           ...base,
           srcSubnet:        srcSubnets[0],
@@ -3051,7 +3092,8 @@ function mergeByPolicyId(policies) {
           _nat:             false,
           _srcAddrName:     existingGrp || (multiSrc ? `FF_POLICY_${policyId}_SRC` : (base._srcAddrName || suggestAddrNameFE(srcSubnets[0]))),
           _srcAddrGrpFound: !!existingGrp,
-          _dstAddrName:     `GRP_${policyId}_DST`,
+          _dstAddrName:     existingDstGrp || `GRP_${policyId}_DST`,
+          _dstAddrGrpFound: !!existingDstGrp,
           _policyName:      `FF_POLICY_${policyId}`,
           _dstHostNames:    Object.keys(mergedDstHostNames2).length ? mergedDstHostNames2 : undefined,
           srcAddrNames:     existingGrp ? null : (multiSrc ? srcSubnets.map(s => `FF_${escSlug(s)}`) : null),
