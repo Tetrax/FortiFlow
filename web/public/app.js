@@ -2105,11 +2105,15 @@ function populateDrawer(idx) {
     const dstFound = a.dstAddr?.found;
     let dstHostsHtml = '';
     if (dstHosts.length > 0 && dstMode === 'hosts') {
+      const dstFoundSet = new Set(p._dstHostsFound || []);
       dstHostsHtml = `<div class="drawer-host-list">${dstHosts.slice(0, 80).map(h => {
         const name = (p._dstHostNames || {})[h] || `FF_HOST_${h.replace(/\./g,'_')}`;
+        const hostFound = dstFoundSet.has(h);
         return `<div class="drawer-host-row">
           <span class="drawer-host-ip">${escHtml(h)}</span>
-          <input class="drawer-host-input" data-type="dst" data-host="${escHtml(h)}" value="${escHtml(name)}" placeholder="FF_HOST_...">
+          ${hostFound
+            ? `<span style="color:var(--success);font-size:10px">&#10003; ${escHtml(name)}</span>`
+            : `<input class="drawer-host-input" data-type="dst" data-host="${escHtml(h)}" value="${escHtml(name)}" placeholder="FF_HOST_...">`}
         </div>`;
       }).join('')}</div>`;
     }
