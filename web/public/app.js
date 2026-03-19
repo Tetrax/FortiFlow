@@ -3492,9 +3492,18 @@ async function analyzeDeployPolicies() {
     const rawDstIntf = p.analysis?.dstZone || p.analysis?.dstIface || ifaces.find(i => i.name === p.dstintf)?.name || '';
     // Pre-fill host names from global resolved map (existing FortiGate objects)
     const srcHostNames = {};
-    for (const h of (p.srcHosts || [])) { if (resolvedHosts[h]) srcHostNames[h] = resolvedHosts[h]; }
+    const srcHostsFoundExtra = [];
+    for (const h of (p.srcHosts || [])) {
+      if (resolvedHosts[h]) { srcHostNames[h] = resolvedHosts[h]; srcHostsFoundExtra.push(h); }
+    }
     const dstHostNames = {};
-    for (const h of (p.dstHosts || [])) { if (resolvedHosts[h]) dstHostNames[h] = resolvedHosts[h]; }
+    const dstHostsFoundExtra = [];
+    for (const h of (p.dstHosts || [])) {
+      if (resolvedHosts[h]) { dstHostNames[h] = resolvedHosts[h]; dstHostsFoundExtra.push(h); }
+    }
+    // Merge found hosts: backend _hostsFound + resolvedHosts matches
+    const mergedSrcFound = [...new Set([...(p._srcHostsFound || []), ...srcHostsFoundExtra])];
+    const mergedDstFound = [...new Set([...(p._dstHostsFound || []), ...dstHostsFoundExtra])];
     return {
       ...p,
       srcAddrExists: p.analysis?.srcAddr?.found ?? false,
@@ -3509,8 +3518,10 @@ async function analyzeDeployPolicies() {
       _nat:          isWan,
       _isWan:        isWan,
       _checked:      true,
-      _srcHostNames: Object.keys(srcHostNames).length ? { ...(p._srcHostNames || {}), ...srcHostNames } : (p._srcHostNames || undefined),
-      _dstHostNames: Object.keys(dstHostNames).length ? { ...(p._dstHostNames || {}), ...dstHostNames } : (p._dstHostNames || undefined),
+      _srcHostNames:  Object.keys(srcHostNames).length ? { ...(p._srcHostNames || {}), ...srcHostNames } : (p._srcHostNames || undefined),
+      _dstHostNames:  Object.keys(dstHostNames).length ? { ...(p._dstHostNames || {}), ...dstHostNames } : (p._dstHostNames || undefined),
+      _srcHostsFound: mergedSrcFound.length ? mergedSrcFound : undefined,
+      _dstHostsFound: mergedDstFound.length ? mergedDstFound : undefined,
     };
   });
 
