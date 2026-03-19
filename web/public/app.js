@@ -1876,12 +1876,14 @@ function mountDrawer() {
     }
     const mdBtn = e.target.closest('.drawer-multidst-mode');
     if (mdBtn) {
+      e.stopPropagation();
       const si = +mdBtn.dataset.si;
       if (p._multiDstSubnets?.[si]) {
-        p._multiDstSubnets[si].useSubnet = !p._multiDstSubnets[si].useSubnet;
+        const cur = p._multiDstSubnets[si].useSubnet;
+        p._multiDstSubnets[si].useSubnet = (cur === false) ? true : false;
         populateDrawer(_drawerIdx);
-        renderDeployPolicies(filterDeployPolicies(), false);
       }
+      return;
     }
   });
   drawer.addEventListener('change', e => {
