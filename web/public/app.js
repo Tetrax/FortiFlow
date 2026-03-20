@@ -3094,6 +3094,7 @@ function mergeByPolicyId(policies) {
           _dstAddrName: existingDstGrp1 || `GRP_${policyId}_DST`,
           _dstAddrGrpFound: !!existingDstGrp1,
           _useDstGroup: !!existingDstGrp1,
+          _useSrcGroup: false,
           _policyName: '',
           _srcHostNames: Object.keys(mergedSrcHostNames1).length ? mergedSrcHostNames1 : undefined,
           _dstHostNames: Object.keys(mergedDstHostNames).length ? mergedDstHostNames : undefined,
@@ -3243,6 +3244,7 @@ function mergeByPolicyId(policies) {
           _nat:             false,
           _srcAddrName:     existingGrp || (multiSrc ? `FF_POLICY_${policyId}_SRC` : (base._srcAddrName || suggestAddrNameFE(srcSubnets[0]))),
           _srcAddrGrpFound: !!existingGrp,
+          _useSrcGroup:     !!existingGrp,
           _dstAddrName:     existingDstGrp || `GRP_${policyId}_DST`,
           _dstAddrGrpFound: !!existingDstGrp,
           _useDstGroup:     !!existingDstGrp,
@@ -3280,6 +3282,7 @@ function mergeByPolicyId(policies) {
         _nat:         isWan,
         _srcAddrName: existingGrp || (multiSrc ? `FF_POLICY_${policyId}_SRC` : (base._srcAddrName || suggestAddrNameFE(srcSubnets[0]))),
         _srcAddrGrpFound: !!existingGrp,
+        _useSrcGroup:     !!existingGrp,
         _multiSrcSubnets: multiSrcSubnets,
         _srcHostNames:    Object.keys(mergedSrcHostNames).length ? mergedSrcHostNames : undefined,
         _dstHostNames:    Object.keys(mergedDstHostNames3).length ? mergedDstHostNames3 : undefined,
@@ -3309,6 +3312,12 @@ function applyMerge(mode) {
         _dstintf:     p._dstintf,
         _nat:         p._nat,
         _policyName:  p._policyName,
+        _use32Src:    p._use32Src,
+        _use32Dst:    p._use32Dst,
+        _srcMode:     p._srcMode,
+        _dstMode:     p._dstMode,
+        _useSrcGroup: p._useSrcGroup,
+        _useDstGroup: p._useDstGroup,
       });
     }
     deployState.analyzed = deployState._analyzedOriginal

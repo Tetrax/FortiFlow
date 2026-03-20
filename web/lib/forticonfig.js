@@ -87,11 +87,16 @@ function extractSections(lines, sectionNames) {
 // ─── Subnet helpers ───────────────────────────────────────────────────────────
 
 function maskBits(mask) {
-  return mask.split('.').reduce((acc, o) => {
-    let n = parseInt(o, 10), b = 0;
-    while (n) { b += n & 1; n >>>= 1; }
-    return acc + b;
-  }, 0);
+  const parts = mask.split('.');
+  if (parts.length !== 4) return null;
+  const n = parts.reduce((acc, o) => (acc * 256) + parseInt(o, 10), 0) >>> 0;
+  // Valid subnet mask must be contiguous 1s followed by contiguous 0s
+  if (n === 0) return 0;
+  const inverted = (~n) >>> 0;
+  if ((inverted & (inverted + 1)) !== 0) return null; // not a valid mask
+  let bits = 0, v = n;
+  while (v) { bits += v & 1; v >>>= 1; }
+  return bits;
 }
 
 function maskToPrefix(mask) {
@@ -1181,10 +1186,13 @@ function generateConfig(selectedPolicies, opts = {}) {
     L.push('# ══════════════════════════════════════════════════');
     L.push('config firewall service custom');
     for (const [, svc] of newServices) {
-      const isUdp = /udp/i.test(String(svc.proto));
+      const proto = String(svc.proto).toUpperCase();
+      const isUdp = proto === 'UDP' || proto === '17';
+      const isTcp = !isUdp;
       L.push(`    edit "${svc.name}"`);
       L.push(`        set protocol TCP/UDP/SCTP`);
-      L.push(`        set ${isUdp ? 'udp' : 'tcp'}-portrange ${svc.port}`);
+      if (isTcp) L.push(`        set tcp-portrange ${svc.port}`);
+      if (isUdp) L.push(`        set udp-portrange ${svc.port}`);
       L.push(`    next`);
     }
     L.push('end');

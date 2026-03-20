@@ -331,21 +331,26 @@ async function parseFile(filePath, onProgress) {
     let totalSkipped = 0;
 
     for (const entry of entries) {
-      let stream = entry.stream();
-      if (entry.path.endsWith('.gz')) stream = stream.pipe(zlib.createGunzip());
-      const { flowMap, lineCount, skipped } = await parseStream(stream, progressCb);
-      totalLines   += lineCount;
-      totalSkipped += skipped;
-      // Merge into combined flowMap
-      for (const [key, flow] of flowMap) {
-        if (!mergedFlowMap.has(key)) {
-          mergedFlowMap.set(key, { ...flow });
-        } else {
-          const e = mergedFlowMap.get(key);
-          e.count     += flow.count;
-          e.sentBytes += flow.sentBytes;
-          e.rcvdBytes += flow.rcvdBytes;
+      try {
+        let stream = entry.stream();
+        if (entry.path.endsWith('.gz')) stream = stream.pipe(zlib.createGunzip());
+        const { flowMap, lineCount, skipped } = await parseStream(stream, progressCb);
+        totalLines   += lineCount;
+        totalSkipped += skipped;
+        // Merge into combined flowMap
+        for (const [key, flow] of flowMap) {
+          if (!mergedFlowMap.has(key)) {
+            mergedFlowMap.set(key, { ...flow });
+          } else {
+            const e = mergedFlowMap.get(key);
+            e.count     += flow.count;
+            e.sentBytes += flow.sentBytes;
+            e.rcvdBytes += flow.rcvdBytes;
+          }
         }
+      } catch (err) {
+        // Skip corrupted/unreadable entries, continue with remaining files
+        totalSkipped++;
       }
     }
 
