@@ -8,7 +8,7 @@ const fs      = require('fs');
 const { parseFile }                                      = require('./lib/parser');
 const { buildAnalysis, consolidatePolicies }             = require('./lib/analyzer');
 const { createSession, getSession, setSessionData,
-        setSessionError, deleteSession }                 = require('./lib/store');
+        setSessionError, deleteSession, getStats }       = require('./lib/store');
 const { parseFortiConfig, analyzePolicies,
         generateConfig, validateAgainstExisting,
         detectWanCandidates,
@@ -22,6 +22,22 @@ const PORT = process.env.PORT || 3737;
 
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+// ─── Cleanup orphan uploads on startup + every 30 min ─────────────────────────
+function cleanUploads(maxAgeMs = 60 * 60 * 1000) {
+  try {
+    const cutoff = Date.now() - maxAgeMs;
+    for (const f of fs.readdirSync(UPLOAD_DIR)) {
+      const fp = path.join(UPLOAD_DIR, f);
+      try {
+        const stat = fs.statSync(fp);
+        if (stat.isFile() && stat.mtimeMs < cutoff) fs.unlinkSync(fp);
+      } catch { /* ignore per-file errors */ }
+    }
+  } catch { /* ignore if dir unreadable */ }
+}
+cleanUploads(0);  // on startup: remove ALL leftover files
+setInterval(() => cleanUploads(), 30 * 60 * 1000);  // periodic: files > 1h
 
 const upload = multer({
   storage: multer.diskStorage({
@@ -96,6 +112,11 @@ function sendCsv(res, filename, rows, columns) {
 }
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
+
+// GET /api/stats — server health & memory monitoring
+app.get('/api/stats', (_req, res) => {
+  res.json(getStats());
+});
 
 // POST /api/upload — sauvegarde le fichier, démarre le parse en arrière-plan,
 //                    retourne immédiatement le sessionId pour le polling SSE.
@@ -181,6 +202,7 @@ app.get('/api/progress/:id', (req, res) => {
 app.get('/api/flows', (req, res) => {
   const s = requireSession(req, res);
   if (!s) return;
+  if (!s.data?.flows) return res.status(410).json({ error: 'Flows libérés après chargement de la config FortiGate' });
 
   const page  = Math.max(1, parseInt(req.query.page  || 1,   10));
   const limit = Math.min(500, parseInt(req.query.limit || 100, 10));
@@ -241,6 +263,7 @@ app.get('/api/hosts', (req, res) => {
   if (!s) return;
   const subnet = req.query.subnet;
   if (!subnet) return res.status(400).json({ error: 'Paramètre subnet requis' });
+  if (!s.data?.flows) return res.status(410).json({ error: 'Flows libérés après chargement de la config FortiGate' });
 
   const flows = s.data.flows.filter(f => f.srcSubnet === subnet);
 
@@ -341,6 +364,7 @@ app.get('/api/export/flows', (req, res) => {
   const s = requireSession(req, res);
   if (!s) return;
 
+  if (!s.data?.flows) return res.status(410).json({ error: 'Flows libérés après chargement de la config FortiGate' });
   const flows = applyFlowFilters(s.data.flows, req.query)
     .sort((a, b) => b.count - a.count);
 
@@ -374,6 +398,7 @@ app.get('/api/denied-flows', (req, res) => {
   const s = requireSession(req, res);
   if (!s) return;
 
+  if (!s.data?.flows) return res.status(410).json({ error: 'Flows libérés après chargement de la config FortiGate' });
   const denyFlows = s.data.flows.filter(f => f.action === 'deny' || f.action === 'drop');
   // Group by srcSubnet|dstSubnet
   const groups = new Map();
@@ -412,6 +437,12 @@ app.post('/api/deploy/config-upload', upload.single('conffile'), (req, res) => {
     const text = fs.readFileSync(req.file.path, 'utf8');
     const fortiConfig = parseFortiConfig(text);
     s.fortiConfig = fortiConfig;
+
+    // Free raw flows array — no longer needed once we move to deploy stage.
+    // Aggregated data (subnets, policies, stats, matrix) is kept.
+    if (s.data && s.data.flows) {
+      s.data.flows = null;
+    }
 
     // Build a fast policyid → policy lookup (keyed as string for log compatibility)
     const policyMap = new Map();
