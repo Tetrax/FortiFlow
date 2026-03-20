@@ -113,8 +113,8 @@ function sendCsv(res, filename, rows, columns) {
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
-// GET /api/stats — server health & memory monitoring
-app.get('/api/stats', (_req, res) => {
+// GET /api/health — server health & memory monitoring (no session required)
+app.get('/api/health', (_req, res) => {
   res.json(getStats());
 });
 
