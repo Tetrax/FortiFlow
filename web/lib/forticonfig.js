@@ -63,11 +63,18 @@ function extractSections(lines, sectionNames) {
       if (editName !== null) results[inTarget][editName] = editProps;
       editName  = null;
       editProps = {};
-    } else if (t.startsWith('set ')) {
-      const rest = t.slice(4).trim();
+    } else if (t.startsWith('set ') || t.startsWith('append ')) {
+      const isAppend = t.startsWith('append ');
+      const rest = t.slice(isAppend ? 7 : 4).trim();
       const idx  = rest.indexOf(' ');
       if (idx > 0) {
-        editProps[rest.slice(0, idx)] = rest.slice(idx + 1).trim().replace(/^"|"$/g, '');
+        const key = rest.slice(0, idx);
+        const val = rest.slice(idx + 1).trim().replace(/^"|"$/g, '');
+        if (isAppend && editProps[key]) {
+          editProps[key] += ' ' + val;
+        } else {
+          editProps[key] = val;
+        }
       } else {
         editProps[rest] = '';
       }
@@ -487,7 +494,7 @@ function buildConnectedRoutes(interfaces) {
     if (!iface.cidr) continue;
     const [ifIp, pfxStr] = iface.cidr.split('/');
     const pfx = parseInt(pfxStr, 10);
-    if (pfx <= 0 || pfx > 30) continue; // skip /0, /31, /32
+    if (pfx <= 0 || pfx > 31) continue; // skip /0, /32 (keep /31 for point-to-point links)
     const net = networkAddress(ifIp, pfx);
     routes.push({ dst: `${net}/${pfx}`, device: name, gateway: '', distance: 0, priority: 0, source: 'connected' });
   }
@@ -559,6 +566,7 @@ function findInterfaceByRoute(dstCidr, routes, skipDefault) {
     if (route.dst === '0.0.0.0/0') continue;
     const [routeIp, pfxStr] = route.dst.split('/');
     const pfx  = parseInt(pfxStr, 10);
+    if (pfx === 0) continue; // /0 handled in pass 2 (default route)
     const mask = (0xFFFFFFFF << (32 - pfx)) >>> 0;
     try {
       if ((ip2int(routeIp) & mask) === (targetInt & mask)) return route.device;
@@ -1120,7 +1128,7 @@ function generateConfig(selectedPolicies, opts = {}) {
     const useNat   = p.nat != null ? p.nat : (natEnabled || p.dstType === 'public');
 
     policyBlocks.push({
-      name:        p.policyName || `FF-${String(p.id).padStart(3, '0')}`,
+      name:        p.policyName || '',
       srcintf, dstintf, srcAddrName: srcAddrGrpName || srcAddrName, srcAddrNames: srcAddrGrpName ? null : srcAddrNames, dstAddrName,
       serviceNames, nat: useNat,
       srcSubnet:   p.srcSubnets ? p.srcSubnets.join(', ') : p.srcSubnet,
@@ -1132,7 +1140,6 @@ function generateConfig(selectedPolicies, opts = {}) {
 
   // ── Build CLI output ──
   const L = [];
-  const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
   L.push(`# Policies: ${policyBlocks.length}  |  Adresses: ${newAddresses.size}  |  Groupes: ${newAddrGroups.size}  |  Services: ${newServices.size}`);
   L.push('');
 

@@ -109,6 +109,17 @@ function detectFormat(firstLine) {
   return { format: 'kv', sep: null };
 }
 
+// ─── IP validation ───────────────────────────────────────────────────────────
+
+const IPV4_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+
+function isValidIPv4(ip) {
+  if (!ip) return false;
+  const m = IPV4_RE.exec(ip);
+  if (!m) return false;
+  return +m[1] <= 255 && +m[2] <= 255 && +m[3] <= 255 && +m[4] <= 255;
+}
+
 // ─── Flow extraction ──────────────────────────────────────────────────────────
 
 function extractFlow(fields) {
@@ -125,9 +136,12 @@ function extractFlow(fields) {
     proto = UDP_SERVICES.has(service) ? '17' : '6';
   }
 
+  const srcip = (fields.srcip || '').trim();
+  const dstip = (fields.dstip || '').trim();
+
   return {
-    srcip:    fields.srcip    || '',
-    dstip:    fields.dstip    || '',
+    srcip:    isValidIPv4(srcip) ? srcip : '',
+    dstip:    isValidIPv4(dstip) ? dstip : '',
     srcport:  fields.srcport  || '',
     dstport:  fields.dstport  || '',
     proto,
@@ -308,11 +322,34 @@ async function parseFile(filePath, onProgress) {
     catch { throw new Error('Module "unzipper" manquant — lancez: npm install'); }
 
     const directory = await unzipper.Open.file(filePath);
-    const entry = directory.files.find(f => !f.path.startsWith('__MACOSX') && f.type === 'File');
-    if (!entry) throw new Error('Archive ZIP vide ou format non supporté');
+    const entries = directory.files.filter(f => !f.path.startsWith('__MACOSX') && f.type === 'File');
+    if (!entries.length) throw new Error('Archive ZIP vide ou format non supporté');
 
-    inputStream = entry.stream();
-    if (entry.path.endsWith('.gz')) inputStream = inputStream.pipe(zlib.createGunzip());
+    // Parse all files in the ZIP and merge results
+    const mergedFlowMap = new Map();
+    let totalLines = 0;
+    let totalSkipped = 0;
+
+    for (const entry of entries) {
+      let stream = entry.stream();
+      if (entry.path.endsWith('.gz')) stream = stream.pipe(zlib.createGunzip());
+      const { flowMap, lineCount, skipped } = await parseStream(stream, progressCb);
+      totalLines   += lineCount;
+      totalSkipped += skipped;
+      // Merge into combined flowMap
+      for (const [key, flow] of flowMap) {
+        if (!mergedFlowMap.has(key)) {
+          mergedFlowMap.set(key, { ...flow });
+        } else {
+          const e = mergedFlowMap.get(key);
+          e.count     += flow.count;
+          e.sentBytes += flow.sentBytes;
+          e.rcvdBytes += flow.rcvdBytes;
+        }
+      }
+    }
+
+    return { flowMap: mergedFlowMap, lineCount: totalLines, skipped: totalSkipped };
 
   } else {
     inputStream = fs.createReadStream(filePath);

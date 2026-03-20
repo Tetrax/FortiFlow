@@ -73,42 +73,6 @@ function protoName(proto) {
   return PROTO_MAP[String(proto)] || (proto ? `PROTO${proto}` : '');
 }
 
-// ─── Subnet group builder (reusable for any flow subset) ─────────────────────
-
-function buildSubnetGroups(flows) {
-  const subnetGroups = {};
-  for (const flow of flows) {
-    if (!isPrivate(flow.srcip)) continue;
-    const srcSubnet = getSubnet24(flow.srcip);
-    if (!srcSubnet) continue;
-
-    if (!subnetGroups[srcSubnet]) {
-      subnetGroups[srcSubnet] = { subnet: srcSubnet, srcIPs: new Set(), dsts: {} };
-    }
-    const sg = subnetGroups[srcSubnet];
-    sg.srcIPs.add(flow.srcip);
-
-    const dstKey  = isPrivate(flow.dstip) ? getSubnet24(flow.dstip) : flow.dstip;
-    const dstType = isPrivate(flow.dstip) ? 'private' : 'public';
-    if (!dstKey) continue;
-
-    if (!sg.dsts[dstKey]) {
-      sg.dsts[dstKey] = { key: dstKey, type: dstType, ports: new Set(), protos: new Set(), services: new Set(), policyIds: new Set(), dstIPs: new Set(), srcIPs: new Set(), count: 0, sentBytes: 0, rcvdBytes: 0 };
-    }
-    const dst = sg.dsts[dstKey];
-    if (flow.dstport)  dst.ports.add(flow.dstport);
-    if (flow.proto)    dst.protos.add(protoName(flow.proto));
-    if (flow.service)  dst.services.add(flow.service.toUpperCase());
-    if (flow.policyid) dst.policyIds.add(String(flow.policyid));
-    if (flow.srcip)    dst.srcIPs.add(flow.srcip);
-    if (flow.dstip)    dst.dstIPs.add(flow.dstip);
-    dst.count      += flow.count;
-    dst.sentBytes  += flow.sentBytes;
-    dst.rcvdBytes  += flow.rcvdBytes;
-  }
-  return subnetGroups;
-}
-
 // ─── Main analysis ────────────────────────────────────────────────────────────
 
 // Single-pass builder: computes all 4 subnet-group variants + port stats in
@@ -158,7 +122,7 @@ function buildAllSubnetGroupsAndPorts(flows, topN = 25) {
     if (isAccept)   addToGroup(accept, f);
     if (isDeny)     addToGroup(deny, f);
 
-    // Port stats (same logic as buildPortStats)
+    // Port stats
     const port = parseInt(f.dstport, 10);
     if (port > 0 && port <= 65535) {
       const pn = String(f.proto);
@@ -314,42 +278,6 @@ function buildAnalysis(flowMap) {
     portStats,
     matrix,
     denyMatrix,
-  };
-}
-
-// ─── Top ports stats ──────────────────────────────────────────────────────────
-
-function buildPortStats(flows, topN = 25) {
-  const tcpMap = new Map(); // port → count
-  const udpMap = new Map();
-
-  for (const f of flows) {
-    const port = parseInt(f.dstport, 10);
-    if (!port || port <= 0 || port > 65535) continue;
-    const pn = String(f.proto);
-    if (pn === '17' || pn.toUpperCase() === 'UDP') {
-      udpMap.set(port, (udpMap.get(port) || 0) + f.count);
-    } else {
-      tcpMap.set(port, (tcpMap.get(port) || 0) + f.count);
-    }
-  }
-
-  function toTopList(map, proto) {
-    const total = [...map.values()].reduce((s, c) => s + c, 0) || 1;
-    return [...map.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, topN)
-      .map(([port, count]) => ({
-        port,
-        name:  portName(port, proto),
-        count,
-        pct:   Math.round((count / total) * 1000) / 10,
-      }));
-  }
-
-  return {
-    tcp: toTopList(tcpMap, 'TCP'),
-    udp: toTopList(udpMap, 'UDP'),
   };
 }
 
