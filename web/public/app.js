@@ -13,7 +13,6 @@ const state = {
   policies: { dst_type: '' },
   matrix:   { action: 'accept' },
   subView:  { analyse: 'flows', polices: 'policies' },
-  expertMode: localStorage.getItem('ff-expert') === '1',
 };
 
 let _renderTarget = null;
@@ -415,12 +414,12 @@ async function loadFlows() {
 function renderFlowsTable(data) {
   const COLS = [
     { key: 'srcip',     label: 'Source IP',  mono: true  },
-    { key: 'srcSubnet', label: 'Subnet src', mono: true,  expert: true },
+    { key: 'srcSubnet', label: 'Subnet src', mono: true},
     { key: 'dstip',     label: 'Dest IP',    mono: true  },
-    { key: 'dstType',   label: 'Type dst',   render: r => typeTag(r.dstType), expert: true },
+    { key: 'dstType',   label: 'Type dst',   render: r => typeTag(r.dstType) },
     { key: 'dstport',   label: 'Port',       mono: true  },
     { key: 'protoName', label: 'Proto',      render: r => protoTag(r.protoName) },
-    { key: 'service',   label: 'Service',    mono: true,  expert: true },
+    { key: 'service',   label: 'Service',    mono: true},
     { key: 'action',    label: 'Action',     render: r => actionTag(r.action) },
     { key: 'count',     label: 'Sessions',   mono: true, render: r => fmtNum(r.count) },
     { key: 'totalBytes',label: 'Octets',     mono: true, render: r => fmtBytes(r.totalBytes) },
@@ -438,15 +437,15 @@ function renderFlowsTable(data) {
 
   const head = COLS.map(c => {
     const sortIcon = c.key === sort ? (order === 'asc' ? ' ↑' : ' ↓') : '';
-    return `<th class="${c.key === sort ? 'sorted' : ''}" data-col="${c.key}"${c.expert ? ' data-expert' : ''}>${c.label}${sortIcon}</th>`;
+    return `<th class="${c.key === sort ? 'sorted' : ''}" data-col="${c.key}">${c.label}${sortIcon}</th>`;
   }).join('');
 
   const rows = data.data.map(r => {
     const cells = COLS.map(c => {
       const val = c.render ? c.render(r) : (r[c.key] ?? '–');
       const cls = c.mono ? ' class="mono"' : '';
-      const exp = c.expert ? ' data-expert' : '';
-      return `<td${cls}${exp}>${val}</td>`;
+
+      return `<td${cls}>${val}</td>`;
     }).join('');
     return `<tr>${cells}</tr>`;
   }).join('');
@@ -994,9 +993,9 @@ function renderPoliciesTable(policies) {
       <td class="mono">${typeTag(p.dstType)} ${p.dstTarget}</td>
       <td style="max-width:260px;white-space:normal;font-family:var(--mono);font-size:11px;">${escHtml(p.serviceDesc)}</td>
       <td class="mono">${p.sessions > 0 ? fmtNum(p.sessions) : '–'}</td>
-      <td class="mono" data-expert>${fmtBytes(p.sentBytes + p.rcvdBytes)}</td>
+      <td class="mono">${fmtBytes(p.sentBytes + p.rcvdBytes)}</td>
       <td>${actionTag(p.action)}</td>
-      <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;font-family:var(--mono);font-size:10px;color:var(--text2)" data-expert>${escHtml(p.name)}</td>
+      <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;font-family:var(--mono);font-size:10px;color:var(--text2)">${escHtml(p.name)}</td>
       <td><button class="drill-btn" onclick="togglePolicyDrill(${i},'${srcB64}','${dstB64}')">▾ Hôtes</button></td>
     </tr>
     <tr id="${pid}" class="policy-drill-row" style="display:none;">
@@ -1017,9 +1016,9 @@ function renderPoliciesTable(policies) {
             <th>Destination</th>
             <th>Services / Ports</th>
             <th>Sessions</th>
-            <th data-expert>Volume</th>
+            <th>Volume</th>
             <th>Action</th>
-            <th data-expert>Nom suggéré</th>
+            <th>Nom suggéré</th>
             <th></th>
           </tr>
         </thead>
@@ -4409,17 +4408,6 @@ el('btn-clear-session')?.addEventListener('click', () => {
   navigateTo('dashboard');
 });
 
-// Expert mode toggle
-document.body.classList.toggle('simple-mode', !state.expertMode);
-const expertToggle = el('expert-mode-toggle');
-if (expertToggle) {
-  expertToggle.checked = state.expertMode;
-  expertToggle.addEventListener('change', e => {
-    state.expertMode = e.target.checked;
-    localStorage.setItem('ff-expert', e.target.checked ? '1' : '0');
-    document.body.classList.toggle('simple-mode', !state.expertMode);
-  });
-}
 
 // Close any open iface-dd when clicking outside
 document.addEventListener('click', () => {
