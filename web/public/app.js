@@ -55,6 +55,11 @@ function typeTag(t) {
 function el(id) { return document.getElementById(id); }
 function qs(sel, ctx = document) { return ctx.querySelector(sel); }
 
+function badgeHtml(type) {
+  const labels = { config: 'CONFIG', auto: 'AUTO', route: 'ROUTE', sdwan: 'SDWAN', subnet: 'SUBNET' };
+  return `<span class="badge-${type}">${labels[type] || type.toUpperCase()}</span>`;
+}
+
 async function api(path) {
   const sep = path.includes('?') ? '&' : '?';
   const r   = await fetch(`${path}${sep}session=${state.session}`);
@@ -290,7 +295,7 @@ async function dashboard() {
     <div class="section-header" style="margin-top:8px;">
       <div>
         <div class="section-title">Fichier analysé</div>
-        <div class="section-sub">${m?.filename || ''} — ${fmtNum(m?.lineCount)} lignes lues · ${fmtNum(m?.skipped)} lignes ignorées</div>
+        <div class="section-sub">${m?.filename || ''} — ${fmtNum(m?.lineCount)} lignes lues · ${fmtNum(m?.uniqueFlows || 0)} flux uniques · ${fmtNum(m?.skipped || 0)} ignorées${m?.skipReasons ? ` (${fmtNum(m.skipReasons.nonTraffic || 0)} non-traffic, ${fmtNum(m.skipReasons.invalidFlow || 0)} invalides)` : ''}</div>
       </div>
       <div style="display:flex;gap:8px;">
         <button class="export-btn primary" onclick="navigateTo('policies')">◎ Voir les policies</button>
@@ -1587,13 +1592,29 @@ function showMergeDiff(mode) {
   const afterCount  = preview.length;
   const mergedGroups = preview.filter(p => (p._mergedCount || 1) > 1);
 
-  const groupRows = mergedGroups.slice(0, 20).map(g => {
+  const groupRows = mergedGroups.slice(0, 20).map((g, gi) => {
     const src = g.srcSubnets ? g.srcSubnets.join(', ') : g.srcSubnet;
-    return `<div style="display:flex;gap:8px;align-items:center;padding:4px 0;border-bottom:1px solid var(--border)">
-      <span class="mono" style="font-size:11px;min-width:120px">${escHtml(src)}</span>
-      <span style="color:var(--text2)">→</span>
-      <span class="mono" style="font-size:11px">${escHtml(g.dstTarget)}</span>
-      <span class="merge-badge" style="margin-left:auto">×${g._mergedCount}</span>
+    const svcs = (g.analysis?.services || []).map(s => s.label || s.name).join(', ');
+    // Show original policies that were merged
+    const origPolicies = (g._mergedFrom || []).slice(0, 10);
+    const origRows = origPolicies.map(op => `
+      <div class="merge-diff-row">
+        <span class="merge-diff-label">src</span><span class="merge-diff-val">${escHtml(op.srcSubnet || '')}</span>
+        <span class="merge-diff-arrow">→</span>
+        <span class="merge-diff-label">dst</span><span class="merge-diff-val">${escHtml(op.dstTarget || '')}</span>
+        <span class="merge-diff-arrow">·</span>
+        <span class="merge-diff-val">${escHtml((op.analysis?.services || []).map(s => s.label || s.name).join(', ') || '—')}</span>
+      </div>`).join('');
+    const hasOrig = origPolicies.length > 0;
+    return `<div style="padding:6px 0;border-bottom:1px solid var(--border)">
+      <div style="display:flex;gap:8px;align-items:center">
+        <span class="mono" style="font-size:11px;min-width:120px">${escHtml(src)}</span>
+        <span style="color:var(--text2)">→</span>
+        <span class="mono" style="font-size:11px">${escHtml(g.dstTarget)}</span>
+        <span style="color:var(--text2);font-size:10px;margin-left:4px">[${escHtml(svcs || '—')}]</span>
+        <span class="merge-badge" style="margin-left:auto">×${g._mergedCount}</span>
+      </div>
+      ${hasOrig ? `<details style="margin-top:4px"><summary class="merge-diff-toggle">Voir les ${origPolicies.length} policies sources</summary><div class="merge-diff-details">${origRows}</div></details>` : ''}
     </div>`;
   }).join('');
 
@@ -2055,8 +2076,8 @@ function populateDrawer(idx) {
       </div>
       ${srcMode === 'subnet' ? `<div class="drawer-field">
         <span class="drawer-field-label">Objet addr</span>
-        ${srcFound ? `<span class="drawer-field-value" style="color:var(--success)" title="${escHtml(a.srcAddr?.cidr || p.srcSubnet || '')}">&#10003; ${escHtml(srcAddrName)}</span>`
-          : `<input class="drawer-input drawer-src-name" value="${escHtml(srcAddrName)}" placeholder="FF_...">`}
+        ${srcFound ? `<span class="drawer-field-value" style="color:var(--success)" title="${escHtml(a.srcAddr?.cidr || p.srcSubnet || '')}">&#10003; ${escHtml(srcAddrName)}${badgeHtml('config')}</span>`
+          : `<input class="drawer-input drawer-src-name" value="${escHtml(srcAddrName)}" placeholder="FF_...">${badgeHtml('auto')}`}
       </div>` : ''}
       ${srcHostsHtml}
       <div class="drawer-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-srcintf">${ifOpts}</select></div>
@@ -2133,8 +2154,8 @@ function populateDrawer(idx) {
       </div>` : ''}
       ${dstMode === 'subnet' ? `<div class="drawer-field">
         <span class="drawer-field-label">Objet addr</span>
-        ${dstFound ? `<span class="drawer-field-value" style="color:var(--success)" title="${escHtml(a.dstAddr?.cidr || p.dstTarget || '')}">&#10003; ${escHtml(dstAddrName)}</span>`
-          : `<input class="drawer-input drawer-dst-name" value="${escHtml(dstAddrName)}" placeholder="FF_...">`}
+        ${dstFound ? `<span class="drawer-field-value" style="color:var(--success)" title="${escHtml(a.dstAddr?.cidr || p.dstTarget || '')}">&#10003; ${escHtml(dstAddrName)}${badgeHtml('config')}</span>`
+          : `<input class="drawer-input drawer-dst-name" value="${escHtml(dstAddrName)}" placeholder="FF_...">${badgeHtml('auto')}`}
       </div>` : ''}
       ${dstHostsHtml}
     </div>`;
@@ -2143,8 +2164,8 @@ function populateDrawer(idx) {
   // Services
   const svcList = a.services || [];
   const svcsHtml = svcList.map(svc => {
-    if (svc.found) return `<div class="drawer-field"><span class="drawer-field-label">${escHtml(svc.label || svc.name)}</span><span class="drawer-field-value" style="color:var(--success)" title="${escHtml(svc.portHint || '')}">&#10003; ${escHtml(svc.name)}</span></div>`;
-    return `<div class="drawer-field"><span class="drawer-field-label">${escHtml(svc.label || `${svc.port}/${svc.proto}`)}</span><input class="drawer-input drawer-svc-name" data-port="${svc.port}" data-proto="${svc.proto}" value="${escHtml(svc.suggestedName || '')}" placeholder="FF_SVC_..."></div>`;
+    if (svc.found) return `<div class="drawer-field"><span class="drawer-field-label">${escHtml(svc.label || svc.name)}</span><span class="drawer-field-value" style="color:var(--success)" title="${escHtml(svc.portHint || '')}">&#10003; ${escHtml(svc.name)}${badgeHtml('config')}</span></div>`;
+    return `<div class="drawer-field"><span class="drawer-field-label">${escHtml(svc.label || `${svc.port}/${svc.proto}`)}</span><input class="drawer-input drawer-svc-name" data-port="${svc.port}" data-proto="${svc.proto}" value="${escHtml(svc.suggestedName || '')}" placeholder="FF_SVC_...">${badgeHtml('auto')}</div>`;
   }).join('');
 
   const body = document.getElementById('drawer-body');
@@ -2386,6 +2407,13 @@ async function deploy() {
           <div class="empty-state" style="padding:24px">Cliquez sur <strong>Analyser les policies</strong> pour commencer</div>
         </div>
         <div class="deploy-step-footer" id="deploy-step4-footer" style="display:none">
+          <div id="security-profiles-bar" style="display:none;margin-bottom:10px;padding:8px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);font-size:11px">
+            <span style="font-weight:600;margin-right:12px">Profils de sécurité :</span>
+            <select id="sp-av" class="deploy-select" style="font-size:10px;max-width:140px" title="Antivirus"><option value="">— AV —</option></select>
+            <select id="sp-wf" class="deploy-select" style="font-size:10px;max-width:140px" title="Web filter"><option value="">— WebFilter —</option></select>
+            <select id="sp-ips" class="deploy-select" style="font-size:10px;max-width:140px" title="IPS"><option value="">— IPS —</option></select>
+            <select id="sp-ssl" class="deploy-select" style="font-size:10px;max-width:140px" title="SSL/SSH"><option value="">— SSL/SSH —</option></select>
+          </div>
           <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
             <button class="btn-accent" id="btn-generate">⬇ Générer config FortiGate</button>
             <span id="deploy-gen-info" style="font-size:11px;color:var(--text2)"></span>
@@ -2814,6 +2842,7 @@ function mergeAnalyzedPolicies(policies, mode) {
       serviceDesc:  allServices.map(s => s.label).join(', '),
       policyIds:    allPolicyIds,
       _mergedCount: group.length,
+      _mergedFrom:  group.map(p => ({ srcSubnet: p.srcSubnet, dstTarget: p.dstTarget, analysis: { services: p.analysis?.services } })),
       _srcAddrName: base._srcAddrName || suggestAddrNameFE(srcSubnet),
       _dstAddrName: 'all',
       _policyName:  '',
@@ -2838,6 +2867,7 @@ function mergeAnalyzedPolicies(policies, mode) {
       serviceDesc:  allServices.map(s => s.label).join(', '),
       policyIds:    allPolicyIds,
       _mergedCount: group.length,
+      _mergedFrom:  group.map(p => ({ srcSubnet: p.srcSubnet, dstTarget: p.dstTarget, analysis: { services: p.analysis?.services } })),
       analysis: {
         ...base.analysis,
         services:  allServices,
@@ -3500,6 +3530,26 @@ async function analyzeDeployPolicies() {
 
   if (info) info.innerHTML = `${analyzed.length} policies${deniedNote} · `;
 
+  // Load available security profiles for the dropdown selectors
+  try {
+    const spRes = await fetch(`/api/security-profiles?session=${state.session}`);
+    if (spRes.ok) {
+      const sp = await spRes.json();
+      const fillSel = (selId, options) => {
+        const sel = el(selId);
+        if (!sel || !options?.length) return;
+        for (const name of options) sel.insertAdjacentHTML('beforeend', `<option value="${escHtml(name)}">${escHtml(name)}</option>`);
+      };
+      fillSel('sp-av', sp.antivirus);
+      fillSel('sp-wf', sp.webfilter);
+      fillSel('sp-ips', sp.ips);
+      fillSel('sp-ssl', sp.sslSsh);
+      const hasAny = (sp.antivirus?.length || sp.webfilter?.length || sp.ips?.length || sp.sslSsh?.length);
+      const spBar = el('security-profiles-bar');
+      if (spBar && hasAny) spBar.style.display = '';
+    }
+  } catch { /* non-bloquant */ }
+
   deployState.wizardStep = 4;
   // Update wizard progress indicators
   document.querySelectorAll('.wizard-step-indicator').forEach(ind => {
@@ -3579,15 +3629,16 @@ function buildModePills(idx, type, currentMode, hasHosts) {
 function addrCell(addrAnalysis, currentName, idx, field) {
   if (!addrAnalysis?.found) {
     const display = currentName || 'FF_...';
-    return `<span class="inline-editable missing" data-idx="${idx}" data-field="${field}" title="Cliquer pour modifier">${escHtml(display)}</span>`;
+    return `<span class="inline-editable missing" data-idx="${idx}" data-field="${field}" title="Cliquer pour modifier">${escHtml(display)}${badgeHtml('auto')}</span>`;
   }
   const matches = addrAnalysis.allMatches || [{ name: addrAnalysis.name, source: addrAnalysis.source }];
   const cidrTip = addrAnalysis.cidr ? ` (${addrAnalysis.cidr})` : '';
+  const src = (matches[0].source || addrAnalysis.source || '').replace('config-range', 'config');
+  const badge = src === 'config' ? badgeHtml('config') : badgeHtml('auto');
   if (matches.length === 1) {
-    return `<span class="inline-editable found" data-idx="${idx}" data-field="${field}" title="${escHtml(matches[0].name + cidrTip)}">${escHtml(matches[0].name)}</span>`;
+    return `<span class="inline-editable found" data-idx="${idx}" data-field="${field}" title="${escHtml(matches[0].name + cidrTip)}">${escHtml(matches[0].name)}${badge}</span>`;
   }
-  // Multiple matches → still show first, click to see options in drawer
-  return `<span class="inline-editable found" data-idx="${idx}" data-field="${field}" title="${escHtml(matches.length + ' objets correspondent' + cidrTip)}">${escHtml(matches[0].name)}</span>`;
+  return `<span class="inline-editable found" data-idx="${idx}" data-field="${field}" title="${escHtml(matches.length + ' objets correspondent' + cidrTip)}">${escHtml(matches[0].name)}${badge}</span>`;
 }
 
 // Legacy addrCell for drawer/modal contexts (with full input)
@@ -4105,10 +4156,10 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     const svcList = p.analysis?.services || [];
     const svcCells = svcList.map(svc => {
       if (svc.found) {
-        return `<span class="match-ok" style="font-size:10px" title="${escHtml(svc.portHint || svc.label || svc.name)}">&#10003; ${escHtml(svc.name)}</span>`;
+        return `<span class="match-ok" style="font-size:10px" title="${escHtml(svc.portHint || svc.label || svc.name)}">&#10003; ${escHtml(svc.name)}${badgeHtml('config')}</span>`;
       }
       const name = svc.suggestedName || `FF_SVC_${svc.port}_${svc.proto}`;
-      return `<span class="inline-editable missing" style="font-size:10px" title="${escHtml(svc.label || '')}">${escHtml(name)}</span>`;
+      return `<span class="inline-editable missing" style="font-size:10px" title="${escHtml(svc.label || '')}">${escHtml(name)}${badgeHtml('auto')}</span>`;
     }).join(' ');
 
     // Interfaces — read-only text, editable in drawer
@@ -4120,8 +4171,12 @@ function renderDeployPolicies(analyzed, resetPage = true) {
       const srcLabel = p._srcintf || 'auto';
       const dstLabel = p._dstintf || 'auto';
       const sameWarn = (p._srcintf && p._dstintf && p._srcintf === p._dstintf) ? ' ⚠' : '';
-      srcIntf = `<span class="mono" style="font-size:10px;color:${p._srcintf ? 'var(--text)' : 'var(--text2)'}">${escHtml(srcLabel)}</span>`;
-      dstIntf = `<span class="mono" style="font-size:10px;color:${p._dstintf ? 'var(--text)' : 'var(--text2)'}">${escHtml(dstLabel)}${sameWarn}</span>`;
+      const srcIfSrc = p._srcIfaceSource || 'auto';
+      const dstIfSrc = p._dstIfaceSource || 'auto';
+      const srcIfBadge = srcIfSrc === 'route' ? badgeHtml('route') : srcIfSrc === 'sdwan' ? badgeHtml('sdwan') : '';
+      const dstIfBadge = dstIfSrc === 'route' ? badgeHtml('route') : dstIfSrc === 'sdwan' ? badgeHtml('sdwan') : '';
+      srcIntf = `<span class="mono" style="font-size:10px;color:${p._srcintf ? 'var(--text)' : 'var(--text2)'}">${escHtml(srcLabel)}${srcIfBadge}</span>`;
+      dstIntf = `<span class="mono" style="font-size:10px;color:${p._dstintf ? 'var(--text)' : 'var(--text2)'}">${escHtml(dstLabel)}${sameWarn}${dstIfBadge}</span>`;
     }
 
     const dirBadge = p._isWan
@@ -4149,9 +4204,12 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     const srcMode = p._srcMode || (p._use32Src ? 'hosts' : 'subnet');
     const srcModeBadge = srcMode === 'hosts' ? ` <span class="dst-count-badge">/32</span>` : '';
 
+    const rowStatus = p.analysis?.status || 'warn';
+    const statusTitle = (p.analysis?.missingFields || []).join(', ') || '';
     return `
       <tr class="deploy-policy-row ${isAgg ? 'seq-row' : ''}" data-idx="${idx}" ${isAgg ? `data-seq-members="${p._sequenceMembers.join(',')}"` : ''}>
         <td><input type="checkbox" ${chkAttr}></td>
+        <td class="status-cell" title="${escHtml(statusTitle)}"><div class="status-bar status-${rowStatus}"></div></td>
         <td>${dirBadge}</td>
         <td>${warnBadge}${seqBadge}${srcSubnetText}${srcModeBadge}</td>
         <td>${srcAddrCell}</td>
@@ -4217,6 +4275,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
       <table class="deploy-policy-table">
         <thead><tr>
           <th><input type="checkbox" id="chk-all-deploy"></th>
+          <th></th>
           <th>Dir.</th>
           <th>Source</th><th>Src addr</th>${allSrcAutoFlag ? '' : '<th>Src intf</th>'}
           <th>Destination</th><th>Dst addr</th>${allDstAutoFlag ? '' : '<th>Dst intf</th>'}
@@ -4317,14 +4376,40 @@ async function generateDeployConf() {
 
   if (!selectedPolicies.length) { alert('Sélectionnez au moins une policy'); return; }
 
+  // Security profiles from dropdowns
+  const securityProfiles = {};
+  const spAv  = el('sp-av')?.value;   if (spAv)  securityProfiles.antivirus  = spAv;
+  const spWf  = el('sp-wf')?.value;   if (spWf)  securityProfiles.webfilter  = spWf;
+  const spIps = el('sp-ips')?.value;   if (spIps) securityProfiles.ips        = spIps;
+  const spSsl = el('sp-ssl')?.value;   if (spSsl) securityProfiles.sslSsh     = spSsl;
+
   const opts = {
     nat:    el('opt-nat')?.checked || false,
     action: el('opt-action')?.value || 'accept',
     log:    el('opt-log')?.value   || 'all',
+    securityProfiles,
   };
 
   const btn = el('btn-generate');
-  if (btn) { btn.disabled = true; btn.textContent = 'Génération…'; }
+  if (btn) { btn.disabled = true; btn.textContent = 'Validation…'; }
+
+  // Preflight validation
+  try {
+    const pfRes = await fetch(`/api/deploy/preflight?session=${state.session}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ selectedPolicies }),
+    });
+    if (pfRes.ok) {
+      const pf = await pfRes.json();
+      if (pf.errors > 0 || pf.warnings > 0) {
+        const proceed = await showPreflightModal(pf);
+        if (!proceed) { if (btn) { btn.disabled = false; btn.textContent = '⬇ Générer config FortiGate'; } return; }
+      }
+    }
+  } catch { /* non-bloquant */ }
+
+  if (btn) btn.textContent = 'Génération…';
 
   try {
     // Fetch JSON (not download) to get CLI text for inline preview
@@ -4381,6 +4466,38 @@ async function generateDeployConf() {
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = '⬇ Générer config FortiGate'; }
   }
+}
+
+// ─── Preflight modal ─────────────────────────────────────────────────────────
+
+function showPreflightModal(pf) {
+  return new Promise(resolve => {
+    const errors  = pf.issues.filter(i => i.level === 'error');
+    const warns   = pf.issues.filter(i => i.level === 'warn');
+    const icon    = pf.errors > 0 ? '🛑' : '⚠️';
+    const title   = pf.errors > 0 ? 'Erreurs détectées' : 'Avertissements';
+
+    const errHtml = errors.map(i => `<div class="preflight-item pf-error">✗ ${escHtml(i.msg)}</div>`).join('');
+    const warnHtml = warns.map(i => `<div class="preflight-item pf-warn">⚠ ${escHtml(i.msg)}</div>`).join('');
+
+    const overlay = document.createElement('div');
+    overlay.className = 'preflight-overlay';
+    overlay.innerHTML = `
+      <div class="preflight-modal">
+        <div class="preflight-title">${icon} ${title}</div>
+        ${errors.length ? `<div class="preflight-section"><div class="preflight-section-title">Erreurs (${errors.length})</div>${errHtml}</div>` : ''}
+        ${warns.length ? `<div class="preflight-section"><div class="preflight-section-title">Avertissements (${warns.length})</div>${warnHtml}</div>` : ''}
+        <div class="preflight-actions">
+          <button class="btn-sm" id="pf-cancel">Annuler</button>
+          ${pf.errors === 0 ? `<button class="btn-accent" id="pf-continue">Continuer quand même</button>` : `<button class="btn-accent" id="pf-continue">Forcer la génération</button>`}
+        </div>
+      </div>`;
+
+    document.body.appendChild(overlay);
+    overlay.querySelector('#pf-cancel').addEventListener('click', () => { overlay.remove(); resolve(false); });
+    overlay.querySelector('#pf-continue').addEventListener('click', () => { overlay.remove(); resolve(true); });
+    overlay.addEventListener('click', e => { if (e.target === overlay) { overlay.remove(); resolve(false); } });
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════

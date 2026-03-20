@@ -135,7 +135,7 @@ function parsePorts(portrange) {
   const ports = [];
   for (const part of portrange.trim().split(/\s+/)) {
     const [a, b] = part.split('-').map(Number);
-    if (b && !isNaN(b)) { for (let i = a; i <= Math.min(b, a + 100); i++) ports.push(i); }
+    if (b && !isNaN(b)) { for (let i = a; i <= Math.min(b, a + 10000); i++) ports.push(i); }
     else if (a && !isNaN(a)) ports.push(a);
   }
   return ports;
@@ -238,6 +238,11 @@ function parseFortiConfig(text) {
     'system interface',
     'system zone',
     'router static',
+    'antivirus profile',
+    'webfilter profile',
+    'ips sensor',
+    'firewall ssl-ssh-profile',
+    'firewall profile-group',
   ]);
   const rawAddresses  = _sections['firewall address'];
   const rawCustomSvcs = _sections['firewall service custom'];
@@ -276,7 +281,12 @@ function parseFortiConfig(text) {
     if (props.subnet)   cidr = fortiSubnetToCIDR(props.subnet);
     else if (props.fqdn) cidr = props.fqdn;
     else if (props['start-ip']) cidr = props['start-ip']; // IP range — use start
-    addresses[name] = { name, type: props.type || 'ipmask', cidr, fqdn: props.fqdn || '' };
+    // For iprange: store start/end integers for range matching
+    let startInt, endInt;
+    if (props['start-ip'] && props['end-ip']) {
+      try { startInt = ip2int(props['start-ip']); endInt = ip2int(props['end-ip']); } catch {}
+    }
+    addresses[name] = { name, type: props.type || 'ipmask', cidr, fqdn: props.fqdn || '', startInt, endInt };
   }
 
   // ── Address groups ──
@@ -288,6 +298,10 @@ function parseFortiConfig(text) {
     // Resolve member CIDRs from addresses
     const memberCidrs = members.map(m => addresses[m]?.cidr).filter(Boolean);
     addressGroups[name] = { name, members, memberCidrs };
+  }
+  // Post-process: pre-compute expanded CIDRs (recursive, handles nested groups)
+  for (const [name, grp] of Object.entries(addressGroups)) {
+    grp.expandedCidrs = expandGroupCidrs(grp.members, addressGroups, addresses, new Set([name]));
   }
 
   // ── Custom services ──
@@ -421,7 +435,16 @@ function parseFortiConfig(text) {
   // OSPF detection — vérifie la présence de networks configurés
   const hasOspf = /config router ospf[\s\S]*?set router-id\s+\d/m.test(text);
 
-  return { addresses, addressGroups, customServices, serviceGroups, interfaces, zones, sdwanMembers, sdwanZoneNames, sdwanEnabled, sdwanIntfName, hasVdom, staticRoutes, fullRoutes, hasBgp, hasOspf, existingPolicies };
+  // ── Security profiles ──
+  const securityProfiles = {
+    antivirus:    Object.keys(_sections['antivirus profile'] || {}),
+    webfilter:    Object.keys(_sections['webfilter profile'] || {}),
+    ips:          Object.keys(_sections['ips sensor'] || {}),
+    sslSsh:       Object.keys(_sections['firewall ssl-ssh-profile'] || {}),
+    profileGroup: Object.keys(_sections['firewall profile-group'] || {}),
+  };
+
+  return { addresses, addressGroups, customServices, serviceGroups, interfaces, zones, sdwanMembers, sdwanZoneNames, sdwanEnabled, sdwanIntfName, hasVdom, staticRoutes, fullRoutes, hasBgp, hasOspf, existingPolicies, securityProfiles };
 }
 
 // ─── Static routes + BGP parser ──────────────────────────────────────────────
@@ -641,15 +664,42 @@ function detectWanCandidates(interfaces, zones, sdwanMembers) {
 function findAddress(cidr, addresses) {
   if (!cidr) return { found: false };
   const matches = [];
+  const rangeMatches = [];
   for (const [name, addr] of Object.entries(addresses)) {
+    // Exact CIDR match (highest priority)
     if (addr.cidr === cidr) { matches.push({ name, cidr: addr.cidr, source: 'config' }); continue; }
     if (cidr.endsWith('/32')) {
       const ip = cidr.slice(0, -3);
-      if (addr.cidr === ip || addr.cidr === `${ip}/32`) matches.push({ name, cidr: addr.cidr, source: 'config' });
+      if (addr.cidr === ip || addr.cidr === `${ip}/32`) { matches.push({ name, cidr: addr.cidr, source: 'config' }); continue; }
+      // IP range matching: check if target IP falls within start-end range
+      if (addr.startInt !== undefined && addr.endInt !== undefined) {
+        try {
+          const targetInt = ip2int(ip);
+          if (targetInt >= addr.startInt && targetInt <= addr.endInt) {
+            rangeMatches.push({ name, cidr: addr.cidr, source: 'config-range' });
+          }
+        } catch {}
+      }
     }
   }
-  if (matches.length === 0) return { found: false };
-  return { found: true, name: matches[0].name, source: 'config', allMatches: matches };
+  // Exact matches take priority over range matches
+  const allMatches = matches.length > 0 ? matches : rangeMatches;
+  if (allMatches.length === 0) return { found: false };
+  return { found: true, name: allMatches[0].name, source: allMatches[0].source, allMatches };
+}
+
+// Recursive group expansion with cycle detection
+function expandGroupCidrs(memberNames, addressGroups, addresses, visited) {
+  const cidrs = [];
+  for (const m of memberNames) {
+    if (addresses[m]?.cidr) {
+      cidrs.push(addresses[m].cidr);
+    } else if (addressGroups[m] && !visited.has(m)) {
+      visited.add(m);
+      cidrs.push(...expandGroupCidrs(addressGroups[m].members, addressGroups, addresses, visited));
+    }
+  }
+  return cidrs;
 }
 
 // Cherche un groupe d'adresses existant contenant exactement les CIDRs donnés
@@ -657,8 +707,7 @@ function findAddressGroup(cidrs, addressGroups, addresses) {
   if (!cidrs || cidrs.length < 2 || !addressGroups) return null;
   const sortedCidrs = [...cidrs].sort();
   for (const [name, grp] of Object.entries(addressGroups)) {
-    const grpCidrs = grp.members
-      .map(m => addresses[m]?.cidr)
+    const grpCidrs = expandGroupCidrs(grp.members, addressGroups, addresses, new Set([name]))
       .filter(Boolean)
       .sort();
     if (grpCidrs.length === sortedCidrs.length && grpCidrs.every((c, i) => c === sortedCidrs[i])) {
@@ -875,6 +924,17 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
       || (!dstAddrMatch.found)
       || serviceItems.some(s => !s.found);
 
+    // Granular status for visual indicators
+    const missingFields = [
+      ...(!srcAddrMatch.found ? ['srcAddr'] : []),
+      ...(!dstAddrMatch.found && p.dstType !== 'public' ? ['dstAddr'] : []),
+      ...serviceItems.filter(s => !s.found).map(s => `svc:${s.label}`),
+      ...(!srcIfaceName ? ['srcIface'] : []),
+      ...(!dstIfaceName ? ['dstIface'] : []),
+    ];
+    const status = (!srcIfaceName || !dstIfaceName) ? 'error'
+      : needsWork ? 'warn' : 'ok';
+
     // Pré-résoudre les noms d'objets /32 existants pour chaque hôte src/dst
     const srcHostNames = {};
     const srcHostsFound = new Set();
@@ -924,6 +984,8 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
         dstIfaceSource: dstIfaceSource,
         dstZone:        dstZone?.name  || null,
         needsWork,
+        status,
+        missingFields,
       },
     };
   });
@@ -1231,6 +1293,17 @@ function generateConfig(selectedPolicies, opts = {}) {
       L.push(`        set schedule "always"`);
       if (pol.nat) L.push(`        set nat enable`);
       L.push(`        set logtraffic ${logTraffic}`);
+      // Security profiles (UTM)
+      const sp = opts.securityProfiles || {};
+      const hasUtm = sp.antivirus || sp.webfilter || sp.ips || sp.sslSsh || sp.profileGroup;
+      if (hasUtm) {
+        L.push(`        set utm-status enable`);
+        if (sp.profileGroup)  L.push(`        set profile-protocol-options "${sp.profileGroup}"`);
+        if (sp.antivirus)     L.push(`        set av-profile "${sp.antivirus}"`);
+        if (sp.webfilter)     L.push(`        set webfilter-profile "${sp.webfilter}"`);
+        if (sp.ips)           L.push(`        set ips-sensor "${sp.ips}"`);
+        if (sp.sslSsh)        L.push(`        set ssl-ssh-profile "${sp.sslSsh}"`);
+      }
       if (pol.tags && pol.tags.length > 0) {
         L.push(`        set comments "${pol.tags.join(', ')}"`);
       }
@@ -1242,11 +1315,79 @@ function generateConfig(selectedPolicies, opts = {}) {
   return L.join('\n');
 }
 
+// ─── Preflight validation ─────────────────────────────────────────────────────
+
+function preflightValidation(selectedPolicies, config) {
+  const issues = []; // { level: 'warn'|'error', msg }
+  const addresses      = config.addresses      || {};
+  const addressGroups  = config.addressGroups   || {};
+  const interfaces     = config.interfaces      || {};
+  const zones          = config.zones           || {};
+
+  const namesUsed = new Map(); // name → [policy indices]
+
+  for (let i = 0; i < selectedPolicies.length; i++) {
+    const p = selectedPolicies[i];
+    const a = p.analysis || {};
+    const label = `Policy #${i + 1}`;
+
+    // Missing interfaces
+    const srcIntf = p._srcintf || a.srcIntfName;
+    const dstIntf = p._dstintf || a.dstIntfName;
+    if (!srcIntf) issues.push({ level: 'error', msg: `${label}: interface source manquante` });
+    if (!dstIntf) issues.push({ level: 'error', msg: `${label}: interface destination manquante` });
+    if (srcIntf && dstIntf && srcIntf === dstIntf) {
+      issues.push({ level: 'warn', msg: `${label}: même interface src/dst (${srcIntf}) — hairpin` });
+    }
+
+    // Validate interfaces exist in config
+    if (srcIntf && !interfaces[srcIntf] && !zones[srcIntf]) {
+      issues.push({ level: 'warn', msg: `${label}: interface source "${srcIntf}" absente de la config` });
+    }
+    if (dstIntf && !interfaces[dstIntf] && !zones[dstIntf]) {
+      issues.push({ level: 'warn', msg: `${label}: interface destination "${dstIntf}" absente de la config` });
+    }
+
+    // Name collisions with existing objects
+    const srcName = p._srcAddrName || a.srcAddr?.name;
+    const dstName = p._dstAddrName || a.dstAddr?.name;
+    if (srcName && !a.srcAddr?.found) {
+      if (addresses[srcName] || addressGroups[srcName]) {
+        issues.push({ level: 'error', msg: `${label}: nom addr source "${srcName}" existe déjà avec un CIDR différent` });
+      }
+    }
+    if (dstName && !a.dstAddr?.found) {
+      if (addresses[dstName] || addressGroups[dstName]) {
+        issues.push({ level: 'error', msg: `${label}: nom addr destination "${dstName}" existe déjà avec un CIDR différent` });
+      }
+    }
+
+    // Track duplicate policies (same src+dst+svc)
+    const svcKey = (a.services || []).map(s => s.name || s.label).sort().join(',');
+    const dupKey = `${srcName}|${dstName}|${svcKey}`;
+    if (!namesUsed.has(dupKey)) namesUsed.set(dupKey, []);
+    namesUsed.get(dupKey).push(i + 1);
+  }
+
+  // Detect duplicates
+  for (const [, indices] of namesUsed) {
+    if (indices.length > 1) {
+      issues.push({ level: 'warn', msg: `Policies #${indices.join(', #')} sont des doublons potentiels (mêmes src/dst/services)` });
+    }
+  }
+
+  // Summary counts
+  const errors   = issues.filter(i => i.level === 'error').length;
+  const warnings = issues.filter(i => i.level === 'warn').length;
+  return { issues, errors, warnings, ok: errors === 0 };
+}
+
 module.exports = {
   parseFortiConfig,
   analyzePolicies,
   generateConfig,
   validateAgainstExisting,
+  preflightValidation,
   findInterfaceForSubnet,
   detectWanCandidates,
   findAddress,

@@ -184,6 +184,7 @@ async function parseStream(inputStream, onProgress) {
   const flowMap = new Map();
   let lineCount = 0;
   let skipped   = 0;
+  const skipReasons = { nonTraffic: 0, invalidFlow: 0 };
   let format    = null;
   let sep       = null;
   let csvHeaders = null;
@@ -213,7 +214,7 @@ async function parseStream(inputStream, onProgress) {
     if (format === 'kv') {
       fields = parseKV(line);
       const t = fields.type;
-      if (t && t !== 'traffic') { skipped++; continue; }
+      if (t && t !== 'traffic') { skipped++; skipReasons.nonTraffic++; continue; }
     } else {
       const parts = parseCSVLine(line, sep);
       if (!csvHeaders) {
@@ -228,10 +229,10 @@ async function parseStream(inputStream, onProgress) {
     }
 
     const flow = extractFlow(fields);
-    if (!aggregateFlow(flowMap, flow)) skipped++;
+    if (!aggregateFlow(flowMap, flow)) { skipped++; skipReasons.invalidFlow++; }
   }
 
-  return { flowMap, lineCount, skipped };
+  return { flowMap, lineCount, skipped, skipReasons };
 }
 
 // ─── XLSX parser ──────────────────────────────────────────────────────────────
@@ -329,14 +330,19 @@ async function parseFile(filePath, onProgress) {
     const mergedFlowMap = new Map();
     let totalLines = 0;
     let totalSkipped = 0;
+    const totalSkipReasons = { nonTraffic: 0, invalidFlow: 0 };
 
     for (const entry of entries) {
       try {
         let stream = entry.stream();
         if (entry.path.endsWith('.gz')) stream = stream.pipe(zlib.createGunzip());
-        const { flowMap, lineCount, skipped } = await parseStream(stream, progressCb);
+        const { flowMap, lineCount, skipped, skipReasons } = await parseStream(stream, progressCb);
         totalLines   += lineCount;
         totalSkipped += skipped;
+        if (skipReasons) {
+          totalSkipReasons.nonTraffic   += skipReasons.nonTraffic   || 0;
+          totalSkipReasons.invalidFlow  += skipReasons.invalidFlow  || 0;
+        }
         // Merge into combined flowMap
         for (const [key, flow] of flowMap) {
           if (!mergedFlowMap.has(key)) {
@@ -354,7 +360,7 @@ async function parseFile(filePath, onProgress) {
       }
     }
 
-    return { flowMap: mergedFlowMap, lineCount: totalLines, skipped: totalSkipped };
+    return { flowMap: mergedFlowMap, lineCount: totalLines, skipped: totalSkipped, skipReasons: totalSkipReasons };
 
   } else {
     inputStream = fs.createReadStream(filePath);

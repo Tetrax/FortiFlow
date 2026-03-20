@@ -11,7 +11,7 @@ const { createSession, getSession, setSessionData,
         setSessionError, deleteSession, getStats }       = require('./lib/store');
 const { parseFortiConfig, analyzePolicies,
         generateConfig, validateAgainstExisting,
-        detectWanCandidates,
+        preflightValidation, detectWanCandidates,
         parseFullRoutingTable, parseOspfRoutingTable, parseBgpNetworkTable,
         sortRoutes }                                     = require('./lib/forticonfig');
 
@@ -141,9 +141,9 @@ app.post('/api/upload', upload.single('logfile'), (req, res) => {
         }
       };
 
-      const { flowMap, lineCount, skipped } = await parseFile(filePath, onProgress);
+      const { flowMap, lineCount, skipped, skipReasons } = await parseFile(filePath, onProgress);
       const analysis = buildAnalysis(flowMap);
-      analysis.meta  = { lineCount, skipped, filename };
+      analysis.meta  = { lineCount, skipped, skipReasons, uniqueFlows: flowMap.size, filename };
       setSessionData(sessionId, analysis);
 
       session?.emitter.emit('done', { stats: analysis.stats, meta: analysis.meta });
@@ -539,6 +539,33 @@ app.post('/api/deploy/dynamic-routes', (req, res) => {
   res.json({ added, total: parsed.length, routes: parsed });
 });
 
+// POST /api/deploy/preflight — validate before generating CLI
+app.post('/api/deploy/preflight', (req, res) => {
+  const s = requireSession(req, res);
+  if (!s) return;
+  if (!s.fortiConfig) return res.status(404).json({ error: 'Aucune config FortiGate chargée' });
+
+  const { selectedPolicies } = req.body || {};
+  if (!Array.isArray(selectedPolicies) || selectedPolicies.length === 0) {
+    return res.status(400).json({ error: 'selectedPolicies requis' });
+  }
+
+  try {
+    const result = preflightValidation(selectedPolicies, s.fortiConfig);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/security-profiles — list available security profiles
+app.get('/api/security-profiles', (req, res) => {
+  const s = requireSession(req, res);
+  if (!s) return;
+  if (!s.fortiConfig) return res.status(404).json({ error: 'Aucune config FortiGate chargée' });
+  res.json(s.fortiConfig.securityProfiles || {});
+});
+
 // POST /api/deploy/generate — generate FortiGate CLI from selected policies
 app.post('/api/deploy/generate', (req, res) => {
   const s = requireSession(req, res);
@@ -568,13 +595,14 @@ app.post('/api/deploy/generate', (req, res) => {
     // SD-WAN zone takes priority; if none, preferredWanIntf falls to null (detectWanCandidates handles it)
     const analyzed = analyzePolicies(selectedPolicies, configToUse, o.preferredWanIntf || null);
     const genOpts = {
-      natEnabled:     o.nat     || false,
-      actionVerb:     o.action  || 'accept',
-      logTraffic:     o.log     || 'all',
-      serviceGroups:  s.fortiConfig.serviceGroups || {},
-      addresses:      s.fortiConfig.addresses || {},
-      addressGroups:  s.fortiConfig.addressGroups || {},
-      zones:          s.fortiConfig.zones || {},
+      natEnabled:        o.nat     || false,
+      actionVerb:        o.action  || 'accept',
+      logTraffic:        o.log     || 'all',
+      serviceGroups:     s.fortiConfig.serviceGroups || {},
+      addresses:         s.fortiConfig.addresses || {},
+      addressGroups:     s.fortiConfig.addressGroups || {},
+      zones:             s.fortiConfig.zones || {},
+      securityProfiles:  o.securityProfiles || {},
     };
     const cli = generateConfig(analyzed, genOpts);
 
