@@ -1996,7 +1996,7 @@ function populateDrawer(idx) {
           return `<div class="drawer-host-row">
             <span class="drawer-host-ip">${escHtml(h)}</span>
             ${hostFound
-              ? `<span style="color:var(--success);font-size:10px">&#10003; ${escHtml(hostName)}</span>`
+              ? `<span style="color:var(--success);font-size:10px" title="${escHtml(h)}/32">&#10003; ${escHtml(hostName)}</span>`
               : `<input class="drawer-host-input" data-type="src" data-host="${escHtml(h)}" value="${escHtml(hostName)}" placeholder="FF_HOST_...">`}
           </div>`;
         }).join('')}${s.hosts.length > 50 ? `<div style="font-size:10px;color:var(--text2)">+${s.hosts.length - 50} autres…</div>` : ''}</div>`;
@@ -2005,7 +2005,7 @@ function populateDrawer(idx) {
         <span class="drawer-multisrc-subnet" style="font-family:var(--mono);font-size:11px;min-width:120px">${escHtml(s.subnet)}</span>
         <button class="btn-sm drawer-multisrc-mode" data-si="${si}" style="font-size:9px;padding:2px 8px">${isSubnet ? '/24' : `/32 (${s.hosts?.length || 0}h)`}</button>
         ${isSubnet ? statusIcon : ''}
-        ${isSubnet ? (s.addrFound ? `<span style="color:var(--success);font-size:10px">${escHtml(s.addrName)}</span>` : nameInput) : ''}
+        ${isSubnet ? (s.addrFound ? `<span style="color:var(--success);font-size:10px" title="${escHtml(s.subnet)}">${escHtml(s.addrName)}</span>` : nameInput) : ''}
       </div>${hostsHtml}`;
     }).join('');
     srcSection = `<div class="drawer-section">
@@ -2014,7 +2014,7 @@ function populateDrawer(idx) {
       <div class="drawer-toggle-row" style="margin-top:8px">
         <button class="drawer-toggle-btn drawer-grp-toggle ${p._useSrcGroup ? 'active' : ''}" data-type="src">Grouper (addrgrp)</button>
         ${p._useSrcGroup ? (p._srcAddrGrpFound
-          ? `<span style="color:var(--success);font-size:11px">&#10003; ${escHtml(p._srcAddrName)}</span>`
+          ? `<span style="color:var(--success);font-size:11px" title="${escHtml(srcSubs.map(s => s.subnet).join(', '))}">&#10003; ${escHtml(p._srcAddrName)}</span>`
           : `<input class="drawer-input drawer-src-grp-name" value="${escHtml(p._srcAddrName || '')}" placeholder="GRP_SRC_..." style="width:160px">`)
           : ''}
       </div>
@@ -2031,7 +2031,7 @@ function populateDrawer(idx) {
         return `<div class="drawer-host-row">
           <span class="drawer-host-ip">${escHtml(h)}</span>
           ${hostFound
-            ? `<span style="color:var(--success);font-size:10px">&#10003; ${escHtml(name)}</span>`
+            ? `<span style="color:var(--success);font-size:10px" title="${escHtml(h)}/32">&#10003; ${escHtml(name)}</span>`
             : `<input class="drawer-host-input" data-type="src" data-host="${escHtml(h)}" value="${escHtml(name)}" placeholder="FF_HOST_...">`}
         </div>`;
       }).join('')}</div>`;
@@ -2040,7 +2040,7 @@ function populateDrawer(idx) {
         srcHostsHtml += `<div class="drawer-toggle-row" style="margin-top:4px">
           <button class="drawer-toggle-btn drawer-grp-toggle ${p._useSrcGroup ? 'active' : ''}" data-type="src">Grouper (addrgrp)</button>
           ${p._useSrcGroup ? (srcGrpFound
-            ? `<span style="color:var(--success);font-size:11px">&#10003; ${escHtml(p._srcAddrName)}</span>`
+            ? `<span style="color:var(--success);font-size:11px" title="${escHtml(srcHosts.map(h => h + '/32').join(', '))}">&#10003; ${escHtml(p._srcAddrName)}</span>`
             : `<input class="drawer-input drawer-src-grp-name" value="${escHtml(p._srcAddrName || '')}" placeholder="GRP_SRC_..." style="width:160px">`)
             : ''}
         </div>`;
@@ -2056,7 +2056,7 @@ function populateDrawer(idx) {
       </div>
       ${srcMode === 'subnet' ? `<div class="drawer-field">
         <span class="drawer-field-label">Objet addr</span>
-        ${srcFound ? `<span class="drawer-field-value" style="color:var(--success)">&#10003; ${escHtml(srcAddrName)}</span>`
+        ${srcFound ? `<span class="drawer-field-value" style="color:var(--success)" title="${escHtml(a.srcAddr?.cidr || p.srcSubnet || '')}">&#10003; ${escHtml(srcAddrName)}</span>`
           : `<input class="drawer-input drawer-src-name" value="${escHtml(srcAddrName)}" placeholder="FF_...">`}
       </div>` : ''}
       ${srcHostsHtml}
@@ -2081,7 +2081,7 @@ function populateDrawer(idx) {
           return `<div class="drawer-host-row">
             <span class="drawer-host-ip">${escHtml(h)}</span>
             ${hostFound
-              ? `<span style="color:var(--success);font-size:10px">&#10003; ${escHtml(hostName)}</span>`
+              ? `<span style="color:var(--success);font-size:10px" title="${escHtml(h)}/32">&#10003; ${escHtml(hostName)}</span>`
               : `<input class="drawer-host-input" data-type="dst" data-host="${escHtml(h)}" value="${escHtml(hostName)}" placeholder="FF_HOST_...">`}
           </div>`;
         }).join('')}${s.hosts.length > 50 ? `<div style="font-size:10px;color:var(--text2)">+${s.hosts.length - 50} autres…</div>` : ''}</div>`;
@@ -2090,7 +2090,7 @@ function populateDrawer(idx) {
         <span class="drawer-multidst-subnet">${escHtml(s.subnet)}</span>
         <button class="btn-sm drawer-multidst-mode" data-si="${si}" style="font-size:9px;padding:2px 8px">${isSubnet ? '/24' : `/32 (${s.hosts?.length || 0}h)`}</button>
         ${isSubnet ? statusIcon : ''}
-        ${isSubnet ? (s.addrFound ? `<span style="color:var(--success);font-size:10px">${escHtml(s.addrName)}</span>` : nameInput) : ''}
+        ${isSubnet ? (s.addrFound ? `<span style="color:var(--success);font-size:10px" title="${escHtml(s.subnet)}">${escHtml(s.addrName)}</span>` : nameInput) : ''}
       </div>${hostsHtml}`;
     }).join('');
     dstSection = `<div class="drawer-section">
@@ -2099,7 +2099,7 @@ function populateDrawer(idx) {
       <div class="drawer-toggle-row" style="margin-top:8px">
         <button class="drawer-toggle-btn drawer-grp-toggle ${p._useDstGroup ? 'active' : ''}" data-type="dst">Grouper (addrgrp)</button>
         ${p._useDstGroup ? (p._dstAddrGrpFound
-          ? `<span style="color:var(--success);font-size:11px">&#10003; ${escHtml(p._dstAddrName)}</span>`
+          ? `<span style="color:var(--success);font-size:11px" title="${escHtml(subs.map(s => s.subnet).join(', '))}">&#10003; ${escHtml(p._dstAddrName)}</span>`
           : `<input class="drawer-input drawer-grp-name" value="${escHtml(p._dstAddrName || '')}" placeholder="GRP_..." style="width:160px">`)
           : ''}
       </div>
@@ -2116,7 +2116,7 @@ function populateDrawer(idx) {
         return `<div class="drawer-host-row">
           <span class="drawer-host-ip">${escHtml(h)}</span>
           ${hostFound
-            ? `<span style="color:var(--success);font-size:10px">&#10003; ${escHtml(name)}</span>`
+            ? `<span style="color:var(--success);font-size:10px" title="${escHtml(h)}/32">&#10003; ${escHtml(name)}</span>`
             : `<input class="drawer-host-input" data-type="dst" data-host="${escHtml(h)}" value="${escHtml(name)}" placeholder="FF_HOST_...">`}
         </div>`;
       }).join('')}</div>`;
@@ -2134,7 +2134,7 @@ function populateDrawer(idx) {
       </div>` : ''}
       ${dstMode === 'subnet' ? `<div class="drawer-field">
         <span class="drawer-field-label">Objet addr</span>
-        ${dstFound ? `<span class="drawer-field-value" style="color:var(--success)">&#10003; ${escHtml(dstAddrName)}</span>`
+        ${dstFound ? `<span class="drawer-field-value" style="color:var(--success)" title="${escHtml(a.dstAddr?.cidr || p.dstTarget || '')}">&#10003; ${escHtml(dstAddrName)}</span>`
           : `<input class="drawer-input drawer-dst-name" value="${escHtml(dstAddrName)}" placeholder="FF_...">`}
       </div>` : ''}
       ${dstHostsHtml}
@@ -2144,7 +2144,7 @@ function populateDrawer(idx) {
   // Services
   const svcList = a.services || [];
   const svcsHtml = svcList.map(svc => {
-    if (svc.found) return `<div class="drawer-field"><span class="drawer-field-label">${escHtml(svc.label || svc.name)}</span><span class="drawer-field-value" style="color:var(--success)">&#10003; ${escHtml(svc.name)}</span></div>`;
+    if (svc.found) return `<div class="drawer-field"><span class="drawer-field-label">${escHtml(svc.label || svc.name)}</span><span class="drawer-field-value" style="color:var(--success)" title="${escHtml(svc.portHint || '')}">&#10003; ${escHtml(svc.name)}</span></div>`;
     return `<div class="drawer-field"><span class="drawer-field-label">${escHtml(svc.label || `${svc.port}/${svc.proto}`)}</span><input class="drawer-input drawer-svc-name" data-port="${svc.port}" data-proto="${svc.proto}" value="${escHtml(svc.suggestedName || '')}" placeholder="FF_SVC_..."></div>`;
   }).join('');
 
@@ -2913,7 +2913,7 @@ function dstTargetCellFull(p, idx) {
     const subs = p._multiDstSubnets;
     const rows = subs.map((s, si) => {
       const badge = s.addrFound
-        ? `<span class="match-ok" style="font-size:9px">&#10003; ${escHtml(s.addrName)}</span>`
+        ? `<span class="match-ok" style="font-size:9px" title="${escHtml(s.subnet)}">&#10003; ${escHtml(s.addrName)}</span>`
         : `<span style="color:var(--warn);font-size:9px">+ ${escHtml(s.addrName)}</span>`;
       const modeBtn = `<button class="btn-sm btn-dst-subnet-toggle" data-idx="${idx}" data-si="${si}"
         title="${s.useSubnet ? 'Mode /24' : 'Mode /32'}"
@@ -2935,7 +2935,7 @@ function buildHostRow(h, nameMap, idx, type) {
   const defaultName  = `FF_HOST_${h.replace(/\./g, '_')}`;
   const ipSpan = `<span class="mono" style="font-size:10px;min-width:105px;display:inline-block;color:var(--text2)">${escHtml(h)}</span>`;
   if (existingName) {
-    return `<div style="display:flex;align-items:center;gap:6px;padding:2px 0">${ipSpan}<span class="match-ok" style="font-size:9px">✓ ${escHtml(existingName)}</span></div>`;
+    return `<div style="display:flex;align-items:center;gap:6px;padding:2px 0">${ipSpan}<span class="match-ok" style="font-size:9px" title="${escHtml(h)}/32">✓ ${escHtml(existingName)}</span></div>`;
   }
   return `<div style="display:flex;align-items:center;gap:6px;padding:2px 0">${ipSpan}<input class="host-name-input deploy-name-input" data-idx="${idx}" data-type="${type}" data-host="${escHtml(h)}" value="${escHtml(defaultName)}" style="font-size:10px;width:180px;padding:2px 6px" placeholder="FF_HOST_…"></div>`;
 }
@@ -3572,11 +3572,12 @@ function addrCell(addrAnalysis, currentName, idx, field) {
     return `<span class="inline-editable missing" data-idx="${idx}" data-field="${field}" title="Cliquer pour modifier">${escHtml(display)}</span>`;
   }
   const matches = addrAnalysis.allMatches || [{ name: addrAnalysis.name, source: addrAnalysis.source }];
+  const cidrTip = addrAnalysis.cidr ? ` (${addrAnalysis.cidr})` : '';
   if (matches.length === 1) {
-    return `<span class="inline-editable found" data-idx="${idx}" data-field="${field}" title="Objet existant — cliquer pour détails">${escHtml(matches[0].name)}</span>`;
+    return `<span class="inline-editable found" data-idx="${idx}" data-field="${field}" title="${escHtml(matches[0].name + cidrTip)}">${escHtml(matches[0].name)}</span>`;
   }
   // Multiple matches → still show first, click to see options in drawer
-  return `<span class="inline-editable found" data-idx="${idx}" data-field="${field}" title="${matches.length} objets correspondent — cliquer pour choisir">${escHtml(matches[0].name)}</span>`;
+  return `<span class="inline-editable found" data-idx="${idx}" data-field="${field}" title="${escHtml(matches.length + ' objets correspondent' + cidrTip)}">${escHtml(matches[0].name)}</span>`;
 }
 
 // Legacy addrCell for drawer/modal contexts (with full input)
@@ -3585,7 +3586,8 @@ function addrCellInput(addrAnalysis, currentName, idx, field) {
     return `<input class="deploy-name-input" data-idx="${idx}" data-field="${field}" value="${escHtml(currentName)}" placeholder="FF_...">`;
   }
   const matches = addrAnalysis.allMatches || [{ name: addrAnalysis.name, source: addrAnalysis.source }];
-  const srcTip = addrAnalysis.source === 'config' ? 'Objet existant dans la config FortiGate' : '';
+  const cidrInfo = addrAnalysis.cidr ? ` (${addrAnalysis.cidr})` : '';
+  const srcTip = (addrAnalysis.source === 'config' ? 'Objet existant' : '') + cidrInfo;
   if (matches.length === 1) {
     return `<span class="match-ok" ${srcTip ? `title="${escHtml(srcTip)}"` : ''}>✓ ${escHtml(matches[0].name)}</span>`;
   }
@@ -3606,7 +3608,7 @@ function svcMatchCell(svc, idx) {
                  : (matches[0].source || '');
   const tip1     = `${srcLabel}${portPart}`;
   if (matches.length === 1) {
-    return `<span class="match-ok" data-tip="${escHtml(tip1)}">✓ ${escHtml(matches[0].name)}</span>`;
+    return `<span class="match-ok" title="${escHtml(tip1)}">✓ ${escHtml(matches[0].name)}</span>`;
   }
   const field = `svc_${svc.port}_${svc.proto}`;
   const opts = matches.map(m =>
@@ -3624,7 +3626,7 @@ function policyIdsCell(p) {
   const tip  = ids.length > 3 ? `Policy IDs: ${ids.join(', ')}` : '';
   const shown = ids.slice(0, 3);
   const more  = ids.length > 3 ? ` <span style="color:var(--text2)">+${ids.length - 3}</span>` : '';
-  return shown.map(id => `<span class="policy-id-badge" ${tip ? `data-tip="${escHtml(tip)}"` : ''}>${escHtml(id)}</span>`).join(' ') + more;
+  return shown.map(id => `<span class="policy-id-badge" ${tip ? `title="${escHtml(tip)}"` : ''}>${escHtml(id)}</span>`).join(' ') + more;
 }
 
 function countMissingObjects(analyzed) {
@@ -4093,7 +4095,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     const svcList = p.analysis?.services || [];
     const svcCells = svcList.map(svc => {
       if (svc.found) {
-        return `<span class="match-ok" style="font-size:10px" title="${escHtml(svc.label || svc.name)}">&#10003; ${escHtml(svc.name)}</span>`;
+        return `<span class="match-ok" style="font-size:10px" title="${escHtml(svc.portHint || svc.label || svc.name)}">&#10003; ${escHtml(svc.name)}</span>`;
       }
       const name = svc.suggestedName || `FF_SVC_${svc.port}_${svc.proto}`;
       return `<span class="inline-editable missing" style="font-size:10px" title="${escHtml(svc.label || '')}">${escHtml(name)}</span>`;

@@ -768,7 +768,7 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
           portHint = [tcp && `TCP: ${tcp}`, udp && `UDP: ${udp}`].filter(Boolean).join(' / ');
         } else if (knownPredef) {
           const entries = Object.entries(PREDEFINED).filter(([, e]) => e.name === svc);
-          portHint = entries.map(([port, e]) => `${e.proto.toUpperCase()}: ${port}`).join(', ');
+          portHint = entries.map(([port, e]) => `${e.proto === 'both' ? 'TCP+UDP' : e.proto.toUpperCase()}: ${port}`).join(', ');
         } else if (p.ports?.length) {
           // Inconnu — montrer les ports observés dans les logs pour ce flux
           const proto = protoLabel;
