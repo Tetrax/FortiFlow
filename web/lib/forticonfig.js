@@ -134,7 +134,8 @@ function parsePorts(portrange) {
   if (!portrange) return [];
   const ports = [];
   for (const part of portrange.trim().split(/\s+/)) {
-    const [a, b] = part.split('-').map(Number);
+    const clean = part.split(':')[0]; // strip :src_portrange suffix (FortiGate format)
+    const [a, b] = clean.split('-').map(Number);
     if (b && !isNaN(b)) { for (let i = a; i <= Math.min(b, a + 10000); i++) ports.push(i); }
     else if (a && !isNaN(a)) ports.push(a);
   }
@@ -774,21 +775,18 @@ function validateAgainstExisting(generatedPolicies, existingPolicies) {
 function findIcmpService(label, customServices) {
   const m = label.match(/^ICMP\/(\d+)\/(\d+)$/i);
   if (!m) return null;
-  const a = parseInt(m[1], 10), b = parseInt(m[2], 10);
-  // Try both (code/type) and (type/code) orderings
+  const type = parseInt(m[1], 10), code = parseInt(m[2], 10);
+  // Standard ICMP/type/code ordering
   for (const [name, svc] of Object.entries(customServices)) {
     if (svc.proto !== 'ICMP' && svc.proto !== 'ICMP6') continue;
     if (svc.icmptype === null) continue; // ALL_ICMP — skip for specific match
-    if (svc.icmptype === b || svc.icmptype === a) {
-      const matchedType = svc.icmptype === b ? b : a;
-      const matchedCode = svc.icmptype === b ? a : b;
-      if (svc.icmpcode !== null && svc.icmpcode !== matchedCode) continue;
-      return { name, source: 'custom', portHint: `ICMP type ${matchedType} code ${matchedCode}` };
-    }
+    if (svc.icmptype !== type) continue;
+    if (svc.icmpcode !== null && svc.icmpcode !== code) continue;
+    return { name, source: 'custom', portHint: `ICMP type ${type} code ${code}` };
   }
   // No specific match → try ALL_ICMP fallback
   for (const [name, svc] of Object.entries(customServices)) {
-    if (svc.proto === 'ICMP' && svc.icmptype === null) return { name, source: 'custom', portHint: `ICMP type ${a} code ${b}` };
+    if (svc.proto === 'ICMP' && svc.icmptype === null) return { name, source: 'custom', portHint: `ICMP type ${type} code ${code}` };
   }
   return null;
 }

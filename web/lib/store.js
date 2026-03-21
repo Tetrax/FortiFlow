@@ -22,7 +22,11 @@ function _save(id) {
       data:        s.data        || null,
       fortiConfig: s.fortiConfig || null,
     });
-    fs.writeFileSync(_cachePath(id), payload, 'utf8');
+    const tmp = _cachePath(id) + '.tmp';
+    fs.writeFile(tmp, payload, 'utf8', (err) => {
+      if (err) return;
+      fs.rename(tmp, _cachePath(id), () => {});
+    });
   } catch { /* ignore write errors */ }
 }
 
@@ -63,7 +67,7 @@ function evictOldest() {
   if (sessions.size < MAX_SESSIONS) return;
   let oldestId = null, oldestTime = Infinity;
   for (const [id, s] of sessions) {
-    if (s.createdAt < oldestTime) { oldestTime = s.createdAt; oldestId = id; }
+    if (s.lastAccess < oldestTime) { oldestTime = s.lastAccess; oldestId = id; }
   }
   if (oldestId) deleteSession(oldestId);
 }

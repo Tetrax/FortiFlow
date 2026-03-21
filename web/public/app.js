@@ -112,7 +112,7 @@ async function handleUpload(file) {
   el('progress-detail').textContent = 'Parse en cours…';
 
   // Suivi SSE en temps réel
-  await new Promise((resolve, reject) => {
+  const ok = await new Promise((resolve, reject) => {
     const sse = new EventSource(`/api/progress/${sessionId}`);
 
     sse.onmessage = (evt) => {
@@ -132,7 +132,9 @@ async function handleUpload(file) {
     };
 
     sse.onerror = () => { sse.close(); reject(new Error('Connexion SSE perdue')); };
-  }).catch(e => { showProgress(false); showError(e.message); return; });
+  }).then(() => true).catch(e => { showProgress(false); showError(e.message); return false; });
+
+  if (!ok) return;
 
   showProgress(false);
   updateSidebar();
@@ -2683,10 +2685,13 @@ async function deploy() {
     }
   });
 
-  // Close dropdowns on outside click
-  document.addEventListener('click', () => {
-    document.querySelectorAll('.dropdown-wrap.open').forEach(w => w.classList.remove('open'));
-  });
+  // Close dropdowns on outside click (guard: single listener)
+  if (!window._deployDropdownWired) {
+    window._deployDropdownWired = true;
+    document.addEventListener('click', () => {
+      document.querySelectorAll('.dropdown-wrap.open').forEach(w => w.classList.remove('open'));
+    });
+  }
 
   // Wizard nav buttons
   document.querySelectorAll('.wizard-next, .wizard-prev').forEach(btn => {
