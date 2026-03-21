@@ -1030,8 +1030,9 @@ function generateConfig(selectedPolicies, opts = {}) {
           if (s.addrFound) {
             allSrcNames.push(s.addrName);
           } else {
-            allSrcNames.push(s.addrName);
-            newAddresses.set(s.subnet, s.addrName);
+            const name = s.addrName || suggestAddrName(s.subnet);
+            allSrcNames.push(name);
+            newAddresses.set(s.subnet, name);
           }
         } else {
           // /32 mode: list individual hosts
@@ -1107,8 +1108,9 @@ function generateConfig(selectedPolicies, opts = {}) {
           if (s.addrFound) {
             dstNames.push(s.addrName);
           } else {
-            dstNames.push(s.addrName);
-            newAddresses.set(s.subnet, s.addrName);
+            const name = s.addrName || suggestAddrName(s.subnet);
+            dstNames.push(name);
+            newAddresses.set(s.subnet, name);
           }
         } else {
           // /32 mode: list individual hosts
