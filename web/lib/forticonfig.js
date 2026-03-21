@@ -1483,6 +1483,26 @@ function preflightValidation(selectedPolicies, config) {
   return { issues, errors, warnings, ok: errors === 0 };
 }
 
+function formatExistingPolicies(policies) {
+  if (!policies?.length) return '';
+  const lines = ['config firewall policy'];
+  for (const p of policies) {
+    lines.push(`    edit ${p.policyid}`);
+    if (p.name)  lines.push(`        set name "${p.name}"`);
+    lines.push(`        set srcintf "${(p.srcintf  || []).join('" "')}"`);
+    lines.push(`        set dstintf "${(p.dstintf  || []).join('" "')}"`);
+    lines.push(`        set srcaddr "${(p.srcaddr  || []).join('" "')}"`);
+    lines.push(`        set dstaddr "${(p.dstaddr  || []).join('" "')}"`);
+    lines.push(`        set service "${(p.service  || []).join('" "')}"`);
+    lines.push(`        set action ${p.action || 'accept'}`);
+    if (p.nat)                lines.push('        set nat enable');
+    if (p.status === 'disable') lines.push('        set status disable');
+    lines.push('    next');
+  }
+  lines.push('end');
+  return lines.join('\n');
+}
+
 module.exports = {
   parseFortiConfig,
   analyzePolicies,
@@ -1500,4 +1520,5 @@ module.exports = {
   parseOspfRoutingTable,
   parseBgpNetworkTable,
   sortRoutes,
+  formatExistingPolicies,
 };

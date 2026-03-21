@@ -1,5 +1,16 @@
 'use strict';
 
+// ─── Theme ────────────────────────────────────────────────────────────────────
+if (localStorage.theme === 'light') document.documentElement.dataset.theme = 'light';
+document.addEventListener('click', e => {
+  const btn = e.target.closest('#btn-theme');
+  if (!btn) return;
+  const isLight = document.documentElement.dataset.theme === 'light';
+  document.documentElement.dataset.theme = isLight ? '' : 'light';
+  localStorage.theme = isLight ? '' : 'light';
+  btn.textContent = isLight ? '🌙' : '☀️';
+});
+
 // ═══════════════════════════════════════════════════════════════
 // State
 // ═══════════════════════════════════════════════════════════════
@@ -111,19 +122,19 @@ async function handleUpload(file) {
 
   el('progress-detail').textContent = 'Parse en cours…';
 
-  // Suivi SSE en temps réel
+  // Suivi WebSocket en temps réel
   const ok = await new Promise((resolve, reject) => {
-    const sse = new EventSource(`/api/progress/${sessionId}`);
+    const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${wsProto}//${location.host}/ws/progress?session=${sessionId}`);
 
-    sse.onmessage = (evt) => {
+    ws.onmessage = (evt) => {
       const d = JSON.parse(evt.data);
       if (d.done) {
-        sse.close();
+        ws.close();
         if (d.error) { reject(new Error(d.error)); return; }
         state.session = sessionId;
         state.stats   = d.stats;
         state.meta    = d.meta;
-        // Barre à 100% un instant avant de fermer
         setProgressInfo({ lines: d.meta?.lineCount || 0, pct: 100, linesPerSec: 0 });
         resolve();
       } else {
@@ -131,7 +142,7 @@ async function handleUpload(file) {
       }
     };
 
-    sse.onerror = () => { sse.close(); reject(new Error('Connexion SSE perdue')); };
+    ws.onerror = () => { ws.close(); reject(new Error('Connexion WS perdue')); };
   }).then(() => true).catch(e => { showProgress(false); showError(e.message); return false; });
 
   if (!ok) return;
@@ -1845,6 +1856,28 @@ function applyObjectNames(addrMap, hostsMap, svcMap) {
 
 let _drawerMounted = false;
 let _drawerIdx = null;
+let _drawerHistory = [];
+const DRAWER_HISTORY_MAX = 10;
+
+function _snapDrawer(p) {
+  if (!p) return;
+  const snap = {};
+  const keys = ['_srcAddrName','_dstAddrName','_policyName','_srcMode','_dstMode',
+    '_use32Src','_use32Dst','_srcHostNames','_dstHostNames','_useSrcGroup','_useDstGroup',
+    '_srcintf','_dstintf','_nat','_mergeMode','_mergedSvcName','_mergeRange'];
+  for (const k of keys) {
+    if (!(k in p)) continue;
+    const v = p[k];
+    snap[k] = (v && typeof v === 'object' && !Array.isArray(v) && !(v instanceof Set) && !(v instanceof Map))
+      ? { ...v } : v;
+  }
+  snap._selectedSvcKeys  = p._selectedSvcKeys  ? new Set(p._selectedSvcKeys)  : undefined;
+  snap._analysisServices = JSON.parse(JSON.stringify(p.analysis?.services || []));
+  snap._multiSrcSubnets  = p._multiSrcSubnets  ? JSON.parse(JSON.stringify(p._multiSrcSubnets)) : undefined;
+  snap._multiDstSubnets  = p._multiDstSubnets  ? JSON.parse(JSON.stringify(p._multiDstSubnets)) : undefined;
+  if (_drawerHistory.length >= DRAWER_HISTORY_MAX) _drawerHistory.shift();
+  _drawerHistory.push({ idx: _drawerIdx, snap });
+}
 
 function mountDrawer() {
   if (_drawerMounted) return;
@@ -1865,10 +1898,43 @@ function mountDrawer() {
   overlay.addEventListener('click', closeDrawer);
   drawer.querySelector('#drawer-close').addEventListener('click', closeDrawer);
 
+  // Undo hint span (inserted between title and close button)
+  const undoHint = document.createElement('span');
+  undoHint.id = 'drawer-undo-hint';
+  undoHint.textContent = 'Ctrl+Z';
+  undoHint.style.cssText = 'font-size:10px;color:var(--text3);display:none;margin-right:8px;';
+  drawer.querySelector('.drawer-header').insertBefore(undoHint, drawer.querySelector('#drawer-close'));
+
+  // Ctrl+Z undo handler (once)
+  if (!window._undoWired) {
+    window._undoWired = true;
+    document.addEventListener('keydown', e => {
+      if (!e.ctrlKey || e.key !== 'z' || _drawerIdx === null) return;
+      e.preventDefault();
+      const last = _drawerHistory.pop();
+      if (!last) return;
+      const p = deployState.analyzed[last.idx];
+      const { _analysisServices, _selectedSvcKeys, _multiSrcSubnets, _multiDstSubnets, ...rest } = last.snap;
+      Object.assign(p, rest);
+      if (_analysisServices) p.analysis.services = _analysisServices;
+      if (_selectedSvcKeys  !== undefined) p._selectedSvcKeys  = _selectedSvcKeys;
+      if (_multiSrcSubnets  !== undefined) p._multiSrcSubnets  = _multiSrcSubnets;
+      if (_multiDstSubnets  !== undefined) p._multiDstSubnets  = _multiDstSubnets;
+      populateDrawer(last.idx);
+      syncRowStatus(last.idx);
+      renderDeployPolicies(filterDeployPolicies(), false);
+      const hint = document.getElementById('drawer-undo-hint');
+      if (hint) hint.style.display = _drawerHistory.length ? '' : 'none';
+    });
+  }
+
   // Delegated events inside drawer
   drawer.addEventListener('input', e => {
     const p = _drawerIdx !== null ? deployState.analyzed[_drawerIdx] : null;
     if (!p) return;
+    _snapDrawer(p);
+    const hint = document.getElementById('drawer-undo-hint');
+    if (hint) hint.style.display = '';
     if (e.target.matches('.drawer-src-name'))  { p._srcAddrName = e.target.value; syncInlineCell(_drawerIdx, '_srcAddrName', e.target.value); }
     if (e.target.matches('.drawer-dst-name'))  { p._dstAddrName = e.target.value; syncInlineCell(_drawerIdx, '_dstAddrName', e.target.value); }
     if (e.target.matches('.drawer-policy-name')) p._policyName = e.target.value;
@@ -1912,10 +1978,16 @@ function mountDrawer() {
   drawer.addEventListener('click', e => {
     const p = _drawerIdx !== null ? deployState.analyzed[_drawerIdx] : null;
     if (!p) return;
+    const _snapAndShow = () => {
+      _snapDrawer(p);
+      const hint = document.getElementById('drawer-undo-hint');
+      if (hint) hint.style.display = '';
+    };
     // Service selection toggle
     const svcRow = e.target.closest('.svc-selectable');
     const svcChk = e.target.matches('.svc-sel-chk') ? e.target : null;
     if (svcRow && (!e.target.matches('.drawer-svc-name'))) {
+      _snapAndShow();
       const key = svcRow.dataset.svcKey;
       if (!p._selectedSvcKeys) p._selectedSvcKeys = new Set();
       if (p._selectedSvcKeys.has(key)) p._selectedSvcKeys.delete(key);
@@ -1926,12 +1998,14 @@ function mountDrawer() {
     // Merge mode toggle (list vs range)
     const mergeTypeBtn = e.target.closest('.svc-merge-type');
     if (mergeTypeBtn) {
+      _snapAndShow();
       p._mergeMode = mergeTypeBtn.dataset.mode;
       populateDrawer(_drawerIdx);
       return;
     }
     // Do merge
     if (e.target.closest('.svc-do-merge')) {
+      _snapAndShow();
       const nameInput = document.querySelector('.svc-merge-name');
       const rangeInput = document.querySelector('.svc-merge-range');
       const mergedName = (nameInput?.value.trim()) || null;
@@ -1971,6 +2045,7 @@ function mountDrawer() {
     }
     const modeBtn = e.target.closest('.drawer-mode-btn');
     if (modeBtn) {
+      _snapAndShow();
       const type = modeBtn.dataset.type;
       const mode = modeBtn.dataset.mode;
       if (type === 'src') { p._srcMode = mode; p._use32Src = mode === 'hosts'; }
@@ -1981,6 +2056,7 @@ function mountDrawer() {
     }
     const grpBtn = e.target.closest('.drawer-grp-toggle');
     if (grpBtn) {
+      _snapAndShow();
       const type = grpBtn.dataset.type;
       if (type === 'src') p._useSrcGroup = !p._useSrcGroup;
       else p._useDstGroup = !p._useDstGroup;
@@ -1991,6 +2067,7 @@ function mountDrawer() {
     const mdBtn = e.target.closest('.drawer-multidst-mode');
     if (mdBtn) {
       e.stopPropagation();
+      _snapAndShow();
       const si = +mdBtn.dataset.si;
       if (p._multiDstSubnets?.[si]) {
         const cur = p._multiDstSubnets[si].useSubnet;
@@ -2002,6 +2079,7 @@ function mountDrawer() {
     const msBtn = e.target.closest('.drawer-multisrc-mode');
     if (msBtn) {
       e.stopPropagation();
+      _snapAndShow();
       const si = +msBtn.dataset.si;
       if (p._multiSrcSubnets?.[si]) {
         const cur = p._multiSrcSubnets[si].useSubnet;
@@ -2014,6 +2092,9 @@ function mountDrawer() {
   drawer.addEventListener('change', e => {
     const p = _drawerIdx !== null ? deployState.analyzed[_drawerIdx] : null;
     if (!p) return;
+    _snapDrawer(p);
+    const hint = document.getElementById('drawer-undo-hint');
+    if (hint) hint.style.display = '';
     if (e.target.matches('.drawer-srcintf')) { p._srcintf = e.target.value || undefined; renderDeployPolicies(filterDeployPolicies(), false); }
     if (e.target.matches('.drawer-dstintf')) { p._dstintf = e.target.value || undefined; renderDeployPolicies(filterDeployPolicies(), false); }
     if (e.target.matches('.drawer-nat')) { p._nat = e.target.checked; }
@@ -2024,6 +2105,7 @@ function mountDrawer() {
 function openDrawer(idx) {
   mountDrawer();
   _drawerIdx = idx;
+  _drawerHistory = [];
   populateDrawer(idx);
   document.getElementById('drawer-overlay').classList.add('open');
   document.getElementById('policy-drawer').classList.add('open');
@@ -2543,9 +2625,11 @@ async function deploy() {
               <span style="font-size:12px;font-weight:600">Aperçu CLI</span>
               <button class="btn-sm" id="btn-copy-cli">📋 Copier</button>
               <button class="btn-sm" id="btn-download-cli">⬇ Télécharger</button>
+              <button class="btn-sm" id="btn-diff-toggle" style="display:none">⊕ Diff</button>
               <button class="btn-sm" id="btn-cli-toggle" style="margin-left:auto">▾ Réduire</button>
             </div>
             <textarea id="deploy-cli-pre" class="deploy-cli-pre" spellcheck="false" style="width:100%;min-height:300px;resize:vertical;font-family:monospace;white-space:pre;overflow-x:auto;tab-size:2"></textarea>
+            <div id="deploy-diff-wrap" style="display:none"></div>
           </div>
         </div>
       </div>
@@ -4690,9 +4774,10 @@ async function generateDeployConf() {
       body: JSON.stringify({ selectedPolicies, opts }),
     });
     if (!r.ok) { const e = await r.json(); alert(e.error || 'Erreur génération'); return; }
-    const { cli } = await r.json();
+    const { cli, existingPoliciesCli } = await r.json();
 
-    deployState.generatedCli = cli;
+    deployState.generatedCli      = cli;
+    deployState.existingPoliciesCli = existingPoliciesCli || '';
 
     // Show inline preview
     const wrap = el('deploy-cli-wrap');
@@ -4701,6 +4786,10 @@ async function generateDeployConf() {
     if (pre)  pre.value = cli;
     if (wrap) wrap.style.display = '';
     if (info) info.textContent = `${selectedPolicies.length} policies · ${cli.split('\n').length} lignes`;
+
+    // Show diff button only if existing config available
+    const diffBtn = el('btn-diff-toggle');
+    if (diffBtn) diffBtn.style.display = existingPoliciesCli ? '' : 'none';
 
     // Sync textarea edits back to state
     pre.addEventListener('input', () => { deployState.generatedCli = pre.value; });
@@ -4728,6 +4817,33 @@ async function generateDeployConf() {
       const collapsed = p2.style.display === 'none';
       p2.style.display = collapsed ? '' : 'none';
       b.textContent = collapsed ? '▾ Réduire' : '▸ Développer';
+    });
+    el('btn-diff-toggle')?.addEventListener('click', () => {
+      const wrap = el('deploy-diff-wrap');
+      const btn  = el('btn-diff-toggle');
+      if (!wrap) return;
+      const visible = wrap.style.display !== 'none';
+      if (visible) { wrap.style.display = 'none'; btn.textContent = '⊕ Diff'; return; }
+      // Build diff
+      const genLines = (deployState.generatedCli || '').split('\n');
+      const extLines = (deployState.existingPoliciesCli || '').split('\n');
+      const extSet   = new Set(extLines);
+      const genSet   = new Set(genLines);
+      const renderPanel = (lines, refSet, label, addCls, delCls) =>
+        `<div class="diff-panel"><div class="diff-panel-header">${label}</div><div class="diff-panel-body">${
+          lines.map(l => {
+            const cls = refSet.has(l) ? 'diff-line-same' : (label === 'Généré' ? addCls : delCls);
+            return `<div class="diff-line ${cls}">${escHtml(l)}</div>`;
+          }).join('')
+        }</div></div>`;
+      const html = `<div class="diff-panel-wrap">${
+        renderPanel(extLines, genSet, 'Existant',  'diff-line-del', 'diff-line-del') +
+        renderPanel(genLines, extSet, 'Généré',    'diff-line-add', 'diff-line-add')
+      }</div>`;
+      wrap.style.display = '';
+      btn.textContent = '✕ Fermer diff';
+      // safe: only escHtml user content used
+      wrap.innerHTML = html; // nosec — content sanitized via escHtml
     });
 
     // Scroll to preview

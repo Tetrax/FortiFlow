@@ -1,9 +1,10 @@
 'use strict';
 
-const express = require('express');
-const multer  = require('multer');
-const path    = require('path');
-const fs      = require('fs');
+const express          = require('express');
+const multer           = require('multer');
+const path             = require('path');
+const fs               = require('fs');
+const { WebSocketServer } = require('ws');
 
 const { parseFile }                                      = require('./lib/parser');
 const { buildAnalysis, consolidatePolicies }             = require('./lib/analyzer');
@@ -13,7 +14,7 @@ const { parseFortiConfig, analyzePolicies,
         generateConfig, validateAgainstExisting,
         preflightValidation, detectWanCandidates,
         parseFullRoutingTable, parseOspfRoutingTable, parseBgpNetworkTable,
-        sortRoutes }                                     = require('./lib/forticonfig');
+        sortRoutes, formatExistingPolicies }             = require('./lib/forticonfig');
 
 const app  = express();
 const PORT = process.env.PORT || 3737;
@@ -662,7 +663,8 @@ app.post('/api/deploy/generate', (req, res) => {
     if (download) {
       res.send(cli);
     } else {
-      res.json({ cli, analyzed, addrGroups: s.fortiConfig.addressGroups || {}, warnings, resolvedHosts });
+      const existingPoliciesCli = formatExistingPolicies(s.fortiConfig?.existingPolicies || []);
+      res.json({ cli, analyzed, addrGroups: s.fortiConfig.addressGroups || {}, warnings, resolvedHosts, existingPoliciesCli });
     }
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -677,17 +679,53 @@ const DOMAIN = process.env.DOMAIN || 'devval.com';
 const SSL_KEY  = process.env.SSL_KEY  || `/etc/letsencrypt/live/${DOMAIN}/privkey.pem`;
 const SSL_CERT = process.env.SSL_CERT || `/etc/letsencrypt/live/${DOMAIN}/fullchain.pem`;
 
+function attachWss(server) {
+  const wss = new WebSocketServer({ noServer: true });
+  server.on('upgrade', (req, socket, head) => {
+    const url = new URL(req.url, 'http://x');
+    if (url.pathname !== '/ws/progress') { socket.destroy(); return; }
+    wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, req));
+  });
+  wss.on('connection', (ws, req) => {
+    const sessionId = new URL(req.url, 'http://x').searchParams.get('session');
+    const s = getSession(sessionId);
+    if (!s) { ws.close(4004, 'Session introuvable'); return; }
+    if (s.status === 'ready') {
+      ws.send(JSON.stringify({ done: true, stats: s.data?.stats, meta: s.data?.meta }));
+      ws.close(); return;
+    }
+    if (s.status === 'error') {
+      ws.send(JSON.stringify({ done: true, error: s.error }));
+      ws.close(); return;
+    }
+    const onProgress = d => ws.readyState === ws.OPEN && ws.send(JSON.stringify(d));
+    const onDone     = d => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ done: true, ...d })); ws.close(); };
+    const onError    = d => { if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ done: true, error: d.error })); ws.close(); };
+    s.emitter.on('progress', onProgress);
+    s.emitter.once('done',  onDone);
+    s.emitter.once('error', onError);
+    ws.on('close', () => {
+      s.emitter.off('progress', onProgress);
+      s.emitter.off('done',     onDone);
+      s.emitter.off('error',    onError);
+    });
+  });
+}
+
 if (fs.existsSync(SSL_KEY) && fs.existsSync(SSL_CERT)) {
   const sslOptions = {
     key:  fs.readFileSync(SSL_KEY),
     cert: fs.readFileSync(SSL_CERT),
   };
-  https.createServer(sslOptions, app).listen(PORT, () => {
+  const server = https.createServer(sslOptions, app);
+  attachWss(server);
+  server.listen(PORT, () => {
     console.log(`\n  FortiFlow  →  https://${DOMAIN}:${PORT}\n`);
   });
 } else {
   // Fallback HTTP si les certificats ne sont pas encore présents
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     console.log(`\n  FortiFlow  →  http://localhost:${PORT}  (HTTP — certificats SSL introuvables)\n`);
   });
+  attachWss(server);
 }

@@ -40,6 +40,27 @@
   --sidebar: 256px;
 }
 
+/* ── Light theme ─────────────────────────────────────────────────────────── */
+[data-theme="light"] {
+  --bg0:    #ffffff;
+  --bg1:    #f6f6fb;
+  --bg2:    #eeeefc;
+  --bg3:    #e6e6f5;
+  --bg4:    #dcdcf0;
+  --border:  #b8b8d8;
+  --border2: #9898c8;
+  --brand:   #cc44aa;
+  --accent:  #0066cc;
+  --accent2: #004fa8;
+  --accent3: #b85a20;
+  --success: #1a7a3c;
+  --danger:  #aa2222;
+  --warn:    #a06010;
+  --text:    #1a1a2e;
+  --text2:   #4a4a70;
+  --text3:   #8a8ab0;
+}
+
 html, body {
   height: 100%;
   background: var(--bg0);
@@ -988,6 +1009,16 @@ td.mono { font-family: var(--mono); }
 }
 .btn-accent:hover { background: var(--brand); color: #0f0f16; }
 .btn-accent:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* ── Diff panel ─────────────────────────────────────────────────────────── */
+.diff-panel-wrap { display: flex; gap: 12px; margin-top: 12px; }
+.diff-panel { flex: 1; min-width: 0; background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.diff-panel-header { padding: 6px 12px; font-size: 11px; font-weight: 600; color: var(--text2); background: var(--bg3); border-bottom: 1px solid var(--border); letter-spacing: .04em; text-transform: uppercase; }
+.diff-panel-body { overflow: auto; max-height: 420px; font-family: var(--mono); font-size: 11px; }
+.diff-line { padding: 1px 12px; white-space: pre; }
+.diff-line-add  { background: color-mix(in srgb, var(--success) 15%, transparent); color: var(--success); }
+.diff-line-del  { background: color-mix(in srgb, var(--danger)  15%, transparent); color: var(--danger);  }
+.diff-line-same { color: var(--text2); }
 
 .merge-badge {
   display: inline-block; padding: 1px 5px; border-radius: 3px;
