@@ -2,17 +2,65 @@
 
 const crypto       = require('crypto');
 const { EventEmitter } = require('events');
+const fs           = require('fs');
+const path         = require('path');
 
 const sessions = new Map();
 
+// ─── Disk cache ───────────────────────────────────────────────────────────────
+const CACHE_DIR = path.join(__dirname, '../../sessions-cache');
+fs.mkdirSync(CACHE_DIR, { recursive: true });
+
+function _cachePath(id) { return path.join(CACHE_DIR, `${id}.json`); }
+
+function _save(id) {
+  const s = sessions.get(id);
+  if (!s || s.status !== 'ready') return;
+  try {
+    const payload = JSON.stringify({
+      id, createdAt: s.createdAt, lastAccess: s.lastAccess, status: s.status,
+      data:        s.data        || null,
+      fortiConfig: s.fortiConfig || null,
+    });
+    fs.writeFileSync(_cachePath(id), payload, 'utf8');
+  } catch { /* ignore write errors */ }
+}
+
+function _loadAll() {
+  try {
+    const files = fs.readdirSync(CACHE_DIR).filter(f => f.endsWith('.json'));
+    const cutoff = Date.now() - SESSION_TTL_MS;
+    for (const f of files) {
+      try {
+        const raw = fs.readFileSync(path.join(CACHE_DIR, f), 'utf8');
+        const payload = JSON.parse(raw);
+        if (!payload.id || payload.lastAccess < cutoff) {
+          fs.unlink(path.join(CACHE_DIR, f), () => {});
+          continue;
+        }
+        sessions.set(payload.id, {
+          id:          payload.id,
+          createdAt:   payload.createdAt,
+          lastAccess:  payload.lastAccess,
+          status:      payload.status,
+          data:        payload.data,
+          fortiConfig: payload.fortiConfig,
+          error:       null,
+          emitter:     new EventEmitter(),
+          progress:    { lines: 0, linesPerSec: 0, eta: null },
+        });
+      } catch { /* skip corrupt files */ }
+    }
+  } catch { /* ignore if dir unreadable */ }
+}
+
 // ─── Limits ──────────────────────────────────────────────────────────────────
-const MAX_SESSIONS   = 10;          // max concurrent sessions
+const MAX_SESSIONS   = 10;
 const SESSION_TTL_MS = 2 * 60 * 60 * 1000;  // 2 hours
-const PURGE_INTERVAL = 10 * 60 * 1000;      // check every 10 min (was 30)
+const PURGE_INTERVAL = 10 * 60 * 1000;
 
 function evictOldest() {
   if (sessions.size < MAX_SESSIONS) return;
-  // Find oldest session and delete it
   let oldestId = null, oldestTime = Infinity;
   for (const [id, s] of sessions) {
     if (s.createdAt < oldestTime) { oldestTime = s.createdAt; oldestId = id; }
@@ -44,7 +92,12 @@ function getSession(id) {
 
 function setSessionData(id, data) {
   const s = sessions.get(id);
-  if (s) { s.data = data; s.status = 'ready'; s.lastAccess = Date.now(); }
+  if (s) { s.data = data; s.status = 'ready'; s.lastAccess = Date.now(); _save(id); }
+}
+
+function setFortiConfig(id, fortiConfig) {
+  const s = sessions.get(id);
+  if (s) { s.fortiConfig = fortiConfig; _save(id); }
 }
 
 function setSessionError(id, error) {
@@ -60,10 +113,10 @@ function deleteSession(id) {
     s.fortiConfig = null;
     sessions.delete(id);
   }
+  try { fs.unlink(_cachePath(id), () => {}); } catch { /* ignore */ }
 }
 
-// ─── Memory stats (for monitoring) ───────────────────────────────────────────
-
+// ─── Memory stats ─────────────────────────────────────────────────────────────
 function getStats() {
   return {
     sessions: sessions.size,
@@ -72,7 +125,7 @@ function getStats() {
   };
 }
 
-// ─── Periodic purge — sessions expired by TTL ────────────────────────────────
+// ─── Periodic purge ───────────────────────────────────────────────────────────
 setInterval(() => {
   const cutoff = Date.now() - SESSION_TTL_MS;
   for (const [id, s] of sessions) {
@@ -81,8 +134,12 @@ setInterval(() => {
       s.data = null;
       s.fortiConfig = null;
       sessions.delete(id);
+      try { fs.unlink(_cachePath(id), () => {}); } catch { /* ignore */ }
     }
   }
 }, PURGE_INTERVAL);
 
-module.exports = { createSession, getSession, setSessionData, setSessionError, deleteSession, getStats };
+// ─── Load persisted sessions on startup ───────────────────────────────────────
+_loadAll();
+
+module.exports = { createSession, getSession, setSessionData, setFortiConfig, setSessionError, deleteSession, getStats };

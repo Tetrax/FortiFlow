@@ -979,6 +979,15 @@ td.mono { font-family: var(--mono); }
   border-radius: var(--radius); padding: 5px 11px; font-size: 11px; cursor: pointer;
 }
 .btn-sm:hover { background: var(--bg4); }
+.btn-sm:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.btn-accent {
+  background: var(--bg3); border: 1px solid var(--brand); color: var(--brand);
+  border-radius: var(--radius); padding: 5px 14px; font-size: 11px; cursor: pointer; font-weight: 600;
+  transition: background 0.15s, color 0.15s;
+}
+.btn-accent:hover { background: var(--brand); color: #0f0f16; }
+.btn-accent:disabled { opacity: 0.45; cursor: not-allowed; }
 
 .merge-badge {
   display: inline-block; padding: 1px 5px; border-radius: 3px;

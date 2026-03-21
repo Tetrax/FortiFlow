@@ -307,11 +307,16 @@ function parseFortiConfig(text) {
   // ── Custom services ──
   const customServices = {};
   for (const [name, props] of Object.entries(rawCustomSvcs)) {
+    const proto = (props.protocol || 'TCP/UDP/SCTP').toUpperCase();
+    const icmptype = props.icmptype !== undefined && props.icmptype !== '' ? parseInt(props.icmptype, 10) : null;
+    const icmpcode = props.icmpcode !== undefined && props.icmpcode !== '' ? parseInt(props.icmpcode, 10) : null;
     customServices[name] = {
       name,
-      proto:    (props.protocol || 'TCP/UDP/SCTP').toUpperCase(),
+      proto,
       tcpPorts: parsePorts(props['tcp-portrange'] || ''),
       udpPorts: parsePorts(props['udp-portrange'] || ''),
+      icmptype,
+      icmpcode,
     };
   }
 
@@ -765,23 +770,51 @@ function validateAgainstExisting(generatedPolicies, existingPolicies) {
   return warnings;
 }
 
-function findService(port, protoName, customServices) {
+// Match an ICMP/CODE/TYPE label (FortiGate log format) against custom ICMP services
+function findIcmpService(label, customServices) {
+  const m = label.match(/^ICMP\/(\d+)\/(\d+)$/i);
+  if (!m) return null;
+  const a = parseInt(m[1], 10), b = parseInt(m[2], 10);
+  // Try both (code/type) and (type/code) orderings
+  for (const [name, svc] of Object.entries(customServices)) {
+    if (svc.proto !== 'ICMP' && svc.proto !== 'ICMP6') continue;
+    if (svc.icmptype === null) continue; // ALL_ICMP — skip for specific match
+    if (svc.icmptype === b || svc.icmptype === a) {
+      const matchedType = svc.icmptype === b ? b : a;
+      const matchedCode = svc.icmptype === b ? a : b;
+      if (svc.icmpcode !== null && svc.icmpcode !== matchedCode) continue;
+      return { name, source: 'custom', portHint: `ICMP type ${matchedType} code ${matchedCode}` };
+    }
+  }
+  // No specific match → try ALL_ICMP fallback
+  for (const [name, svc] of Object.entries(customServices)) {
+    if (svc.proto === 'ICMP' && svc.icmptype === null) return { name, source: 'custom', portHint: `ICMP type ${a} code ${b}` };
+  }
+  return null;
+}
+
+function findService(port, protoName, customServices, opts) {
   const p     = parseInt(port, 10);
   const isUdp = /^(udp|17)$/i.test(String(protoName));
+  const maxPortCount = opts?.maxPortCount || Infinity;  // skip services broader than this
 
   const matches = [];
 
   // Check predefined
   const predef = findPredefinedService(p, protoName);
-  if (predef) matches.push({ name: predef, source: 'predefined' });
+  if (predef) matches.push({ name: predef, source: 'predefined', portCount: 1 });
 
   // Check custom services from config (may be multiple)
   for (const [name, svc] of Object.entries(customServices)) {
     const ports = isUdp ? svc.udpPorts : svc.tcpPorts;
-    if (ports.includes(p)) matches.push({ name, source: 'custom' });
+    if (ports.length <= maxPortCount && ports.includes(p)) {
+      matches.push({ name, source: 'custom', portCount: ports.length });
+    }
   }
 
   if (matches.length === 0) return { found: false };
+  // Prefer most specific match (fewest ports)
+  matches.sort((a, b) => a.portCount - b.portCount);
   return { found: true, name: matches[0].name, source: matches[0].source, allMatches: matches };
 }
 
@@ -813,33 +846,75 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
       for (const svc of p.services) {
         const knownPredef = Object.values(PREDEFINED).some(e => e.name === svc);
         const customMatch = customServices[svc];
+        // Try ICMP/CODE/TYPE label matching if not directly found
+        const icmpMatch = (!knownPredef && !customMatch) ? findIcmpService(svc, customServices) : null;
+
+        // Fallback: if name-based lookup failed, try matching by port against custom services
+        let portFallback = null;
+        if (!knownPredef && !customMatch && !icmpMatch) {
+          // Port-notation label (e.g. "UDP/11436"): use the port embedded in the label
+          const pnm = svc.match(/^(TCP|UDP)\/(\d+)$/i);
+          if (pnm) {
+            const m = findService(parseInt(pnm[2], 10), pnm[1], customServices, { maxPortCount: 100 });
+            if (m.found) portFallback = m;
+          } else if (p.ports?.length === 1) {
+            // Named service (e.g. "NETBIOS-RPC"): only use p.ports when there's exactly
+            // one observed port to avoid mixing ports from different services
+            const m = findService(p.ports[0], protoLabel, customServices);
+            if (m.found) portFallback = m;
+          }
+        }
 
         // Build port hint for tooltip
         let portHint = '';
-        if (customMatch) {
-          const tcp = customMatch.tcpPorts.slice(0, 8).join(', ');
-          const udp = customMatch.udpPorts.slice(0, 8).join(', ');
-          portHint = [tcp && `TCP: ${tcp}`, udp && `UDP: ${udp}`].filter(Boolean).join(' / ');
+        if (icmpMatch) {
+          portHint = icmpMatch.portHint;
+        } else if (customMatch || portFallback) {
+          const cs = customMatch || customServices[portFallback.name];
+          if (cs && (cs.proto === 'ICMP' || cs.proto === 'ICMP6')) {
+            portHint = cs.icmptype !== null
+              ? `${cs.proto} type ${cs.icmptype}${cs.icmpcode !== null ? ` code ${cs.icmpcode}` : ''}`
+              : cs.proto;
+          } else if (cs) {
+            const tcp = cs.tcpPorts.slice(0, 8).join(', ');
+            const udp = cs.udpPorts.slice(0, 8).join(', ');
+            portHint = [tcp && `TCP: ${tcp}`, udp && `UDP: ${udp}`].filter(Boolean).join(' / ');
+          } else if (portFallback) {
+            portHint = `${protoLabel}: ${p.ports[0]} (observé)`;
+          }
         } else if (knownPredef) {
           const entries = Object.entries(PREDEFINED).filter(([, e]) => e.name === svc);
           portHint = entries.map(([port, e]) => `${e.proto === 'both' ? 'TCP+UDP' : e.proto.toUpperCase()}: ${port}`).join(', ');
-        } else if (p.ports?.length) {
-          // Inconnu — montrer les ports observés dans les logs pour ce flux
-          const proto = protoLabel;
-          portHint = p.ports.slice(0, 8).map(pt => `${proto}: ${pt}`).join(', ') + ' (observé)';
+        } else if (p.ports?.length === 1) {
+          // Only show observed port when there's exactly one — otherwise it's ambiguous
+          portHint = `${protoLabel}: ${p.ports[0]} (observé)`;
         }
 
+        const found = knownPredef || !!customMatch || !!icmpMatch || !!portFallback;
+        const resolvedName = icmpMatch ? icmpMatch.name
+          : portFallback ? portFallback.name
+          : (knownPredef || customMatch ? svc : null);
         serviceItems.push({
           label: svc,
-          found: knownPredef || !!customMatch,
-          name:  knownPredef || customMatch ? svc : null,
-          source: knownPredef ? 'predefined' : customMatch ? 'custom' : null,
-          suggestedName: svc,
+          found,
+          name:  resolvedName,
+          source: icmpMatch ? icmpMatch.source : portFallback ? portFallback.source : (knownPredef ? 'predefined' : customMatch ? 'custom' : null),
+          suggestedName: resolvedName || svc,
           isNamed: true,
           portHint,
         });
       }
     }
+    // Dédupliquer : si un label ICMP/X/Y résout vers le même nom qu'un service nommé explicite, supprimer le doublon
+    const seenNames = new Set();
+    const deduped = [];
+    for (const item of serviceItems) {
+      const key = item.name || item.label;
+      if (!seenNames.has(key)) { seenNames.add(key); deduped.push(item); }
+    }
+    serviceItems.length = 0;
+    deduped.forEach(i => serviceItems.push(i));
+
     // Fallback sur les ports bruts si aucun service nommé reconnu (ou tous ISDB)
     if (serviceItems.length === 0 && p.ports?.length) {
       for (const port of p.ports.slice(0, 10)) {
@@ -1164,7 +1239,13 @@ function generateConfig(selectedPolicies, opts = {}) {
       } else {
         const customName = p.serviceNames?.[svc.label] || svc.suggestedName;
         serviceNames.push(customName);
-        if (svc.port) {
+        if (svc.ports?.length) {
+          // Merged multi-port service
+          newServices.set(customName, { name: customName, ports: svc.ports, proto: svc.proto });
+        } else if (svc.portRange) {
+          // Range service e.g. "7000-35000"
+          newServices.set(customName, { name: customName, portRange: svc.portRange, proto: svc.proto });
+        } else if (svc.port) {
           newServices.set(`${svc.port}/${svc.proto}`, {
             name: customName, port: svc.port, proto: svc.proto,
           });
@@ -1203,6 +1284,28 @@ function generateConfig(selectedPolicies, opts = {}) {
       tags: p.tags || [],
     });
   }
+
+  // ── Sort policies: most specific first (least permissive → most permissive) ──
+  // Criteria (descending specificity):
+  //   1. Source prefix length (larger = more specific)
+  //   2. Destination prefix length (larger = more specific; "all"/public = 0)
+  //   3. Number of services (fewer = more specific)
+  const _prefixLen = (cidr) => {
+    if (!cidr || cidr === 'all') return 0;
+    const m = String(cidr).match(/\/(\d+)/);
+    return m ? parseInt(m[1], 10) : 32;
+  };
+  const _maxPrefix = (subnetStr) => {
+    if (!subnetStr) return 0;
+    return Math.max(...String(subnetStr).split(',').map(s => _prefixLen(s.trim())));
+  };
+  policyBlocks.sort((a, b) => {
+    const srcDiff = _maxPrefix(b.srcSubnet) - _maxPrefix(a.srcSubnet);
+    if (srcDiff !== 0) return srcDiff;
+    const dstDiff = _prefixLen(b.dstTarget) - _prefixLen(a.dstTarget);
+    if (dstDiff !== 0) return dstDiff;
+    return a.serviceNames.length - b.serviceNames.length;
+  });
 
   // ── Build CLI output ──
   const L = [];
@@ -1250,10 +1353,11 @@ function generateConfig(selectedPolicies, opts = {}) {
       const proto = String(svc.proto).toUpperCase();
       const isUdp = proto === 'UDP' || proto === '17';
       const isTcp = !isUdp;
+      const portrangeVal = svc.portRange || (svc.ports?.length ? svc.ports.join(' ') : String(svc.port));
       L.push(`    edit "${svc.name}"`);
       L.push(`        set protocol TCP/UDP/SCTP`);
-      if (isTcp) L.push(`        set tcp-portrange ${svc.port}`);
-      if (isUdp) L.push(`        set udp-portrange ${svc.port}`);
+      if (isTcp) L.push(`        set tcp-portrange ${portrangeVal}`);
+      if (isUdp) L.push(`        set udp-portrange ${portrangeVal}`);
       L.push(`    next`);
     }
     L.push('end');

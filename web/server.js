@@ -7,7 +7,7 @@ const fs      = require('fs');
 
 const { parseFile }                                      = require('./lib/parser');
 const { buildAnalysis, consolidatePolicies }             = require('./lib/analyzer');
-const { createSession, getSession, setSessionData,
+const { createSession, getSession, setSessionData, setFortiConfig,
         setSessionError, deleteSession, getStats }       = require('./lib/store');
 const { parseFortiConfig, analyzePolicies,
         generateConfig, validateAgainstExisting,
@@ -437,6 +437,7 @@ app.post('/api/deploy/config-upload', upload.single('conffile'), (req, res) => {
     const text = fs.readFileSync(req.file.path, 'utf8');
     const fortiConfig = parseFortiConfig(text);
     s.fortiConfig = fortiConfig;
+    setFortiConfig(s.id, fortiConfig);
 
     // Free raw flows array — no longer needed once we move to deploy stage.
     // Aggregated data (subnets, policies, stats, matrix) is kept.
@@ -594,6 +595,22 @@ app.post('/api/deploy/generate', (req, res) => {
 
     // SD-WAN zone takes priority; if none, preferredWanIntf falls to null (detectWanCandidates handles it)
     const analyzed = analyzePolicies(selectedPolicies, configToUse, o.preferredWanIntf || null);
+
+    // Inject frontend-merged services (multi-port / range) into each policy's analysis
+    for (let i = 0; i < analyzed.length; i++) {
+      const merged = selectedPolicies[i]?._mergedServices;
+      if (Array.isArray(merged) && merged.length > 0) {
+        for (const ms of merged) {
+          analyzed[i].analysis.services.push({
+            label: ms.name, found: false, name: null, source: null,
+            suggestedName: ms.name, isNamed: false,
+            proto: ms.proto, ports: ms.ports || null, portRange: ms.portRange || null,
+            _isMerged: true,
+          });
+        }
+      }
+    }
+
     const genOpts = {
       natEnabled:        o.nat     || false,
       actionVerb:        o.action  || 'accept',

@@ -1876,10 +1876,13 @@ function mountDrawer() {
       if (type === 'src') { if (!p._srcHostNames) p._srcHostNames = {}; p._srcHostNames[host] = e.target.value; }
       else { if (!p._dstHostNames) p._dstHostNames = {}; p._dstHostNames[host] = e.target.value; }
     }
+    if (e.target.matches('.svc-merge-name')) { p._mergedSvcName = e.target.value; return; }
+    if (e.target.matches('.svc-merge-range')) { p._mergeRange = e.target.value; return; }
     if (e.target.matches('.drawer-svc-name')) {
       const svcKey = e.target.dataset.svcKey;
       const svc = (p.analysis?.services || []).find(s => {
-        const k = s.isNamed ? `label:${s.label}` : `${s.port}/${s.proto}`;
+        const _m = s.label?.match(/^(TCP|UDP)\/(\d+)$/i);
+        const k = _m ? `${parseInt(_m[2],10)}/${_m[1].toUpperCase()}` : (s.isNamed ? `label:${s.label}` : `${s.port}/${s.proto}`);
         return k === svcKey;
       });
       if (svc) svc.suggestedName = e.target.value;
@@ -1907,6 +1910,63 @@ function mountDrawer() {
   drawer.addEventListener('click', e => {
     const p = _drawerIdx !== null ? deployState.analyzed[_drawerIdx] : null;
     if (!p) return;
+    // Service selection toggle
+    const svcRow = e.target.closest('.svc-selectable');
+    const svcChk = e.target.matches('.svc-sel-chk') ? e.target : null;
+    if (svcRow && (!e.target.matches('.drawer-svc-name'))) {
+      const key = svcRow.dataset.svcKey;
+      if (!p._selectedSvcKeys) p._selectedSvcKeys = new Set();
+      if (p._selectedSvcKeys.has(key)) p._selectedSvcKeys.delete(key);
+      else p._selectedSvcKeys.add(key);
+      populateDrawer(_drawerIdx);
+      return;
+    }
+    // Merge mode toggle (list vs range)
+    const mergeTypeBtn = e.target.closest('.svc-merge-type');
+    if (mergeTypeBtn) {
+      p._mergeMode = mergeTypeBtn.dataset.mode;
+      populateDrawer(_drawerIdx);
+      return;
+    }
+    // Do merge
+    if (e.target.closest('.svc-do-merge')) {
+      const nameInput = document.querySelector('.svc-merge-name');
+      const rangeInput = document.querySelector('.svc-merge-range');
+      const mergedName = (nameInput?.value.trim()) || null;
+      const mode = p._mergeMode || 'list';
+      const _gpp = s => { const m = s.label?.match(/^(TCP|UDP)\/(\d+)$/i); return m ? { port: parseInt(m[2],10), proto: m[1].toUpperCase() } : { port: s.port, proto: (s.proto||'').toUpperCase() }; };
+      const selSvcs = (p.analysis?.services || []).filter(s => { const {port,proto} = _gpp(s); return p._selectedSvcKeys?.has(`${port}/${proto}`); });
+      if (selSvcs.length < 2) return;
+      const proto = _gpp(selSvcs[0]).proto;
+      const ports = selSvcs.map(s => _gpp(s).port).sort((a, b) => a - b);
+      const portRange = mode === 'range' ? (rangeInput?.value.trim() || `${ports[0]}-${ports[ports.length-1]}`) : null;
+      const svcName = mergedName || `FF_SVC_${proto.toUpperCase()}_MULTI`;
+      // Remove individual entries, add merged
+      const remaining = (p.analysis.services).filter(s => { const {port,proto} = _gpp(s); return !p._selectedSvcKeys?.has(`${port}/${proto}`); });
+      remaining.push({
+        label: svcName,
+        found: false,
+        name: null,
+        source: null,
+        suggestedName: svcName,
+        isNamed: false,
+        proto,
+        ports: portRange ? null : ports,
+        portRange: portRange || null,
+        port: portRange ? null : ports[0],
+        portHint: portRange ? `${proto.toUpperCase()}: ${portRange}` : `${proto.toUpperCase()}: ${ports.join(', ')}`,
+        _isMerged: true,
+      });
+      p.analysis.services = remaining;
+      p._selectedSvcKeys = new Set();
+      delete p._mergedSvcName;
+      delete p._mergeMode;
+      delete p._mergeRange;
+      populateDrawer(_drawerIdx);
+      syncRowStatus(_drawerIdx);
+      renderDeployPolicies(filterDeployPolicies(), false);
+      return;
+    }
     const modeBtn = e.target.closest('.drawer-mode-btn');
     if (modeBtn) {
       const type = modeBtn.dataset.type;
@@ -2175,12 +2235,51 @@ function populateDrawer(idx) {
 
   // Services
   const svcList = a.services || [];
+  if (!p._selectedSvcKeys) p._selectedSvcKeys = new Set();
+  const selKeys = p._selectedSvcKeys;
+  // Compute merge bar state
+  const getSvcPortProto = s => { const m = s.label?.match(/^(TCP|UDP)\/(\d+)$/i); return m ? { port: parseInt(m[2],10), proto: m[1].toUpperCase() } : { port: s.port, proto: (s.proto||'').toUpperCase() }; };
+  const selectableSvcs = svcList.filter(s => { if (s.found) return false; const m = s.label?.match(/^(TCP|UDP)\/(\d+)$/i); return m || (!s.isNamed && s.port); });
+  const selectedSvcs = selectableSvcs.filter(s => { const { port, proto } = getSvcPortProto(s); return selKeys.has(`${port}/${proto}`); });
+  const canMerge = selectedSvcs.length >= 2 && new Set(selectedSvcs.map(s => getSvcPortProto(s).proto)).size === 1;
+  const mergeProto = canMerge ? getSvcPortProto(selectedSvcs[0]).proto : '';
+  const mergePorts = canMerge ? selectedSvcs.map(s => getSvcPortProto(s).port).sort((a, b) => a - b) : [];
+  const mergeRangeSuggestion = canMerge ? `${mergePorts[0]}-${mergePorts[mergePorts.length - 1]}` : '';
+  const mergeName = p._mergedSvcName || (canMerge ? `FF_SVC_${mergeProto}_MULTI` : '');
+  const mergeMode = p._mergeMode || 'list';
+  const mergeBar = canMerge ? `
+    <div class="svc-merge-bar" style="background:var(--bg3);border-radius:6px;padding:8px;margin-top:8px;display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+      <span style="font-size:11px;color:var(--text2)">${selectedSvcs.length} ports ${mergeProto} sélectionnés</span>
+      <input class="drawer-input svc-merge-name" value="${escHtml(mergeName)}" placeholder="FF_SVC_${mergeProto}_MULTI" style="width:160px;font-size:11px">
+      <button class="btn-sm svc-merge-type ${mergeMode==='list'?'active':''}" data-mode="list" style="font-size:10px">Ports individ.</button>
+      <button class="btn-sm svc-merge-type ${mergeMode==='range'?'active':''}" data-mode="range" style="font-size:10px">Range</button>
+      ${mergeMode === 'range' ? `<input class="drawer-input svc-merge-range" value="${escHtml(p._mergeRange || mergeRangeSuggestion)}" placeholder="${mergeRangeSuggestion}" style="width:100px;font-size:11px">` : `<span style="font-size:10px;color:var(--text2)">${mergePorts.join(', ')}</span>`}
+      <button class="btn-sm btn-accent svc-do-merge" style="font-size:10px">Fusionner</button>
+    </div>` : '';
   const svcsHtml = svcList.map(svc => {
     if (svc.found) return `<div class="drawer-field"><span class="drawer-field-label">${escHtml(svc.label || svc.name)}</span><span class="drawer-field-value" style="color:var(--success)" title="${escHtml(svc.portHint || '')}">&#10003; ${escHtml(svc.name)}${badgeHtml('config')}</span></div>`;
-    const svcKey = svc.isNamed ? `label:${svc.label}` : `${svc.port}/${svc.proto}`;
-    const svcAutoName = svc.isNamed ? svc.label : `FF_SVC_${svc.port}_${svc.proto}`;
+    // Detect port-notation labels like "UDP/11436" from FortiGate logs
+    const _pnm = svc.label?.match(/^(TCP|UDP)\/(\d+)$/i);
+    const svcProto = _pnm ? _pnm[1].toUpperCase() : (svc.proto || '').toUpperCase();
+    const svcPort  = _pnm ? parseInt(_pnm[2], 10) : svc.port;
+    const svcKey = _pnm ? `${svcPort}/${svcProto}` : (svc.isNamed ? `label:${svc.label}` : `${svc.port}/${svc.proto}`);
+    const isSelectable = !svc.found && (_pnm || (!svc.isNamed && svc.port));
+    const isSelected = selKeys.has(svcKey);
+    const svcAutoName = _pnm ? `FF_SVC_${svcPort}_${svcProto}` : (svc.isNamed ? svc.label : `FF_SVC_${svc.port}_${svc.proto}`);
     const svcDefaultName = svc.suggestedName || svcAutoName;
-    return `<div class="drawer-field"><span class="drawer-field-label">${escHtml(svc.label || `${svc.port}/${svc.proto}`)}</span><input class="drawer-input drawer-svc-name" data-svc-key="${escHtml(svcKey)}" value="${escHtml(inputVal(svc.suggestedName, svcAutoName))}" placeholder="${escHtml(svcDefaultName)}">${badgeHtml('auto')}</div>`;
+    // Show inline port hint only when it's precise (predefined/custom/port-notation resolved)
+    // — never when it's the raw multi-port "observé" fallback (misleading for named services)
+    const precisHint = svc.portHint && !svc.portHint.includes('observé');
+    const hintTitle = svc.portHint || '(nom issu des logs FortiGate — port/protocol non résolu dans la config chargée)';
+    const hintText = precisHint
+      ? `<span style="font-size:9px;color:var(--text2);margin-left:4px" title="${escHtml(hintTitle)}">${escHtml(svc.portHint)}</span>`
+      : '';
+    return `<div class="drawer-field${isSelectable ? ' svc-selectable' : ''}" data-svc-key="${escHtml(svcKey)}" style="cursor:${isSelectable?'pointer':'default'};${isSelected ? 'background:rgba(99,179,237,0.10);border-radius:4px;outline:1px solid var(--accent);' : ''}">
+      ${isSelectable ? `<input type="checkbox" class="svc-sel-chk" ${isSelected?'checked':''} style="margin-right:4px;cursor:pointer;flex-shrink:0">` : ''}
+      <span class="drawer-field-label" title="${escHtml(hintTitle)}">${escHtml(svc.label || `${svc.port}/${svc.proto}`)}</span>
+      ${svc.isNamed && !_pnm ? hintText : ''}
+      <input class="drawer-input drawer-svc-name" data-svc-key="${escHtml(svcKey)}" value="${escHtml(inputVal(svc.suggestedName, svcAutoName))}" placeholder="${escHtml(svcDefaultName)}" onclick="event.stopPropagation()">${badgeHtml('auto')}
+    </div>`;
   }).join('');
 
   const body = document.getElementById('drawer-body');
@@ -2199,7 +2298,7 @@ function populateDrawer(idx) {
       <div class="drawer-section-title">Interfaces destination</div>
       <div class="drawer-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-dstintf">${ifOptsDst}</select></div>
     </div>
-    ${svcList.length ? `<div class="drawer-section"><div class="drawer-section-title">Services (${svcList.length})</div>${svcsHtml}</div>` : ''}
+    ${svcList.length ? `<div class="drawer-section"><div class="drawer-section-title">Services (${svcList.length})${selectableSvcs.length > 1 ? `<span style="font-size:10px;color:var(--text2);font-weight:400;margin-left:8px">Cliquer pour sélectionner et fusionner</span>` : ''}</div>${svcsHtml}${mergeBar}</div>` : ''}
   `;
 }
 
@@ -2327,7 +2426,7 @@ async function deploy() {
                </label>`
           }
         </div>
-        ${deployState.fortiConfig ? `<div class="wizard-nav"><span></span><button class="btn-accent wizard-next" data-to="2">Suivant →</button></div>` : ''}
+        ${deployState.fortiConfig ? `<div class="wizard-nav"><span></span><button class="btn-accent wizard-next" data-to="2">Suivant ›</button></div>` : ''}
       </div>
 
       <!-- Step 2: routing table -->
@@ -2341,7 +2440,7 @@ async function deploy() {
         </div>
         <div class="wizard-nav">
           <button class="btn-sm wizard-prev" data-to="1">← Précédent</button>
-          <button class="btn-accent wizard-next" data-to="3">Suivant →</button>
+          <button class="btn-accent wizard-next" data-to="3">Suivant ›</button>
         </div>
       </div>
 
@@ -2357,7 +2456,7 @@ async function deploy() {
         </div>
         <div class="wizard-nav">
           <button class="btn-sm wizard-prev" data-to="2">← Précédent</button>
-          <button class="btn-accent wizard-next" data-to="4">Suivant →</button>
+          <button class="btn-accent wizard-next" data-to="4">Suivant ›</button>
         </div>
       </div>
 
@@ -2380,7 +2479,7 @@ async function deploy() {
               <option value="utm">log utm</option>
               <option value="disable">log disable</option>
             </select>
-            <button class="btn-accent" id="btn-analyze">Analyser les policies</button>
+            <button class="btn-accent" id="btn-analyze">⚡ Analyser les policies</button>
           </div>
         </div>
         <div class="deploy-toolbar" id="deploy-merge-bar" style="display:none">
@@ -2987,7 +3086,7 @@ function buildHostRow(h, nameMap, idx, type) {
 // Clé de service normalisée pour comparer les ensembles de services entre policies
 function serviceSetKey(p) {
   return (p.analysis?.services || [])
-    .map(s => `${s.port}/${s.proto}`)
+    .map(s => s.label || `${s.port}/${s.proto}`)
     .sort()
     .join(',');
 }
@@ -3580,7 +3679,7 @@ async function analyzeDeployPolicies() {
 
 function resetAnalyzeBtn() {
   const btn = el('btn-analyze');
-  if (btn) { btn.disabled = false; btn.textContent = 'Analyser les policies'; }
+  if (btn) { btn.disabled = false; btn.textContent = '⚡ Analyser les policies'; }
 }
 
 function suggestAddrNameFE(cidr) {
@@ -3760,9 +3859,13 @@ function isPolicyComplete(p) {
   // Destination group (addrgrp)
   if (p._useDstGroup && !p._dstAddrGrpFound && !p._dstAddrName) return false;
 
-  // Services
+  // Services — must be found, merged, or explicitly renamed by user
   for (const svc of a.services || []) {
-    if (!svc.found && !svc.suggestedName) return false;
+    if (svc.found || svc._isMerged) continue;
+    const isPortNotation = /^(TCP|UDP)\/\d+$/i.test(svc.suggestedName || '');
+    // Named service (from logs): user must have changed the name from the auto-label
+    const isUnchangedLabel = svc.isNamed && svc.suggestedName === svc.label;
+    if (!svc.suggestedName || isPortNotation || isUnchangedLabel) return false;
   }
 
   return true;
@@ -4305,8 +4408,9 @@ function renderDeployPolicies(analyzed, resetPage = true) {
       if (svc.found) {
         return `<span class="match-ok" style="font-size:10px" title="${escHtml(svc.portHint || svc.label || svc.name)}">&#10003; ${escHtml(svc.name)}${badgeHtml('config')}</span>`;
       }
-      const name = svc.suggestedName && svc.suggestedName !== (svc.isNamed ? svc.label : `FF_SVC_${svc.port}_${svc.proto}`) ? svc.suggestedName : '';
-      return `<span class="inline-editable missing" style="font-size:10px" title="${escHtml(svc.label || svc.port ? `${svc.label || svc.port}/${svc.proto}` : '')}">${name ? escHtml(name) + ' ' : ''}${badgeHtml('auto')}</span>`;
+      const customName = svc.suggestedName && svc.suggestedName !== (svc.isNamed ? svc.label : `FF_SVC_${svc.port}_${svc.proto}`) ? svc.suggestedName : '';
+      const displayName = customName || svc.label || (svc.port ? `${svc.port}/${svc.proto}` : '');
+      return `<span class="inline-editable missing" style="font-size:10px" title="${escHtml(svc.portHint || displayName)}">${displayName ? escHtml(displayName) + ' ' : ''}${badgeHtml('auto')}</span>`;
     }).join(' ');
 
     // Interfaces — read-only text, editable in drawer
@@ -4496,7 +4600,8 @@ async function generateDeployConf() {
     const aggregated = buildSequenceAggregated(selected);
     selectedPolicies = aggregated.map(p => ({
       ...p,
-      services:     (p.analysis?.services || []).filter(s => s.isNamed).map(s => s.label),
+      services:        (p.analysis?.services || []).filter(s => s.isNamed && !s._isMerged).map(s => s.label),
+      _mergedServices: (p.analysis?.services || []).filter(s => s._isMerged).map(s => ({ name: s.suggestedName, ports: s.ports || null, portRange: s.portRange || null, proto: s.proto })),
       srcintf:      p._isAggregated ? (p._srcintfList || []) : (p._srcintf || p.srcintf || ''),
       dstintf:      p._isAggregated ? (p._dstintfList || []) : (p._dstintf || p.dstintf || ''),
       srcAddrName:  p._srcAddrName,
@@ -4511,7 +4616,8 @@ async function generateDeployConf() {
       .filter((_, i) => deployState.selected.has(i) && isPolicyComplete(deployState.analyzed[i]))
       .map(p => ({
         ...p,
-        services:     (p.analysis?.services || []).filter(s => s.isNamed).map(s => s.label),
+        services:        (p.analysis?.services || []).filter(s => !s._isMerged).map(s => s.label),
+        _mergedServices: (p.analysis?.services || []).filter(s => s._isMerged).map(s => ({ name: s.suggestedName, ports: s.ports || null, portRange: s.portRange || null, proto: s.proto })),
         srcintf:      p._srcintf || p.srcintf || '',
         dstintf:      p._dstintf || p.dstintf || '',
         srcAddrName:  p._srcAddrName,
