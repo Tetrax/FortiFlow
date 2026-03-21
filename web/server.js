@@ -42,7 +42,10 @@ setInterval(() => cleanUploads(), 30 * 60 * 1000);  // periodic: files > 1h
 const upload = multer({
   storage: multer.diskStorage({
     destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
-    filename:    (_req, file, cb) => cb(null, `${Date.now()}-${file.originalname}`),
+    filename:    (_req, file, cb) => {
+      const safe = path.basename(file.originalname).replace(/[^a-zA-Z0-9._-]/g, '_');
+      cb(null, `${Date.now()}-${safe}`);
+    },
   }),
   limits: { fileSize: 400 * 1024 * 1024 },  // 400 MB
 });

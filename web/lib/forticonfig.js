@@ -163,7 +163,7 @@ const PREDEFINED = {
  389: { proto: 'tcp', name: 'LDAP'         },
  443: { proto: 'tcp', name: 'HTTPS'        },
  445: { proto: 'tcp', name: 'SMB'          },
- 465: { proto: 'tcp', name: 'SMTP'         },
+ 465: { proto: 'tcp', name: 'SMTPS'        },
  587: { proto: 'tcp', name: 'SMTP'         },
  636: { proto: 'tcp', name: 'LDAPS'        },
  993: { proto: 'tcp', name: 'IMAPS'        },
@@ -1435,8 +1435,8 @@ function preflightValidation(selectedPolicies, config) {
     const label = `Policy #${i + 1}`;
 
     // Missing interfaces
-    const srcIntf = p._srcintf || a.srcIntfName;
-    const dstIntf = p._dstintf || a.dstIntfName;
+    const srcIntf = p._srcintf || a.srcIface;
+    const dstIntf = p._dstintf || a.dstIface;
     if (!srcIntf) issues.push({ level: 'error', msg: `${label}: interface source manquante` });
     if (!dstIntf) issues.push({ level: 'error', msg: `${label}: interface destination manquante` });
     if (srcIntf && dstIntf && srcIntf === dstIntf) {

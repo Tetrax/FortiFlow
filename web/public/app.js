@@ -4062,7 +4062,7 @@ function wireDeployTable() {
     if (field.startsWith('svc_')) {
       const parts = field.split('_'); // svc_PORT_PROTO
       const policy = deployState.analyzed[+idx];
-      const svc = (policy?.services || []).find(s => String(s.port) === parts[1] && s.proto === parts[2]);
+      const svc = (policy?.analysis?.services || []).find(s => String(s.port) === parts[1] && s.proto === parts[2]);
       if (svc) svc.suggestedName = e.target.value;
     } else {
       if (deployState.analyzed[+idx]) deployState.analyzed[+idx][field] = e.target.value;
@@ -4600,7 +4600,7 @@ async function generateDeployConf() {
     const aggregated = buildSequenceAggregated(selected);
     selectedPolicies = aggregated.map(p => ({
       ...p,
-      services:        (p.analysis?.services || []).filter(s => s.isNamed && !s._isMerged).map(s => s.label),
+      services:        (p.analysis?.services || []).filter(s => !s._isMerged).map(s => s.label),
       _mergedServices: (p.analysis?.services || []).filter(s => s._isMerged).map(s => ({ name: s.suggestedName, ports: s.ports || null, portRange: s.portRange || null, proto: s.proto })),
       srcintf:      p._isAggregated ? (p._srcintfList || []) : (p._srcintf || p.srcintf || ''),
       dstintf:      p._isAggregated ? (p._dstintfList || []) : (p._dstintf || p.dstintf || ''),
