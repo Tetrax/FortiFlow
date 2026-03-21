@@ -3640,8 +3640,7 @@ function buildModePills(idx, type, currentMode, hasHosts) {
 // Build an address cell — simplified: inline-editable text (click to edit in drawer)
 function addrCell(addrAnalysis, currentName, idx, field) {
   if (!addrAnalysis?.found) {
-    const display = currentName || 'FF_...';
-    return `<span class="inline-editable missing" data-idx="${idx}" data-field="${field}" title="Cliquer pour modifier">${escHtml(display)}${badgeHtml('auto')}</span>`;
+    return `<span class="inline-editable missing" data-idx="${idx}" data-field="${field}" title="Cliquer pour modifier">${currentName ? escHtml(currentName) + ' ' : ''}${badgeHtml('auto')}</span>`;
   }
   const matches = addrAnalysis.allMatches || [{ name: addrAnalysis.name, source: addrAnalysis.source }];
   const cidrTip = addrAnalysis.cidr ? ` (${addrAnalysis.cidr})` : '';
@@ -4217,8 +4216,8 @@ function renderDeployPolicies(analyzed, resetPage = true) {
       if (svc.found) {
         return `<span class="match-ok" style="font-size:10px" title="${escHtml(svc.portHint || svc.label || svc.name)}">&#10003; ${escHtml(svc.name)}${badgeHtml('config')}</span>`;
       }
-      const name = svc.suggestedName || (svc.isNamed ? svc.label : `FF_SVC_${svc.port}_${svc.proto}`);
-      return `<span class="inline-editable missing" style="font-size:10px" title="${escHtml(svc.label || '')}">${escHtml(name)}${badgeHtml('auto')}</span>`;
+      const name = svc.suggestedName && svc.suggestedName !== (svc.isNamed ? svc.label : `FF_SVC_${svc.port}_${svc.proto}`) ? svc.suggestedName : '';
+      return `<span class="inline-editable missing" style="font-size:10px" title="${escHtml(svc.label || svc.port ? `${svc.label || svc.port}/${svc.proto}` : '')}">${name ? escHtml(name) + ' ' : ''}${badgeHtml('auto')}</span>`;
     }).join(' ');
 
     // Interfaces — read-only text, editable in drawer
