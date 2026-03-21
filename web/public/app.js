@@ -1723,8 +1723,9 @@ function collectMissingObjects() {
     // Services manquants
     for (const svc of a.services || []) {
       if (!svc.found) {
-        const key = `${svc.port}/${svc.proto}`;
-        if (!services.has(key)) services.set(key, { key, port: svc.port, proto: svc.proto, label: svc.label, name: svc.suggestedName || `FF_SVC_${svc.port}_${svc.proto}`, policyCount: 0 });
+        const key = svc.isNamed ? `label:${svc.label}` : `${svc.port}/${svc.proto}`;
+        const defaultName = svc.isNamed ? (svc.suggestedName || svc.label) : (svc.suggestedName || `FF_SVC_${svc.port}_${svc.proto}`);
+        if (!services.has(key)) services.set(key, { key, port: svc.port, proto: svc.proto, label: svc.label, name: defaultName, policyCount: 0 });
         services.get(key).policyCount++;
       }
     }
@@ -1830,7 +1831,7 @@ function applyObjectNames(addrMap, hostsMap, svcMap) {
     // Services
     for (const svc of a.services || []) {
       if (!svc.found) {
-        const key = `${svc.port}/${svc.proto}`;
+        const key = svc.isNamed ? `label:${svc.label}` : `${svc.port}/${svc.proto}`;
         if (svcMap[key]) svc.suggestedName = svcMap[key];
       }
     }
@@ -1876,8 +1877,11 @@ function mountDrawer() {
       else { if (!p._dstHostNames) p._dstHostNames = {}; p._dstHostNames[host] = e.target.value; }
     }
     if (e.target.matches('.drawer-svc-name')) {
-      const port = e.target.dataset.port, proto = e.target.dataset.proto;
-      const svc = (p.analysis?.services || []).find(s => String(s.port) === port && s.proto === proto);
+      const svcKey = e.target.dataset.svcKey;
+      const svc = (p.analysis?.services || []).find(s => {
+        const k = s.isNamed ? `label:${s.label}` : `${s.port}/${s.proto}`;
+        return k === svcKey;
+      });
       if (svc) svc.suggestedName = e.target.value;
     }
     if (e.target.matches('.drawer-multidst-name')) {
@@ -1898,6 +1902,7 @@ function mountDrawer() {
     if (e.target.matches('.drawer-src-grp-name')) {
       p._srcAddrName = e.target.value;
     }
+    syncRowStatus(_drawerIdx);
   });
   drawer.addEventListener('click', e => {
     const p = _drawerIdx !== null ? deployState.analyzed[_drawerIdx] : null;
@@ -1950,6 +1955,7 @@ function mountDrawer() {
     if (e.target.matches('.drawer-srcintf')) { p._srcintf = e.target.value || undefined; renderDeployPolicies(filterDeployPolicies(), false); }
     if (e.target.matches('.drawer-dstintf')) { p._dstintf = e.target.value || undefined; renderDeployPolicies(filterDeployPolicies(), false); }
     if (e.target.matches('.drawer-nat')) { p._nat = e.target.checked; }
+    syncRowStatus(_drawerIdx);
   });
 }
 
@@ -1974,6 +1980,7 @@ function closeDrawer() {
 function syncInlineCell(idx, field, value) {
   const cell = document.querySelector(`.inline-editable[data-idx="${idx}"][data-field="${field}"]`);
   if (cell) cell.textContent = value || '—';
+  syncRowStatus(idx);
 }
 
 function populateDrawer(idx) {
@@ -2165,7 +2172,9 @@ function populateDrawer(idx) {
   const svcList = a.services || [];
   const svcsHtml = svcList.map(svc => {
     if (svc.found) return `<div class="drawer-field"><span class="drawer-field-label">${escHtml(svc.label || svc.name)}</span><span class="drawer-field-value" style="color:var(--success)" title="${escHtml(svc.portHint || '')}">&#10003; ${escHtml(svc.name)}${badgeHtml('config')}</span></div>`;
-    return `<div class="drawer-field"><span class="drawer-field-label">${escHtml(svc.label || `${svc.port}/${svc.proto}`)}</span><input class="drawer-input drawer-svc-name" data-port="${svc.port}" data-proto="${svc.proto}" value="${escHtml(svc.suggestedName || '')}" placeholder="FF_SVC_...">${badgeHtml('auto')}</div>`;
+    const svcKey = svc.isNamed ? `label:${svc.label}` : `${svc.port}/${svc.proto}`;
+    const svcDefaultName = svc.isNamed ? (svc.suggestedName || svc.label) : (svc.suggestedName || `FF_SVC_${svc.port}_${svc.proto}`);
+    return `<div class="drawer-field"><span class="drawer-field-label">${escHtml(svc.label || `${svc.port}/${svc.proto}`)}</span><input class="drawer-input drawer-svc-name" data-svc-key="${escHtml(svcKey)}" value="${escHtml(svcDefaultName)}" placeholder="FF_SVC_...">${badgeHtml('auto')}</div>`;
   }).join('');
 
   const body = document.getElementById('drawer-body');
@@ -3690,6 +3699,53 @@ function policyIdsCell(p) {
   return shown.map(id => `<span class="policy-id-badge" ${tip ? `title="${escHtml(tip)}"` : ''}>${escHtml(id)}</span>`).join(' ') + more;
 }
 
+function isPolicyComplete(p) {
+  const a = p.analysis || {};
+
+  // Source
+  if (p._multiSrcSubnets?.length) {
+    for (const s of p._multiSrcSubnets) {
+      if (s.useSubnet !== false && !s.addrFound && !s.addrName) return false;
+    }
+  } else if (p._srcMode === 'hosts' || p._use32Src) {
+    const foundSet = new Set(p._srcHostsFound || []);
+    for (const h of (p.srcHosts || [])) {
+      if (!foundSet.has(h) && !(p._srcHostNames?.[h])) return false;
+    }
+  } else {
+    if (!a.srcAddr?.found && !p._srcAddrName) return false;
+  }
+
+  // Destination
+  if (p._isMultiDst && p._multiDstSubnets?.length) {
+    for (const s of p._multiDstSubnets) {
+      if (s.useSubnet !== false && !s.addrFound && !s.addrName) return false;
+    }
+  } else if (p._dstMode === 'hosts' || p._use32Dst) {
+    const foundSet = new Set(p._dstHostsFound || []);
+    for (const h of (p.dstHosts || [])) {
+      if (!foundSet.has(h) && !(p._dstHostNames?.[h])) return false;
+    }
+  } else if (p.dstType !== 'public') {
+    if (!a.dstAddr?.found && !p._dstAddrName) return false;
+  }
+
+  // Services
+  for (const svc of a.services || []) {
+    if (!svc.found && !svc.suggestedName) return false;
+  }
+
+  return true;
+}
+
+function syncRowStatus(idx) {
+  const p = deployState.analyzed?.[idx];
+  if (!p) return;
+  const bar = document.querySelector(`.deploy-policy-row[data-idx="${idx}"] .status-bar`);
+  if (!bar) return;
+  bar.className = `status-bar status-${isPolicyComplete(p) ? 'ok' : (p.analysis?.status || 'warn')}`;
+}
+
 function countMissingObjects(analyzed) {
   const addrs = new Set(), svcs = new Set();
   for (const p of analyzed) {
@@ -4158,7 +4214,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
       if (svc.found) {
         return `<span class="match-ok" style="font-size:10px" title="${escHtml(svc.portHint || svc.label || svc.name)}">&#10003; ${escHtml(svc.name)}${badgeHtml('config')}</span>`;
       }
-      const name = svc.suggestedName || `FF_SVC_${svc.port}_${svc.proto}`;
+      const name = svc.suggestedName || (svc.isNamed ? svc.label : `FF_SVC_${svc.port}_${svc.proto}`);
       return `<span class="inline-editable missing" style="font-size:10px" title="${escHtml(svc.label || '')}">${escHtml(name)}${badgeHtml('auto')}</span>`;
     }).join(' ');
 
@@ -4204,7 +4260,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     const srcMode = p._srcMode || (p._use32Src ? 'hosts' : 'subnet');
     const srcModeBadge = srcMode === 'hosts' ? ` <span class="dst-count-badge">/32</span>` : '';
 
-    const rowStatus = p.analysis?.status || 'warn';
+    const rowStatus = isPolicyComplete(p) ? 'ok' : (p.analysis?.status || 'warn');
     const statusTitle = (p.analysis?.missingFields || []).join(', ') || '';
     return `
       <tr class="deploy-policy-row ${isAgg ? 'seq-row' : ''}" data-idx="${idx}" ${isAgg ? `data-seq-members="${p._sequenceMembers.join(',')}"` : ''}>

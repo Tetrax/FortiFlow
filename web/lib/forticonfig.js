@@ -829,14 +829,11 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
           portHint = p.ports.slice(0, 8).map(pt => `${proto}: ${pt}`).join(', ') + ' (observé)';
         }
 
-        // Ignorer les services ISDB (ni predefined ni custom) — on ne garde
-        // que les vrais services avec port/proto connu
-        if (!knownPredef && !customMatch) continue;
         serviceItems.push({
           label: svc,
-          found: true,
-          name:  svc,
-          source: knownPredef ? 'predefined' : 'custom',
+          found: knownPredef || !!customMatch,
+          name:  knownPredef || customMatch ? svc : null,
+          source: knownPredef ? 'predefined' : customMatch ? 'custom' : null,
           suggestedName: svc,
           isNamed: true,
           portHint,
