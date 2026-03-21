@@ -4314,9 +4314,12 @@ function renderDeployPolicies(analyzed, resetPage = true) {
   // so that data-idx always references the correct policy in the full array
   const maxSessions = displayList.reduce((m, pp) => Math.max(m, pp.sessions || 0), 1);
 
+  // Pre-build index map to avoid O(n²) indexOf in buildRow
+  const policyIndexMap = new Map(deployState.analyzed.map((p, i) => [p, i]));
+
   function buildRow(p) {
     const isAgg = p._isAggregated;
-    const idx = isAgg ? (p._sequenceMembers?.[0] ?? -1) : deployState.analyzed.indexOf(p);
+    const idx = isAgg ? (p._sequenceMembers?.[0] ?? -1) : (policyIndexMap.get(p) ?? -1);
 
     // Checkbox
     const chkChecked = isAgg
@@ -4513,8 +4516,6 @@ function renderDeployPolicies(analyzed, resetPage = true) {
       <button class="deploy-pg-btn pg-last"  ${page === pages ? 'disabled' : ''}>»</button>
     </div>` : '';
 
-  const { addrs: missingAddrs, svcs: missingSvcs } = countMissingObjects(analyzed);
-
   // (adaptive column flags computed above as allSrcAutoFlag / allDstAutoFlag)
 
   const body = el('deploy-policy-body');
@@ -4576,7 +4577,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
       if (p._isAggregated && p._sequenceMembers) {
         pageIdxs.push(...p._sequenceMembers);
       } else {
-        pageIdxs.push(deployState.analyzed.indexOf(p));
+        pageIdxs.push(policyIndexMap.get(p) ?? -1);
       }
     }
     chkAll.checked = pageIdxs.every(i => deployState.selected.has(i));
