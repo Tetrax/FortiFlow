@@ -1996,6 +1996,9 @@ function populateDrawer(idx) {
   const ifOptsDst = (deployState.ifaceOpts || []).map(o =>
     `<option value="${escHtml(o.value)}" ${(o.value === (p._dstintf || '')) ? 'selected' : ''}>${escHtml(o.label)}</option>`
   ).join('');
+  const pid0 = (p.policyIds || [])[0] || idx;
+  const suggestedSrcGrp = `FF_POLICY_${pid0}_SRC`;
+  const suggestedDstGrp = `GRP_${pid0}_DST`;
 
   const srcMode = p._srcMode || (p._use32Src ? 'hosts' : 'subnet');
   const dstMode = p._dstMode || (p._use32Dst ? 'hosts' : 'subnet');
@@ -2044,7 +2047,7 @@ function populateDrawer(idx) {
         <button class="drawer-toggle-btn drawer-grp-toggle ${p._useSrcGroup ? 'active' : ''}" data-type="src">Grouper (addrgrp)</button>
         ${p._useSrcGroup ? (p._srcAddrGrpFound
           ? `<span style="color:var(--success);font-size:11px" title="${escHtml(srcSubs.map(s => s.subnet).join(', '))}">&#10003; ${escHtml(p._srcAddrName)}</span>`
-          : `<input class="drawer-input drawer-src-grp-name" value="${escHtml(p._srcAddrName || '')}" placeholder="GRP_SRC_..." style="width:160px">`)
+          : `<input class="drawer-input drawer-src-grp-name" value="${escHtml(p._srcAddrName || '')}" placeholder="${escHtml(suggestedSrcGrp)}" style="width:160px">`)
           : ''}
       </div>
       <div class="drawer-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-srcintf">${ifOpts}</select></div>
@@ -2070,7 +2073,7 @@ function populateDrawer(idx) {
           <button class="drawer-toggle-btn drawer-grp-toggle ${p._useSrcGroup ? 'active' : ''}" data-type="src">Grouper (addrgrp)</button>
           ${p._useSrcGroup ? (srcGrpFound
             ? `<span style="color:var(--success);font-size:11px" title="${escHtml(srcHosts.map(h => h + '/32').join(', '))}">&#10003; ${escHtml(p._srcAddrName)}</span>`
-            : `<input class="drawer-input drawer-src-grp-name" value="${escHtml(p._srcAddrName || '')}" placeholder="GRP_SRC_..." style="width:160px">`)
+            : `<input class="drawer-input drawer-src-grp-name" value="${escHtml(p._srcAddrName || '')}" placeholder="${escHtml(suggestedSrcGrp)}" style="width:160px">`)
             : ''}
         </div>`;
       }
@@ -2129,7 +2132,7 @@ function populateDrawer(idx) {
         <button class="drawer-toggle-btn drawer-grp-toggle ${p._useDstGroup ? 'active' : ''}" data-type="dst">Grouper (addrgrp)</button>
         ${p._useDstGroup ? (p._dstAddrGrpFound
           ? `<span style="color:var(--success);font-size:11px" title="${escHtml(subs.map(s => s.subnet).join(', '))}">&#10003; ${escHtml(p._dstAddrName)}</span>`
-          : `<input class="drawer-input drawer-grp-name" value="${escHtml(p._dstAddrName || '')}" placeholder="GRP_..." style="width:160px">`)
+          : `<input class="drawer-input drawer-grp-name" value="${escHtml(p._dstAddrName || '')}" placeholder="${escHtml(suggestedDstGrp)}" style="width:160px">`)
           : ''}
       </div>
     </div>`;
@@ -3132,7 +3135,7 @@ function mergeByPolicyId(policies) {
           _use32Src: allSrcHosts.length >= 1 && allSrcHosts.length <= AUTO32_THRESHOLD,
           _use32Dst: false, _mergedCount: ifGroup.length, _isWan: isWan, _nat: isWan,
           _srcAddrName: base._srcAddrName || '',
-          _dstAddrName: existingDstGrp1 || `GRP_${policyId}_DST`,
+          _dstAddrName: existingDstGrp1 || '',
           _dstAddrGrpFound: !!existingDstGrp1,
           _useDstGroup: !!existingDstGrp1,
           _useSrcGroup: false,
@@ -3207,7 +3210,7 @@ function mergeByPolicyId(policies) {
           const srcAddr = subnetPols.find(pp => pp.analysis?.srcAddr?.found)?.analysis?.srcAddr
                         || subnetPols[0]?.analysis?.srcAddr;
           return {
-            subnet, hosts, useSubnet: true,
+            subnet, hosts, useSubnet: hosts.length >= 5,
             addrName: srcAddr?.found ? srcAddr.name : '',
             addrFound: !!(srcAddr?.found),
           };
@@ -3283,10 +3286,10 @@ function mergeByPolicyId(policies) {
           _mergedCount:     subGroup.length,
           _isWan:           false,
           _nat:             false,
-          _srcAddrName:     existingGrp || (multiSrc ? `FF_POLICY_${policyId}_SRC` : (base._srcAddrName || '')),
+          _srcAddrName:     existingGrp || '',
           _srcAddrGrpFound: !!existingGrp,
           _useSrcGroup:     !!existingGrp,
-          _dstAddrName:     existingDstGrp || `GRP_${policyId}_DST`,
+          _dstAddrName:     existingDstGrp || '',
           _dstAddrGrpFound: !!existingDstGrp,
           _useDstGroup:     !!existingDstGrp,
           _policyName:      '',
@@ -3321,7 +3324,7 @@ function mergeByPolicyId(policies) {
         _mergedCount: subGroup.length,
         _isWan:       isWan,
         _nat:         isWan,
-        _srcAddrName: existingGrp || (multiSrc ? `FF_POLICY_${policyId}_SRC` : (base._srcAddrName || '')),
+        _srcAddrName: existingGrp || '',
         _srcAddrGrpFound: !!existingGrp,
         _useSrcGroup:     !!existingGrp,
         _multiSrcSubnets: multiSrcSubnets,
@@ -3640,7 +3643,8 @@ function buildModePills(idx, type, currentMode, hasHosts) {
 // Build an address cell — simplified: inline-editable text (click to edit in drawer)
 function addrCell(addrAnalysis, currentName, idx, field) {
   if (!addrAnalysis?.found) {
-    return `<span class="inline-editable missing" data-idx="${idx}" data-field="${field}" title="Cliquer pour modifier">${currentName ? escHtml(currentName) + ' ' : ''}${badgeHtml('auto')}</span>`;
+    const displayName = currentName || addrAnalysis?.suggestedName || '';
+    return `<span class="inline-editable missing" data-idx="${idx}" data-field="${field}" title="Cliquer pour modifier">${displayName ? escHtml(displayName) + ' ' : ''}${badgeHtml('auto')}</span>`;
   }
   const matches = addrAnalysis.allMatches || [{ name: addrAnalysis.name, source: addrAnalysis.source }];
   const cidrTip = addrAnalysis.cidr ? ` (${addrAnalysis.cidr})` : '';
@@ -3704,10 +3708,21 @@ function policyIdsCell(p) {
 function isPolicyComplete(p) {
   const a = p.analysis || {};
 
-  // Source
+  // Interfaces must be explicitly selected
+  if (!p._srcintf) return false;
+  if (!p._dstintf) return false;
+
+  // Source addresses / hosts
   if (p._multiSrcSubnets?.length) {
+    const srcFoundSet = new Set(p._srcHostsFound || []);
     for (const s of p._multiSrcSubnets) {
-      if (s.useSubnet !== false && !s.addrFound && !s.addrName) return false;
+      if (s.useSubnet !== false) {
+        if (!s.addrFound && !s.addrName) return false;
+      } else {
+        for (const h of (s.hosts || [])) {
+          if (!srcFoundSet.has(h) && !(p._srcHostNames?.[h])) return false;
+        }
+      }
     }
   } else if (p._srcMode === 'hosts' || p._use32Src) {
     const foundSet = new Set(p._srcHostsFound || []);
@@ -3718,10 +3733,20 @@ function isPolicyComplete(p) {
     if (!a.srcAddr?.found && !p._srcAddrName) return false;
   }
 
-  // Destination
+  // Source group (addrgrp): if active and not already found, must have a typed name
+  if (p._useSrcGroup && !p._srcAddrGrpFound && !p._srcAddrName) return false;
+
+  // Destination addresses / hosts
   if (p._isMultiDst && p._multiDstSubnets?.length) {
+    const dstFoundSet = new Set(p._dstHostsFound || []);
     for (const s of p._multiDstSubnets) {
-      if (s.useSubnet !== false && !s.addrFound && !s.addrName) return false;
+      if (s.useSubnet !== false) {
+        if (!s.addrFound && !s.addrName) return false;
+      } else {
+        for (const h of (s.hosts || [])) {
+          if (!dstFoundSet.has(h) && !(p._dstHostNames?.[h])) return false;
+        }
+      }
     }
   } else if (p._dstMode === 'hosts' || p._use32Dst) {
     const foundSet = new Set(p._dstHostsFound || []);
@@ -3731,6 +3756,9 @@ function isPolicyComplete(p) {
   } else if (p.dstType !== 'public') {
     if (!a.dstAddr?.found && !p._dstAddrName) return false;
   }
+
+  // Destination group (addrgrp)
+  if (p._useDstGroup && !p._dstAddrGrpFound && !p._dstAddrName) return false;
 
   // Services
   for (const svc of a.services || []) {
@@ -4193,9 +4221,41 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     // Src addr — simplified inline-editable
     let srcAddrCell;
     if (p.srcSubnets && p.srcSubnets.length > 1) {
-      srcAddrCell = p._srcAddrGrpFound
-        ? `<span class="inline-editable found" data-idx="${idx}" data-field="_srcAddrName">${escHtml(p._srcAddrName)}</span>`
-        : `<span class="inline-editable missing" data-idx="${idx}" data-field="_srcAddrName">${escHtml(p._srcAddrName)}</span>`;
+      if (p._useSrcGroup) {
+        // Group mode: show group name
+        const srcGrpDisplay = p._srcAddrName || `FF_POLICY_${(p.policyIds||[])[0] || idx}_SRC`;
+        srcAddrCell = p._srcAddrGrpFound
+          ? `<span class="inline-editable found" data-idx="${idx}" data-field="_srcAddrName">${escHtml(p._srcAddrName)}</span>`
+          : `<span class="inline-editable missing" data-idx="${idx}" data-field="_srcAddrName">${escHtml(srcGrpDisplay)} ${badgeHtml('auto')}</span>`;
+      } else {
+        // No group: show individual subnet names / host counts
+        const subs = p._multiSrcSubnets || [];
+        const srcFoundSet = new Set(p._srcHostsFound || []);
+        const allDone = subs.every(s => {
+          if (s.useSubnet !== false) return s.addrFound || !!s.addrName;
+          return (s.hosts || []).every(h => srcFoundSet.has(h) || !!(p._srcHostNames?.[h]));
+        });
+        const names = subs.map(s => {
+          if (s.useSubnet !== false) return s.addrName || s.subnet;
+          const srcFoundSet2 = new Set(p._srcHostsFound || []);
+          return (s.hosts || []).map(h => {
+            if (srcFoundSet2.has(h)) return (p._srcHostNames?.[h]) || h;
+            return (p._srcHostNames?.[h]) || h;
+          }).join(', ');
+        }).join(', ');
+        srcAddrCell = allDone
+          ? `<span class="inline-editable found" data-idx="${idx}" data-field="_srcAddrName" title="${escHtml(names)}">${escHtml(names)}</span>`
+          : `<span class="inline-editable missing" data-idx="${idx}" data-field="_srcAddrName" title="${escHtml(names)}">${escHtml(names)} ${badgeHtml('auto')}</span>`;
+      }
+    } else if ((p._srcMode === 'hosts' || p._use32Src) && p.srcHosts?.length) {
+      // /32 hosts mode (single src): show host names
+      const hFoundSet = new Set(p._srcHostsFound || []);
+      const hNames = p.srcHosts.map(h => (p._srcHostNames?.[h]) || (hFoundSet.has(h) ? h : h));
+      const allNamed = p.srcHosts.every(h => hFoundSet.has(h) || !!(p._srcHostNames?.[h]));
+      const hDisplay = hNames.join(', ');
+      srcAddrCell = allNamed
+        ? `<span class="inline-editable found" data-idx="${idx}" data-field="_srcAddrName" title="${escHtml(hDisplay)}">${escHtml(hDisplay)}</span>`
+        : `<span class="inline-editable missing" data-idx="${idx}" data-field="_srcAddrName" title="${escHtml(hDisplay)}">${escHtml(hDisplay)} ${badgeHtml('auto')}</span>`;
     } else {
       srcAddrCell = addrCell(p.analysis?.srcAddr, p._srcAddrName, idx, '_srcAddrName');
     }
@@ -4204,8 +4264,37 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     const _dstModeResolved = p._dstMode || (p._use32Dst ? 'hosts' : 'subnet');
     let dstAddrCell;
     if (_dstModeResolved === 'hosts' && (p.dstHosts || []).length > 0) {
-      const count = p.dstHosts.length;
-      dstAddrCell = `<span class="inline-editable found" data-idx="${idx}" data-field="_dstAddrName" title="${count} hôtes /32">${count} hôtes /32</span>`;
+      const dhFoundSet = new Set(p._dstHostsFound || []);
+      const dhNames = p.dstHosts.map(h => (p._dstHostNames?.[h]) || (dhFoundSet.has(h) ? h : h));
+      const dhAllNamed = p.dstHosts.every(h => dhFoundSet.has(h) || !!(p._dstHostNames?.[h]));
+      const dhDisplay = dhNames.join(', ');
+      dstAddrCell = dhAllNamed
+        ? `<span class="inline-editable found" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(dhDisplay)}">${escHtml(dhDisplay)}</span>`
+        : `<span class="inline-editable missing" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(dhDisplay)}">${escHtml(dhDisplay)} ${badgeHtml('auto')}</span>`;
+    } else if (p._isMultiDst && p._multiDstSubnets?.length) {
+      if (p._useDstGroup) {
+        const dstGrpDisplay = p._dstAddrName || `GRP_${(p.policyIds||[])[0] || idx}_DST`;
+        dstAddrCell = p._dstAddrGrpFound
+          ? `<span class="inline-editable found" data-idx="${idx}" data-field="_dstAddrName">${escHtml(p._dstAddrName)}</span>`
+          : `<span class="inline-editable missing" data-idx="${idx}" data-field="_dstAddrName">${escHtml(dstGrpDisplay)} ${badgeHtml('auto')}</span>`;
+      } else {
+        const subs = p._multiDstSubnets;
+        const dstFoundSet = new Set(p._dstHostsFound || []);
+        const allDone = subs.every(s => {
+          if (s.useSubnet !== false) return s.addrFound || !!s.addrName;
+          return (s.hosts || []).every(h => dstFoundSet.has(h) || !!(p._dstHostNames?.[h]));
+        });
+        const names = subs.map(s => {
+          if (s.useSubnet !== false) return s.addrName || s.subnet;
+          const dstFoundSet2 = new Set(p._dstHostsFound || []);
+          return (s.hosts || []).map(h => {
+            return (p._dstHostNames?.[h]) || (dstFoundSet2.has(h) ? h : h);
+          }).join(', ');
+        }).join(', ');
+        dstAddrCell = allDone
+          ? `<span class="inline-editable found" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(names)}">${escHtml(names)}</span>`
+          : `<span class="inline-editable missing" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(names)}">${escHtml(names)} ${badgeHtml('auto')}</span>`;
+      }
     } else {
       dstAddrCell = addrCell(p.analysis?.dstAddr, p._dstAddrName, idx, '_dstAddrName');
     }
@@ -4403,10 +4492,11 @@ async function generateDeployConf() {
   let selectedPolicies;
   if (deployState.viewMode === 'sequence') {
     // In sequence mode, aggregate selected policies before sending
-    const selected = deployState.analyzed.filter((_, i) => deployState.selected.has(i));
+    const selected = deployState.analyzed.filter((_, i) => deployState.selected.has(i) && isPolicyComplete(deployState.analyzed[i]));
     const aggregated = buildSequenceAggregated(selected);
     selectedPolicies = aggregated.map(p => ({
       ...p,
+      services:     (p.analysis?.services || []).filter(s => s.isNamed).map(s => s.label),
       srcintf:      p._isAggregated ? (p._srcintfList || []) : (p._srcintf || p.srcintf || ''),
       dstintf:      p._isAggregated ? (p._dstintfList || []) : (p._dstintf || p.dstintf || ''),
       srcAddrName:  p._srcAddrName,
@@ -4418,9 +4508,10 @@ async function generateDeployConf() {
     }));
   } else {
     selectedPolicies = deployState.analyzed
-      .filter((_, i) => deployState.selected.has(i))
+      .filter((_, i) => deployState.selected.has(i) && isPolicyComplete(deployState.analyzed[i]))
       .map(p => ({
         ...p,
+        services:     (p.analysis?.services || []).filter(s => s.isNamed).map(s => s.label),
         srcintf:      p._srcintf || p.srcintf || '',
         dstintf:      p._dstintf || p.dstintf || '',
         srcAddrName:  p._srcAddrName,
@@ -4432,7 +4523,17 @@ async function generateDeployConf() {
       }));
   }
 
-  if (!selectedPolicies.length) { alert('Sélectionnez au moins une policy'); return; }
+  const skippedCount = deployState.analyzed.filter((_, i) => deployState.selected.has(i) && !isPolicyComplete(deployState.analyzed[i])).length;
+  if (!selectedPolicies.length) {
+    alert(skippedCount > 0
+      ? `Aucune policy complète à générer.\n${skippedCount} policy${skippedCount > 1 ? 's' : ''} incomplète${skippedCount > 1 ? 's' : ''} ignorée${skippedCount > 1 ? 's' : ''} (badge rouge/orange sur la gauche).`
+      : 'Sélectionnez au moins une policy');
+    return;
+  }
+  if (skippedCount > 0) {
+    const proceed = confirm(`${skippedCount} policy${skippedCount > 1 ? 's' : ''} incomplète${skippedCount > 1 ? 's' : ''} ignorée${skippedCount > 1 ? 's' : ''} (badge non vert).\n${selectedPolicies.length} policy${selectedPolicies.length > 1 ? 's' : ''} complète${selectedPolicies.length > 1 ? 's' : ''} seront générées.\n\nContinuer ?`);
+    if (!proceed) return;
+  }
 
   // Security profiles from dropdowns
   const securityProfiles = {};
