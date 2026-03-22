@@ -791,6 +791,58 @@ function findIcmpService(label, customServices) {
   return null;
 }
 
+// Fuzzy name match: find a service by label similarity (prefix/contains) + observed ports filter
+function findServiceByName(label, observedPorts, protoName, customServices) {
+  // Never fuzzy-match port-notation labels — they have their own resolution path
+  if (/^(TCP|UDP)\/\d+$/i.test(label)) return null;
+  const norm = label.toLowerCase().replace(/[-_\s]/g, '');
+
+  // 1. Case-insensitive exact match in custom services
+  for (const [name, cs] of Object.entries(customServices)) {
+    if (name.toLowerCase() === label.toLowerCase()) {
+      const tcp = (cs.tcpPorts || []).slice(0, 8).join(', ');
+      const udp = (cs.udpPorts || []).slice(0, 8).join(', ');
+      const portHint = [tcp && `TCP: ${tcp}`, udp && `UDP: ${udp}`].filter(Boolean).join(' / ') || null;
+      return { found: true, name, source: 'custom', portHint };
+    }
+  }
+
+  // 2. Prefix match in PREDEFINED names (e.g. "NETBIOS" matches "NetBIOS_NS", "NetBIOS_DS")
+  const predefCandidates = [];
+  for (const [port, entry] of Object.entries(PREDEFINED)) {
+    const en = entry.name.toLowerCase().replace(/[-_\s]/g, '');
+    const minLen = Math.max(5, Math.min(norm.length, en.length) - 2);
+    if ((en.startsWith(norm) || norm.startsWith(en)) && norm.length >= 5 && en.length >= 5) {
+      predefCandidates.push({ port: parseInt(port, 10), proto: entry.proto, name: entry.name });
+    }
+  }
+  if (predefCandidates.length > 0) {
+    // Filter by observed ports if available
+    const byPort = observedPorts?.length
+      ? predefCandidates.filter(c => observedPorts.includes(c.port))
+      : predefCandidates;
+    const pool = byPort.length > 0 ? byPort : predefCandidates;
+    // Accept if all matching entries point to the same root name (e.g. NetBIOS_NS / NetBIOS_DS → "NetBIOS")
+    const roots = [...new Set(pool.map(c => c.name.replace(/[-_][A-Z0-9]+$/i, '')))];
+    if (roots.length === 1) {
+      // Pick the one whose port is most observed, or just the first
+      const best = byPort[0] || pool[0];
+      const portHint = pool.map(c => `${c.proto.toUpperCase()}: ${c.port}`).join(', ');
+      return { found: true, name: best.name, source: 'predefined', portHint };
+    }
+  }
+
+  // 3. Prefix match in custom service names (min 5 chars)
+  for (const [name, cs] of Object.entries(customServices)) {
+    const cn = name.toLowerCase().replace(/[-_\s]/g, '');
+    if ((cn.startsWith(norm) || norm.startsWith(cn)) && norm.length >= 5 && cn.length >= 5) {
+      return { found: true, name, source: 'custom', portHint: null };
+    }
+  }
+
+  return null;
+}
+
 function findService(port, protoName, customServices, opts) {
   const p     = parseInt(port, 10);
   const isUdp = /^(udp|17)$/i.test(String(protoName));
@@ -847,19 +899,31 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
         // Try ICMP/CODE/TYPE label matching if not directly found
         const icmpMatch = (!knownPredef && !customMatch) ? findIcmpService(svc, customServices) : null;
 
+        // Fuzzy name match (e.g. "NETBIOS" → "NetBIOS_NS" / "NetBIOS_DS")
+        // Skip port-notation labels (e.g. "TCP/853") — they use the port-based fallback path
+        const isPortNotationLabel = /^(TCP|UDP)\/\d+$/i.test(svc);
+        const fuzzyMatch = (!knownPredef && !customMatch && !icmpMatch && !isPortNotationLabel)
+          ? findServiceByName(svc, p.ports, protoLabel, customServices)
+          : null;
+
         // Fallback: if name-based lookup failed, try matching by port against custom services
         let portFallback = null;
-        if (!knownPredef && !customMatch && !icmpMatch) {
+        if (!knownPredef && !customMatch && !icmpMatch && !fuzzyMatch) {
           // Port-notation label (e.g. "UDP/11436"): use the port embedded in the label
           const pnm = svc.match(/^(TCP|UDP)\/(\d+)$/i);
           if (pnm) {
             const m = findService(parseInt(pnm[2], 10), pnm[1], customServices, { maxPortCount: 100 });
             if (m.found) portFallback = m;
-          } else if (p.ports?.length === 1) {
-            // Named service (e.g. "NETBIOS-RPC"): only use p.ports when there's exactly
-            // one observed port to avoid mixing ports from different services
-            const m = findService(p.ports[0], protoLabel, customServices);
-            if (m.found) portFallback = m;
+          } else if (p.ports?.length > 0) {
+            // Named service (e.g. "NETBIOS-RPC"): try all observed ports, accept only if
+            // all matches resolve to the same service (unambiguous single candidate)
+            const candidates = [];
+            for (const port of p.ports) {
+              const m = findService(port, protoLabel, customServices, { maxPortCount: 5 });
+              if (m.found) candidates.push(m);
+            }
+            const uniqNames = [...new Set(candidates.map(m => m.name))];
+            if (uniqNames.length === 1) portFallback = candidates[0];
           }
         }
 
@@ -880,6 +944,8 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
           } else if (portFallback) {
             portHint = `${protoLabel}: ${p.ports[0]} (observé)`;
           }
+        } else if (fuzzyMatch) {
+          portHint = fuzzyMatch.portHint || '';
         } else if (knownPredef) {
           const entries = Object.entries(PREDEFINED).filter(([, e]) => e.name === svc);
           portHint = entries.map(([port, e]) => `${e.proto === 'both' ? 'TCP+UDP' : e.proto.toUpperCase()}: ${port}`).join(', ');
@@ -888,15 +954,16 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
           portHint = `${protoLabel}: ${p.ports[0]} (observé)`;
         }
 
-        const found = knownPredef || !!customMatch || !!icmpMatch || !!portFallback;
+        const found = knownPredef || !!customMatch || !!icmpMatch || !!fuzzyMatch || !!portFallback;
         const resolvedName = icmpMatch ? icmpMatch.name
+          : fuzzyMatch ? fuzzyMatch.name
           : portFallback ? portFallback.name
           : (knownPredef || customMatch ? svc : null);
         serviceItems.push({
           label: svc,
           found,
           name:  resolvedName,
-          source: icmpMatch ? icmpMatch.source : portFallback ? portFallback.source : (knownPredef ? 'predefined' : customMatch ? 'custom' : null),
+          source: icmpMatch ? icmpMatch.source : fuzzyMatch ? fuzzyMatch.source : portFallback ? portFallback.source : (knownPredef ? 'predefined' : customMatch ? 'custom' : null),
           suggestedName: resolvedName || svc,
           isNamed: true,
           portHint,

@@ -1010,6 +1010,20 @@ td.mono { font-family: var(--mono); }
 .btn-accent:hover { background: var(--brand); color: #0f0f16; }
 .btn-accent:disabled { opacity: 0.45; cursor: not-allowed; }
 
+.btn-del-item {
+  background: none; border: none; color: var(--text3); cursor: pointer;
+  font-size: 11px; padding: 0 3px; line-height: 1; flex-shrink: 0;
+  transition: color 0.12s; margin-left: auto;
+}
+.btn-del-item:hover { color: #f87171; }
+
+.svc-propagate-banner {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  background: rgba(240,180,228,0.06); border: 1px solid var(--brand);
+  border-radius: 4px; padding: 6px 10px; font-size: 11px;
+  color: var(--text2); margin-top: 8px;
+}
+
 /* ── Diff panel ─────────────────────────────────────────────────────────── */
 .diff-panel-wrap { display: flex; gap: 12px; margin-top: 12px; }
 .diff-panel { flex: 1; min-width: 0; background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }

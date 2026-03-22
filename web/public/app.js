@@ -1871,10 +1871,12 @@ function _snapDrawer(p) {
     snap[k] = (v && typeof v === 'object' && !Array.isArray(v) && !(v instanceof Set) && !(v instanceof Map))
       ? { ...v } : v;
   }
-  snap._selectedSvcKeys  = p._selectedSvcKeys  ? new Set(p._selectedSvcKeys)  : undefined;
-  snap._analysisServices = JSON.parse(JSON.stringify(p.analysis?.services || []));
-  snap._multiSrcSubnets  = p._multiSrcSubnets  ? JSON.parse(JSON.stringify(p._multiSrcSubnets)) : undefined;
-  snap._multiDstSubnets  = p._multiDstSubnets  ? JSON.parse(JSON.stringify(p._multiDstSubnets)) : undefined;
+  snap._selectedSvcKeys   = p._selectedSvcKeys   ? new Set(p._selectedSvcKeys)  : undefined;
+  snap._analysisServices  = JSON.parse(JSON.stringify(p.analysis?.services || []));
+  snap._multiSrcSubnets   = p._multiSrcSubnets   ? JSON.parse(JSON.stringify(p._multiSrcSubnets)) : undefined;
+  snap._multiDstSubnets   = p._multiDstSubnets   ? JSON.parse(JSON.stringify(p._multiDstSubnets)) : undefined;
+  snap._excludedSrcHosts  = p._excludedSrcHosts  ? new Set(p._excludedSrcHosts) : undefined;
+  snap._excludedDstHosts  = p._excludedDstHosts  ? new Set(p._excludedDstHosts) : undefined;
   if (_drawerHistory.length >= DRAWER_HISTORY_MAX) _drawerHistory.shift();
   _drawerHistory.push({ idx: _drawerIdx, snap });
 }
@@ -1914,12 +1916,14 @@ function mountDrawer() {
       const last = _drawerHistory.pop();
       if (!last) return;
       const p = deployState.analyzed[last.idx];
-      const { _analysisServices, _selectedSvcKeys, _multiSrcSubnets, _multiDstSubnets, ...rest } = last.snap;
+      const { _analysisServices, _selectedSvcKeys, _multiSrcSubnets, _multiDstSubnets, _excludedSrcHosts, _excludedDstHosts, ...rest } = last.snap;
       Object.assign(p, rest);
-      if (_analysisServices) p.analysis.services = _analysisServices;
-      if (_selectedSvcKeys  !== undefined) p._selectedSvcKeys  = _selectedSvcKeys;
-      if (_multiSrcSubnets  !== undefined) p._multiSrcSubnets  = _multiSrcSubnets;
-      if (_multiDstSubnets  !== undefined) p._multiDstSubnets  = _multiDstSubnets;
+      if (_analysisServices  !== undefined) p.analysis.services   = _analysisServices;
+      if (_selectedSvcKeys   !== undefined) p._selectedSvcKeys    = _selectedSvcKeys;
+      if (_multiSrcSubnets   !== undefined) p._multiSrcSubnets    = _multiSrcSubnets;
+      if (_multiDstSubnets   !== undefined) p._multiDstSubnets    = _multiDstSubnets;
+      if (_excludedSrcHosts  !== undefined) p._excludedSrcHosts   = _excludedSrcHosts;
+      if (_excludedDstHosts  !== undefined) p._excludedDstHosts   = _excludedDstHosts;
       populateDrawer(last.idx);
       syncRowStatus(last.idx);
       renderDeployPolicies(filterDeployPolicies(), false);
@@ -2088,6 +2092,70 @@ function mountDrawer() {
       }
       return;
     }
+    // Delete item (service, subnet, host)
+    const delBtn = e.target.closest('.btn-del-item');
+    if (delBtn) {
+      e.stopPropagation();
+      _snapAndShow();
+      const dt = delBtn.dataset.delType;
+      if (dt === 'svc') {
+        const k = delBtn.dataset.svcKey;
+        p.analysis.services = (p.analysis.services || []).filter(s => {
+          const _m = s.label?.match(/^(TCP|UDP)\/(\d+)$/i);
+          const sk = _m ? `${parseInt(_m[2],10)}/${_m[1].toUpperCase()}` : (s.isNamed ? `label:${s.label}` : `${s.port}/${s.proto}`);
+          return sk !== k && s.label !== k;
+        });
+      } else if (dt === 'src-subnet') {
+        const si = +delBtn.dataset.si;
+        p._multiSrcSubnets = (p._multiSrcSubnets || []).filter((_, i) => i !== si);
+      } else if (dt === 'dst-subnet') {
+        const si = +delBtn.dataset.si;
+        p._multiDstSubnets = (p._multiDstSubnets || []).filter((_, i) => i !== si);
+      } else if (dt === 'src-host') {
+        if (!p._excludedSrcHosts) p._excludedSrcHosts = new Set();
+        p._excludedSrcHosts.add(delBtn.dataset.host);
+      } else if (dt === 'dst-host') {
+        if (!p._excludedDstHosts) p._excludedDstHosts = new Set();
+        p._excludedDstHosts.add(delBtn.dataset.host);
+      }
+      populateDrawer(_drawerIdx);
+      syncRowStatus(_drawerIdx);
+      renderDeployPolicies(filterDeployPolicies(), false);
+      return;
+    }
+    // Propagation banner buttons
+    if (e.target.closest('.svc-prop-yes')) {
+      const pp = p._propagatePending;
+      if (pp) {
+        for (const op of (deployState.analyzed || [])) {
+          if (op === p) continue;
+          const match = (op.analysis?.services || []).find(s => {
+            if (!s.found) {
+              if (pp.label) return s.label === pp.label;
+              const sm = s.label?.match(/^(TCP|UDP)\/(\d+)$/i);
+              const sp = sm ? parseInt(sm[2], 10) : s.port;
+              const spr = sm ? sm[1].toUpperCase() : (s.proto || '').toUpperCase();
+              return sp === pp.port && spr === pp.proto;
+            }
+            return false;
+          });
+          if (match) {
+            match.suggestedName = pp.newName;
+            const oi = deployState.analyzed.indexOf(op);
+            syncRowStatus(oi);
+          }
+        }
+        delete p._propagatePending;
+        renderDeployPolicies(filterDeployPolicies(), false);
+        populateDrawer(_drawerIdx);
+      }
+      return;
+    }
+    if (e.target.closest('.svc-prop-no')) {
+      delete p._propagatePending;
+      populateDrawer(_drawerIdx);
+      return;
+    }
   });
   drawer.addEventListener('change', e => {
     const p = _drawerIdx !== null ? deployState.analyzed[_drawerIdx] : null;
@@ -2099,6 +2167,45 @@ function mountDrawer() {
     if (e.target.matches('.drawer-dstintf')) { p._dstintf = e.target.value || undefined; renderDeployPolicies(filterDeployPolicies(), false); }
     if (e.target.matches('.drawer-nat')) { p._nat = e.target.checked; }
     syncRowStatus(_drawerIdx);
+  });
+  // Propagation check on service name blur
+  drawer.addEventListener('focusout', e => {
+    if (!e.target.matches('.drawer-svc-name')) return;
+    const p = _drawerIdx !== null ? deployState.analyzed[_drawerIdx] : null;
+    if (!p) return;
+    const svcKey = e.target.dataset.svcKey;
+    const newName = e.target.value.trim();
+    if (!newName) return;
+    const svc = (p.analysis?.services || []).find(s => {
+      const _m = s.label?.match(/^(TCP|UDP)\/(\d+)$/i);
+      const k = _m ? `${parseInt(_m[2],10)}/${_m[1].toUpperCase()}` : (s.isNamed ? `label:${s.label}` : `${s.port}/${s.proto}`);
+      return k === svcKey;
+    });
+    if (!svc) return;
+    const _sm = svc.label?.match(/^(TCP|UDP)\/(\d+)$/i);
+    const targetPort  = _sm ? parseInt(_sm[2], 10) : svc.port;
+    const targetProto = _sm ? _sm[1].toUpperCase() : (svc.proto || '').toUpperCase();
+    const targetLabel = (!targetPort || !targetProto) ? svc.label : null; // fallback: match par label
+    if (!targetPort && !targetLabel) return;
+    let count = 0;
+    for (let i = 0; i < (deployState.analyzed || []).length; i++) {
+      if (i === _drawerIdx) continue;
+      const match = (deployState.analyzed[i].analysis?.services || []).find(s => {
+        if (!s.found) {
+          if (targetLabel) return s.label === targetLabel;
+          const sm2 = s.label?.match(/^(TCP|UDP)\/(\d+)$/i);
+          const sp = sm2 ? parseInt(sm2[2], 10) : s.port;
+          const spr = sm2 ? sm2[1].toUpperCase() : (s.proto || '').toUpperCase();
+          return sp === targetPort && spr === targetProto;
+        }
+        return false;
+      });
+      if (match) count++;
+    }
+    if (count > 0) {
+      p._propagatePending = { svcKey, newName, port: targetPort, proto: targetProto, label: targetLabel, portHint: svc.portHint || null, count };
+      populateDrawer(_drawerIdx);
+    }
   });
 }
 
@@ -2165,7 +2272,8 @@ function populateDrawer(idx) {
       const nameInput = `<input class="drawer-input drawer-multisrc-name" data-si="${si}" value="${escHtml(inputVal(s.addrName, suggestAddrNameFE(s.subnet)))}" placeholder="${escHtml(s.addrName)}" style="flex:1;font-size:10px">`;
       let hostsHtml = '';
       if (!isSubnet && s.hosts?.length > 0) {
-        hostsHtml = `<div style="padding-left:16px;margin-top:2px;margin-bottom:6px">${s.hosts.slice(0, 50).map(h => {
+        const visibleSrcHosts = s.hosts.filter(h => !p._excludedSrcHosts?.has(h));
+        hostsHtml = `<div style="padding-left:16px;margin-top:2px;margin-bottom:6px">${visibleSrcHosts.slice(0, 50).map(h => {
           const foundSet = new Set(p._srcHostsFound || []);
           const hostName = (p._srcHostNames || {})[h] || `FF_HOST_${h.replace(/\./g,'_')}`;
           const hostFound = foundSet.has(h);
@@ -2174,14 +2282,16 @@ function populateDrawer(idx) {
             ${hostFound
               ? `<span style="color:var(--success);font-size:10px" title="${escHtml(h)}/32">&#10003; ${escHtml(hostName)}</span>`
               : `<input class="drawer-host-input" data-type="src" data-host="${escHtml(h)}" value="${escHtml(inputVal(p._srcHostNames?.[h], `FF_HOST_${h.replace(/\./g,'_')}`))}" placeholder="${escHtml(hostName)}">`}
+            <button class="btn-del-item" data-del-type="src-host" data-host="${escHtml(h)}" title="Retirer cet hôte">✕</button>
           </div>`;
-        }).join('')}${s.hosts.length > 50 ? `<div style="font-size:10px;color:var(--text2)">+${s.hosts.length - 50} autres…</div>` : ''}</div>`;
+        }).join('')}${visibleSrcHosts.length > 50 ? `<div style="font-size:10px;color:var(--text2)">+${visibleSrcHosts.length - 50} autres…</div>` : ''}</div>`;
       }
       return `<div class="drawer-multisrc-row" style="display:flex;align-items:center;gap:6px;padding:3px 0">
         <span class="drawer-multisrc-subnet" style="font-family:var(--mono);font-size:11px;min-width:120px">${escHtml(s.subnet)}</span>
         <button class="btn-sm drawer-multisrc-mode" data-si="${si}" style="font-size:9px;padding:2px 8px">${isSubnet ? '/24' : `/32 (${s.hosts?.length || 0}h)`}</button>
         ${isSubnet ? statusIcon : ''}
         ${isSubnet ? (s.addrFound ? `<span style="color:var(--success);font-size:10px" title="${escHtml(s.subnet)}">${escHtml(s.addrName)}</span>` : nameInput) : ''}
+        <button class="btn-del-item" data-del-type="src-subnet" data-si="${si}" title="Retirer ce subnet">✕</button>
       </div>${hostsHtml}`;
     }).join('');
     srcSection = `<div class="drawer-section">
@@ -2200,7 +2310,8 @@ function populateDrawer(idx) {
     // ── Single source subnet ──
     let srcHostsHtml = '';
     if (srcHosts.length > 0 && srcMode === 'hosts') {
-      srcHostsHtml = `<div class="drawer-host-list">${srcHosts.slice(0, 80).map(h => {
+      const visibleSrcHostsSingle = srcHosts.filter(h => !p._excludedSrcHosts?.has(h));
+      srcHostsHtml = `<div class="drawer-host-list">${visibleSrcHostsSingle.slice(0, 80).map(h => {
         const foundSet = new Set(p._srcHostsFound || []);
         const hostFound = foundSet.has(h);
         const name = (p._srcHostNames || {})[h] || `FF_HOST_${h.replace(/\./g,'_')}`;
@@ -2209,6 +2320,7 @@ function populateDrawer(idx) {
           ${hostFound
             ? `<span style="color:var(--success);font-size:10px" title="${escHtml(h)}/32">&#10003; ${escHtml(name)}</span>`
             : `<input class="drawer-host-input" data-type="src" data-host="${escHtml(h)}" value="${escHtml(inputVal(p._srcHostNames?.[h], `FF_HOST_${h.replace(/\./g,'_')}`))}" placeholder="${escHtml(name)}">`}
+          <button class="btn-del-item" data-del-type="src-host" data-host="${escHtml(h)}" title="Retirer cet hôte">✕</button>
         </div>`;
       }).join('')}</div>`;
       if (srcHosts.length > 1) {
@@ -2250,7 +2362,8 @@ function populateDrawer(idx) {
       const nameInput = `<input class="drawer-input drawer-multidst-name" data-si="${si}" value="${escHtml(inputVal(s.addrName, suggestAddrNameFE(s.subnet)))}" placeholder="${escHtml(s.addrName)}" style="flex:1;font-size:10px">`;
       let hostsHtml = '';
       if (!isSubnet && s.hosts?.length > 0) {
-        hostsHtml = `<div style="padding-left:16px;margin-top:2px;margin-bottom:6px">${s.hosts.slice(0, 50).map(h => {
+        const visibleDstHosts = s.hosts.filter(h => !p._excludedDstHosts?.has(h));
+        hostsHtml = `<div style="padding-left:16px;margin-top:2px;margin-bottom:6px">${visibleDstHosts.slice(0, 50).map(h => {
           const foundSet = new Set(p._dstHostsFound || []);
           const hostName = (p._dstHostNames || {})[h] || `FF_HOST_${h.replace(/\./g,'_')}`;
           const hostFound = foundSet.has(h);
@@ -2259,14 +2372,16 @@ function populateDrawer(idx) {
             ${hostFound
               ? `<span style="color:var(--success);font-size:10px" title="${escHtml(h)}/32">&#10003; ${escHtml(hostName)}</span>`
               : `<input class="drawer-host-input" data-type="dst" data-host="${escHtml(h)}" value="${escHtml(inputVal(p._dstHostNames?.[h], `FF_HOST_${h.replace(/\./g,'_')}`))}" placeholder="${escHtml(hostName)}">`}
+            <button class="btn-del-item" data-del-type="dst-host" data-host="${escHtml(h)}" title="Retirer cet hôte">✕</button>
           </div>`;
-        }).join('')}${s.hosts.length > 50 ? `<div style="font-size:10px;color:var(--text2)">+${s.hosts.length - 50} autres…</div>` : ''}</div>`;
+        }).join('')}${visibleDstHosts.length > 50 ? `<div style="font-size:10px;color:var(--text2)">+${visibleDstHosts.length - 50} autres…</div>` : ''}</div>`;
       }
       return `<div class="drawer-multidst-row">
         <span class="drawer-multidst-subnet">${escHtml(s.subnet)}</span>
         <button class="btn-sm drawer-multidst-mode" data-si="${si}" style="font-size:9px;padding:2px 8px">${isSubnet ? '/24' : `/32 (${s.hosts?.length || 0}h)`}</button>
         ${isSubnet ? statusIcon : ''}
         ${isSubnet ? (s.addrFound ? `<span style="color:var(--success);font-size:10px" title="${escHtml(s.subnet)}">${escHtml(s.addrName)}</span>` : nameInput) : ''}
+        <button class="btn-del-item" data-del-type="dst-subnet" data-si="${si}" title="Retirer ce subnet">✕</button>
       </div>${hostsHtml}`;
     }).join('');
     dstSection = `<div class="drawer-section">
@@ -2286,7 +2401,8 @@ function populateDrawer(idx) {
     let dstHostsHtml = '';
     if (dstHosts.length > 0 && dstMode === 'hosts') {
       const dstFoundSet = new Set(p._dstHostsFound || []);
-      dstHostsHtml = `<div class="drawer-host-list">${dstHosts.slice(0, 80).map(h => {
+      const visibleDstHostsSingle = dstHosts.filter(h => !p._excludedDstHosts?.has(h));
+      dstHostsHtml = `<div class="drawer-host-list">${visibleDstHostsSingle.slice(0, 80).map(h => {
         const name = (p._dstHostNames || {})[h] || `FF_HOST_${h.replace(/\./g,'_')}`;
         const hostFound = dstFoundSet.has(h);
         return `<div class="drawer-host-row">
@@ -2294,6 +2410,7 @@ function populateDrawer(idx) {
           ${hostFound
             ? `<span style="color:var(--success);font-size:10px" title="${escHtml(h)}/32">&#10003; ${escHtml(name)}</span>`
             : `<input class="drawer-host-input" data-type="dst" data-host="${escHtml(h)}" value="${escHtml(inputVal(p._dstHostNames?.[h], `FF_HOST_${h.replace(/\./g,'_')}`))}" placeholder="${escHtml(name)}">`}
+          <button class="btn-del-item" data-del-type="dst-host" data-host="${escHtml(h)}" title="Retirer cet hôte">✕</button>
         </div>`;
       }).join('')}</div>`;
     }
@@ -2341,7 +2458,7 @@ function populateDrawer(idx) {
       <button class="btn-sm btn-accent svc-do-merge" style="font-size:10px">Fusionner</button>
     </div>` : '';
   const svcsHtml = svcList.map(svc => {
-    if (svc.found) return `<div class="drawer-field"><span class="drawer-field-label">${escHtml(svc.label || svc.name)}</span><span class="drawer-field-value" style="color:var(--success)" title="${escHtml(svc.portHint || '')}">&#10003; ${escHtml(svc.name)}${badgeHtml('config')}</span></div>`;
+    if (svc.found) return `<div class="drawer-field" title="${escHtml(svc.portHint || '')}"><span class="drawer-field-label">${escHtml(svc.label || svc.name)}</span><span class="drawer-field-value" style="color:var(--success)">&#10003; ${escHtml(svc.name)}${badgeHtml(svc.source === 'predefined' ? 'predefined' : 'config')}</span><button class="btn-del-item" data-del-type="svc" data-svc-key="${escHtml(svc.label || svc.name)}" title="Retirer ce service de la policy">✕</button></div>`;
     // Detect port-notation labels like "UDP/11436" from FortiGate logs
     const _pnm = svc.label?.match(/^(TCP|UDP)\/(\d+)$/i);
     const svcProto = _pnm ? _pnm[1].toUpperCase() : (svc.proto || '').toUpperCase();
@@ -2363,8 +2480,17 @@ function populateDrawer(idx) {
       <span class="drawer-field-label" title="${escHtml(hintTitle)}">${escHtml(svc.label || `${svc.port}/${svc.proto}`)}</span>
       ${svc.isNamed && !_pnm ? hintText : ''}
       <input class="drawer-input drawer-svc-name" data-svc-key="${escHtml(svcKey)}" value="${escHtml(inputVal(svc.suggestedName, svcAutoName))}" placeholder="${escHtml(svcDefaultName)}" onclick="event.stopPropagation()">${badgeHtml('auto')}
+      <button class="btn-del-item" data-del-type="svc" data-svc-key="${escHtml(svcKey)}" title="Retirer ce service de la policy">✕</button>
     </div>`;
   }).join('');
+
+  // Propagation banner (shown after blur on svc name when other policies have same port/proto)
+  const pp = p._propagatePending;
+  const propagateBanner = pp ? `<div class="svc-propagate-banner">
+    <span>${pp.count} autre${pp.count>1?'s':''} policy${pp.count>1?'s':''} ${pp.count>1?'ont':'a'} <code style="font-family:var(--mono)">${escHtml(pp.label || `${pp.proto}/${pp.port}`)}</code>${pp.portHint ? ` <span style="font-size:9px;color:var(--text2)">(${escHtml(pp.portHint)})</span>` : ''} — Appliquer <strong>${escHtml(pp.newName)}</strong> à toutes ?</span>
+    <button class="btn-sm btn-accent svc-prop-yes">Oui</button>
+    <button class="btn-sm svc-prop-no">Non</button>
+  </div>` : '';
 
   const body = document.getElementById('drawer-body');
   body.innerHTML = `
@@ -2382,7 +2508,7 @@ function populateDrawer(idx) {
       <div class="drawer-section-title">Interfaces destination</div>
       <div class="drawer-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-dstintf">${ifOptsDst}</select></div>
     </div>
-    ${svcList.length ? `<div class="drawer-section"><div class="drawer-section-title">Services (${svcList.length})${selectableSvcs.length > 1 ? `<span style="font-size:10px;color:var(--text2);font-weight:400;margin-left:8px">Cliquer pour sélectionner et fusionner</span>` : ''}</div>${svcsHtml}${mergeBar}</div>` : ''}
+    ${svcList.length ? `<div class="drawer-section"><div class="drawer-section-title">Services (${svcList.length})${selectableSvcs.length > 1 ? `<span style="font-size:10px;color:var(--text2);font-weight:400;margin-left:8px">Cliquer pour sélectionner et fusionner</span>` : ''}</div>${svcsHtml}${mergeBar}${propagateBanner}</div>` : ''}
   `;
 }
 
@@ -4699,6 +4825,8 @@ async function generateDeployConf() {
       policyName:   p._policyName,
       nat:          p._nat ?? p._isWan,
       srcAddrNames: p.srcAddrNames || null,
+      srcHosts:     (p.srcHosts || []).filter(h => !p._excludedSrcHosts?.has(h)),
+      dstHosts:     (p.dstHosts || []).filter(h => !p._excludedDstHosts?.has(h)),
       tags:         p._tags || [],
     }));
   } else {
@@ -4715,6 +4843,8 @@ async function generateDeployConf() {
         policyName:   p._policyName,
         nat:          p._nat ?? p._isWan,
         srcAddrNames: p.srcAddrNames || null,
+        srcHosts:     (p.srcHosts || []).filter(h => !p._excludedSrcHosts?.has(h)),
+        dstHosts:     (p.dstHosts || []).filter(h => !p._excludedDstHosts?.has(h)),
         tags:         p._tags || [],
       }));
   }
