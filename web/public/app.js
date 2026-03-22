@@ -1545,6 +1545,9 @@ const deployState = {
   use32Global:   false,            // global /32 mode (use real hosts instead of /24)
 };
 
+// Collapsed state for interface category groups (persists across re-renders)
+const ifaceGroupCollapsed = { lan: false, wan: false, vpn: false };
+
 // ── F6: Export/Import session ──
 function exportSession() {
   const data = {
@@ -2784,26 +2787,72 @@ async function deploy() {
     arrow.textContent   = open ? '▸' : '▾';
   });
 
-  // WAN/LAN toggle per interface (délégation)
+  // Fold/unfold interface category groups + zones section (délégation)
   el('deploy-iface-body')?.addEventListener('click', e => {
-    const btn = e.target.closest('[data-iface-idx]');
-    if (!btn) return;
-    const idx   = +btn.dataset.ifaceIdx;
-    const iface = deployState.interfaces?.interfaces?.[idx];
-    if (!iface) return;
-    // Cycle: LAN → WAN → VPN → LAN
-    if (!iface.isWan && !iface.isTunnel)      { iface.isWan = true;  iface.isTunnel = false; }
-    else if (iface.isWan && !iface.isTunnel)  { iface.isWan = false; iface.isTunnel = true;  }
-    else                                       { iface.isWan = false; iface.isTunnel = false; }
-    // Re-render interfaces panel
-    el('deploy-iface-body').innerHTML = renderInterfaces(deployState.interfaces);
+    // Groupes LAN/WAN/VPN (tr headers)
+    const hdr = e.target.closest('tr.iface-group-header[data-group-key]');
+    if (hdr) {
+      const key = hdr.dataset.groupKey;
+      ifaceGroupCollapsed[key] = !ifaceGroupCollapsed[key];
+      const collapsed = ifaceGroupCollapsed[key];
+      hdr.querySelector('.iface-group-arrow').textContent = collapsed ? '▸' : '▾';
+      const tbody = hdr.closest('tbody');
+      tbody.querySelectorAll(`tr.iface-data-row[data-group-key="${key}"]`).forEach(r => {
+        r.style.display = collapsed ? 'none' : '';
+      });
+      return;
+    }
+    // Sections (Zones, SD-WAN…)
+    const sec = e.target.closest('[data-section-key]');
+    if (sec) {
+      const key = sec.dataset.sectionKey;
+      ifaceGroupCollapsed[key] = !ifaceGroupCollapsed[key];
+      const collapsed = ifaceGroupCollapsed[key];
+      sec.querySelector('.iface-group-arrow').textContent = collapsed ? '▸' : '▾';
+      const target = document.getElementById(sec.dataset.sectionTarget);
+      if (target) target.style.display = collapsed ? 'none' : '';
+    }
   });
 
-  // SD-WAN priority radio (délégation)
+  // SD-WAN priority radio + interface type select (délégation)
   el('deploy-iface-body')?.addEventListener('change', e => {
     if (e.target.name === 'sdwan-priority') {
       deployState.selectedSdwan = e.target.value;
+      return;
     }
+    const sel = e.target.closest('select[data-iface-idx]');
+    if (sel) {
+      const idx   = +sel.dataset.ifaceIdx;
+      const iface = deployState.interfaces?.interfaces?.[idx];
+      if (!iface) return;
+      iface.isWan    = sel.value === 'wan';
+      iface.isTunnel = sel.value === 'vpn';
+      refreshIfacePanel();
+    }
+  });
+
+  // Interface filter
+  el('deploy-iface-body')?.addEventListener('input', e => {
+    if (e.target.id !== 'iface-search') return;
+    const q = e.target.value.toLowerCase().trim();
+    const tbody = document.getElementById('iface-tbody');
+    if (!tbody) return;
+    let lastGroupHdr = null;
+    let groupHasVisible = false;
+    for (const row of tbody.querySelectorAll('tr')) {
+      if (row.classList.contains('iface-group-header')) {
+        if (lastGroupHdr) lastGroupHdr.style.display = groupHasVisible ? '' : 'none';
+        lastGroupHdr = row;
+        groupHasVisible = false;
+      } else if (row.classList.contains('iface-data-row')) {
+        const name  = row.dataset.name  || '';
+        const alias = row.dataset.alias || '';
+        const match = !q || name.includes(q) || alias.includes(q);
+        row.style.display = match ? '' : 'none';
+        if (match) groupHasVisible = true;
+      }
+    }
+    if (lastGroupHdr) lastGroupHdr.style.display = groupHasVisible ? '' : 'none';
   });
 
   // ── Dynamic routes inject (wired once) ──
@@ -3029,42 +3078,102 @@ function renderDynamicRoutesPanel() {
 }
 
 function renderInterfaces({ interfaces, zones, sdwanMembers, sdwanZoneNames, sdwanEnabled, sdwanIntfName }) {
-  const ifaceRows = interfaces.map((iface, idx) => {
-    const typeClass = iface.isTunnel ? 'vpn' : (iface.isWan ? 'wan' : 'lan');
-    const typeLabel = iface.isTunnel ? 'VPN' : (iface.isWan ? 'WAN' : 'LAN');
-    return `
-    <tr>
-      <td class="mono">${escHtml(iface.name)}</td>
-      <td class="mono iface-cidr-cell" style="color:var(--text2)">${escHtml(iface.cidr || iface.rawIp || '–')}</td>
-      <td>
-        <button class="deploy-itype-toggle ${typeClass}" data-iface-idx="${idx}" title="Cliquer pour basculer : LAN → WAN → VPN">
-          ${typeLabel} ⇄
-        </button>
+  // Build interface → zone names map
+  const ifaceZoneMap = {};
+  zones.forEach(z => z.members.forEach(m => {
+    if (!ifaceZoneMap[m]) ifaceZoneMap[m] = [];
+    ifaceZoneMap[m].push(z.name);
+  }));
+
+  // Group interfaces by type
+  const groups = { lan: [], wan: [], vpn: [] };
+  interfaces.forEach((iface, idx) => {
+    const key = iface.isTunnel ? 'vpn' : (iface.isWan ? 'wan' : 'lan');
+    groups[key].push({ iface, idx });
+  });
+
+  const groupMeta = {
+    lan: { label: 'LAN',         color: 'var(--success)' },
+    wan: { label: 'WAN',         color: 'var(--accent3)' },
+    vpn: { label: 'VPN / Tunnels', color: 'var(--brand)' },
+  };
+
+  let ifaceRows = '';
+  for (const key of ['lan', 'wan', 'vpn']) {
+    const items = groups[key];
+    if (!items.length) continue;
+    const { label, color } = groupMeta[key];
+    const collapsed = !!ifaceGroupCollapsed[key];
+    ifaceRows += `<tr class="iface-group-header" data-group-key="${key}" style="cursor:pointer" title="Cliquer pour plier/déplier">
+      <td colspan="5" style="color:${color}">
+        <span class="iface-group-arrow">${collapsed ? '▸' : '▾'}</span> ${label} <span class="iface-group-count">${items.length}</span>
       </td>
-      <td style="color:var(--text2);font-size:11px">${escHtml(iface.alias || '')}</td>
+    </tr>`;
+    for (const { iface, idx } of items) {
+      const zoneNames = ifaceZoneMap[iface.name] || [];
+      const zoneBadges = zoneNames.map(z => `<span class="iface-zone-chip">${escHtml(z)}</span>`).join('');
+      const cidrDisplay = (iface.cidr || iface.rawIp)
+        ? escHtml(iface.cidr || iface.rawIp)
+        : '<span class="iface-no-ip">no IP</span>';
+      ifaceRows += `<tr class="iface-data-row" data-name="${escHtml(iface.name.toLowerCase())}" data-alias="${escHtml((iface.alias || '').toLowerCase())}" data-group-key="${key}"${collapsed ? ' style="display:none"' : ''}>
+        <td class="mono">${escHtml(iface.name)}</td>
+        <td class="mono iface-cidr-cell" style="color:var(--text2)">${cidrDisplay}</td>
+        <td>
+          <select class="deploy-itype-select ${key}" data-iface-idx="${idx}">
+            <option value="lan"${key === 'lan' ? ' selected' : ''}>LAN</option>
+            <option value="wan"${key === 'wan' ? ' selected' : ''}>WAN</option>
+            <option value="vpn"${key === 'vpn' ? ' selected' : ''}>VPN</option>
+          </select>
+        </td>
+        <td style="color:var(--text2);font-size:11px">${escHtml(iface.alias || '')}</td>
+        <td>${zoneBadges}</td>
+      </tr>`;
+    }
+  }
+
+  // Zones section with type badge
+  const getZoneTypeKey = (z) => {
+    if (!z.members.length) return 'unknown';
+    const keys = z.members.map(m => {
+      const iface = interfaces.find(i => i.name === m);
+      if (!iface) return null;
+      return iface.isTunnel ? 'vpn' : (iface.isWan ? 'wan' : 'lan');
+    }).filter(Boolean);
+    const uniq = [...new Set(keys)];
+    if (!uniq.length) {
+      // Fallback : membres introuvables (ex: tunnels status=down filtrés) — inférer depuis le nom de zone
+      const zn = z.name.toUpperCase();
+      if (/VPN|TUNNEL|TUN[^A-Z]|IPSEC|GRE/.test(zn)) return 'vpn';
+      if (/WAN|INTERNET|EXTERNAL|EXT[^E]/.test(zn))   return 'wan';
+      if (/LAN|INTERNAL|INT[^E]|DMZ|LOCAL/.test(zn))  return 'lan';
+      return 'unknown';
+    }
+    return uniq.length === 1 ? uniq[0] : 'mixed';
+  };
+
+  const zoneTypeLabel = { lan: 'LAN', wan: 'WAN', vpn: 'VPN', mixed: 'MIXED', unknown: '?' };
+  const zoneRows = zones.map(z => {
+    const tk = getZoneTypeKey(z);
+    const badge = `<span class="deploy-itype-toggle ${tk === 'unknown' ? '' : tk}" style="pointer-events:none">${zoneTypeLabel[tk]}</span>`;
+    return `<tr>
+      <td class="mono">${escHtml(z.name)}</td>
+      <td class="mono iface-members-cell" style="color:var(--text2)" title="${z.members.map(escHtml).join(', ')}">${z.members.map(escHtml).join(', ')}</td>
+      <td>${badge}</td>
+      <td colspan="2"></td>
     </tr>`;
   }).join('');
 
-  const zoneRows = zones.map(z => `
-    <tr>
-      <td class="mono">${escHtml(z.name)}</td>
-      <td class="mono iface-members-cell" style="color:var(--text2)" title="${z.members.map(escHtml).join(', ')}">${z.members.map(escHtml).join(', ')}</td>
-      <td colspan="2"></td>
-    </tr>`).join('');
-
-  // SD-WAN section: show SDWAN zones as selectable options (zone name goes into dstintf)
+  // SD-WAN section
   let sdwanSection = '';
   if (sdwanEnabled) {
-    // Use sdwanZoneNames if available, fallback to sdwanIntfName
     const zoneOptions = sdwanZoneNames && sdwanZoneNames.length > 0
       ? sdwanZoneNames
       : [sdwanIntfName || 'virtual-wan-link'];
     const currentSel = deployState.selectedSdwan || zoneOptions[0];
-    const options = zoneOptions.map(z => ({ value: z, label: z }));
-    const radios = options.map(o => `
+    const radios = zoneOptions.map(o => `
       <label style="display:flex;align-items:center;gap:6px;cursor:pointer;white-space:nowrap">
-        <input type="radio" name="sdwan-priority" value="${escHtml(o.value)}" ${currentSel === o.value ? 'checked' : ''}>
-        <span class="mono" style="font-size:12px">${escHtml(o.label)}</span>
+        <input type="radio" name="sdwan-priority" value="${escHtml(o)}" ${currentSel === o ? 'checked' : ''}>
+        <span class="mono" style="font-size:12px">${escHtml(o)}</span>
       </label>`).join('');
     sdwanSection = `
       <div class="deploy-sdwan-panel">
@@ -3074,21 +3183,39 @@ function renderInterfaces({ interfaces, zones, sdwanMembers, sdwanZoneNames, sdw
         <div style="font-size:11px;color:var(--text2);margin-bottom:8px">
           Sélectionnez l'interface à utiliser comme dstintf pour les règles Internet :
         </div>
-        <div style="display:flex;flex-wrap:wrap;gap:10px">
-          ${radios}
-        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:10px">${radios}</div>
       </div>`;
   } else if (sdwanMembers.length > 0) {
     sdwanSection = `<div style="color:var(--accent2);font-size:11px;margin-top:8px">SD-WAN: ${sdwanMembers.map(escHtml).join(', ')}</div>`;
   }
 
+  const zonesCollapsed = !!ifaceGroupCollapsed['zones'];
+  const zonesSection = zones.length > 0 ? `
+    <div class="iface-section-title" data-section-key="zones" data-section-target="iface-zones-table" style="cursor:pointer" title="Cliquer pour plier/déplier">
+      <span class="iface-group-arrow">${zonesCollapsed ? '▸' : '▾'}</span> Zones <span class="iface-group-count">${zones.length}</span>
+    </div>
+    <table class="deploy-iface-table" id="iface-zones-table"${zonesCollapsed ? ' style="display:none"' : ''}>
+      <thead><tr><th>Zone</th><th>Membres</th><th>Type</th><th colspan="2"></th></tr></thead>
+      <tbody>${zoneRows}</tbody>
+    </table>` : '';
+
   return `
-    <div style="font-size:11px;color:var(--text2);margin-bottom:8px">Cliquez sur le type pour basculer : LAN ⇄ WAN ⇄ VPN (tunnels IPsec/SSL)</div>
-    <table class="deploy-iface-table">
-      <thead><tr><th>Interface</th><th>IP/CIDR</th><th>Type</th><th>Alias</th></tr></thead>
-      <tbody>${ifaceRows}${zoneRows}</tbody>
+    <div class="iface-toolbar">
+      <input id="iface-search" type="text" placeholder="Filtrer interfaces…" class="iface-search-input">
+      <span style="font-size:11px;color:var(--text2)">Cliquer l'entête pour plier/déplier • Changer le type via le menu déroulant</span>
+    </div>
+    <table class="deploy-iface-table" id="iface-main-table">
+      <thead><tr><th>Interface</th><th>IP/CIDR</th><th>Type</th><th>Alias</th><th>Zone</th></tr></thead>
+      <tbody id="iface-tbody">${ifaceRows}</tbody>
     </table>
+    ${zonesSection}
     ${sdwanSection}`;
+}
+
+// Helper: re-render the interfaces panel (used by type select + upload)
+function refreshIfacePanel() {
+  const body = el('deploy-iface-body');
+  if (body) body['innerHTML'] = renderInterfaces(deployState.interfaces);
 }
 
 async function uploadConf(file) {

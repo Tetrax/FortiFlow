@@ -354,7 +354,9 @@ function parseFortiConfig(text) {
   // ── Interfaces ──
   const interfaces = {};
   for (const [name, props] of Object.entries(rawInterfaces)) {
-    if (props.type === 'loopback' || props.status === 'down') continue;
+    if (props.type === 'loopback') continue;
+    // Garder les tunnels même si status down (ils existent dans la conf et servent aux policies)
+    if (props.status === 'down' && props.type !== 'tunnel') continue;
 
     let cidr = null, prefix = null;
     if (props.ip) {
