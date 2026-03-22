@@ -100,7 +100,8 @@ function applyFlowFilters(flows, q) {
 
 function sendCsv(res, filename, rows, columns) {
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  const safeFilename = filename.replace(/["\r\n\\]/g, '_');
+  res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"`);
   res.write('\uFEFF'); // BOM for Excel
   res.write(columns.join(',') + '\n');
   for (const row of rows) {
@@ -431,14 +432,14 @@ app.get('/api/denied-flows', (req, res) => {
 // ─── Deploy routes ────────────────────────────────────────────────────────────
 
 // POST /api/deploy/config-upload — parse a FortiGate .conf and store in session
-app.post('/api/deploy/config-upload', upload.single('conffile'), (req, res) => {
+app.post('/api/deploy/config-upload', upload.single('conffile'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Aucun fichier reçu' });
 
   const s = requireSession(req, res);
   if (!s) { fs.unlink(req.file.path, () => {}); return; }
 
   try {
-    const text = fs.readFileSync(req.file.path, 'utf8');
+    const text = await fs.promises.readFile(req.file.path, 'utf8');
     const fortiConfig = parseFortiConfig(text);
     s.fortiConfig = fortiConfig;
     setFortiConfig(s.id, fortiConfig);
@@ -640,22 +641,17 @@ app.post('/api/deploy/generate', (req, res) => {
 
     // Build global resolvedHosts map {ip → name} for all /32 hosts across all policies
     const addresses = s.fortiConfig.addresses || {};
+    // Build CIDR→name lookup once (O(1) per host instead of O(n))
+    const cidrIndex = new Map();
+    for (const [name, a] of Object.entries(addresses)) {
+      if (a.cidr) { cidrIndex.set(a.cidr, name); }
+    }
     const resolvedHosts = {};
     for (const p of analyzed) {
-      for (const h of (p.srcHosts || [])) {
+      for (const h of [...(p.srcHosts || []), ...(p.dstHosts || [])]) {
         if (!resolvedHosts[h]) {
-          const m = Object.entries(addresses).find(([, a]) =>
-            a.cidr === `${h}/32` || a.cidr === h
-          );
-          if (m) resolvedHosts[h] = m[0];
-        }
-      }
-      for (const h of (p.dstHosts || [])) {
-        if (!resolvedHosts[h]) {
-          const m = Object.entries(addresses).find(([, a]) =>
-            a.cidr === `${h}/32` || a.cidr === h
-          );
-          if (m) resolvedHosts[h] = m[0];
+          const found = cidrIndex.get(`${h}/32`) || cidrIndex.get(h);
+          if (found) resolvedHosts[h] = found;
         }
       }
     }

@@ -22,7 +22,7 @@ function _save(id) {
       data:        s.data        || null,
       fortiConfig: s.fortiConfig || null,
     });
-    const tmp = _cachePath(id) + '.tmp';
+    const tmp = _cachePath(id) + '.' + Date.now() + '.tmp';
     fs.writeFile(tmp, payload, 'utf8', (err) => {
       if (err) return;
       fs.rename(tmp, _cachePath(id), () => {});

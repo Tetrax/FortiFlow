@@ -125,7 +125,11 @@ function networkAddress(ip, prefix) {
 function fortiSubnetToCIDR(subnet) {
   if (!subnet) return null;
   const parts = subnet.trim().split(/\s+/);
-  if (parts.length === 2) return `${parts[0]}/${maskBits(parts[1])}`;
+  if (parts.length === 2) {
+    const bits = maskBits(parts[1]);
+    if (bits === null) return null;
+    return `${parts[0]}/${bits}`;
+  }
   if (parts.length === 1 && parts[0].includes('/')) return parts[0];
   return null;
 }
@@ -135,8 +139,11 @@ function parsePorts(portrange) {
   const ports = [];
   for (const part of portrange.trim().split(/\s+/)) {
     const clean = part.split(':')[0]; // strip :src_portrange suffix (FortiGate format)
-    const [a, b] = clean.split('-').map(Number);
-    if (b && !isNaN(b)) { for (let i = a; i <= Math.min(b, a + 10000); i++) ports.push(i); }
+    let [a, b] = clean.split('-').map(Number);
+    if (b && !isNaN(b)) {
+      if (a > b) { const t = a; a = b; b = t; }
+      for (let i = a; i <= Math.min(b, a + 10000); i++) ports.push(i);
+    }
     else if (a && !isNaN(a)) ports.push(a);
   }
   return ports;
@@ -590,6 +597,8 @@ function parseBgpNetworkTable(text) {
 }
 
 // Longest-prefix match dans la table de routes
+// PRE-CONDITION: routes DOIT être trié par préfixe décroissant (via sortRoutes)
+// — la première correspondance trouvée est la plus spécifique
 // skipDefault=true pour les recherches srcintf (pas de fallback 0.0.0.0/0)
 function findInterfaceByRoute(dstCidr, routes, skipDefault) {
   if (!routes || routes.length === 0) return null;
@@ -1132,6 +1141,9 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
 
 // ─── CLI config generator ─────────────────────────────────────────────────────
 
+// Sanitise une valeur pour insertion dans une commande CLI FortiGate (entre quotes)
+function safeCli(str) { return (str || '').replace(/["\\]/g, '_').replace(/[\r\n]/g, ''); }
+
 function generateConfig(selectedPolicies, opts = {}) {
   const {
     defaultSrcIntf = 'port1',
@@ -1388,7 +1400,7 @@ function generateConfig(selectedPolicies, opts = {}) {
       const [ip, pfxStr] = (cidr || '').split('/');
       const prefix = parseInt(pfxStr, 10) || 32;
       const mask   = cidrToMask(prefix);
-      L.push(`    edit "${name}"`);
+      L.push(`    edit "${safeCli(name)}"`);
       L.push(`        set subnet ${ip} ${mask}`);
       L.push(`    next`);
     }
@@ -1402,8 +1414,8 @@ function generateConfig(selectedPolicies, opts = {}) {
     L.push('# ══════════════════════════════════════════════════');
     L.push('config firewall addrgrp');
     for (const [grpName, members] of newAddrGroups) {
-      const memberStr = members.map(m => `"${m}"`).join(' ');
-      L.push(`    edit "${grpName}"`);
+      const memberStr = members.map(m => `"${safeCli(m)}"`).join(' ');
+      L.push(`    edit "${safeCli(grpName)}"`);
       L.push(`        set member ${memberStr}`);
       L.push(`    next`);
     }
@@ -1421,7 +1433,7 @@ function generateConfig(selectedPolicies, opts = {}) {
       const isUdp = proto === 'UDP' || proto === '17';
       const isTcp = !isUdp;
       const portrangeVal = svc.portRange || (svc.ports?.length ? svc.ports.join(' ') : String(svc.port));
-      L.push(`    edit "${svc.name}"`);
+      L.push(`    edit "${safeCli(svc.name)}"`);
       L.push(`        set protocol TCP/UDP/SCTP`);
       if (isTcp) L.push(`        set tcp-portrange ${portrangeVal}`);
       if (isUdp) L.push(`        set udp-portrange ${portrangeVal}`);
@@ -1437,26 +1449,26 @@ function generateConfig(selectedPolicies, opts = {}) {
     L.push('# ══════════════════════════════════════════════════');
     L.push('config firewall policy');
     for (const pol of policyBlocks) {
-      const svcStr = pol.serviceNames.map(s => `"${s}"`).join(' ');
+      const svcStr = pol.serviceNames.map(s => `"${safeCli(s)}"`).join(' ');
       L.push(`    edit 0`);
-      if (pol.name) L.push(`        set name "${pol.name}"`);
+      if (pol.name) L.push(`        set name "${safeCli(pol.name)}"`);
       const srcintfStr = Array.isArray(pol.srcintf)
-        ? pol.srcintf.map(i => `"${i}"`).join(' ')
-        : `"${pol.srcintf}"`;
+        ? pol.srcintf.map(i => `"${safeCli(i)}"`).join(' ')
+        : `"${safeCli(pol.srcintf)}"`;
       const dstintfStr = Array.isArray(pol.dstintf)
-        ? pol.dstintf.map(i => `"${i}"`).join(' ')
-        : `"${pol.dstintf}"`;
+        ? pol.dstintf.map(i => `"${safeCli(i)}"`).join(' ')
+        : `"${safeCli(pol.dstintf)}"`;
       L.push(`        set srcintf ${srcintfStr}`);
       L.push(`        set dstintf ${dstintfStr}`);
       const srcAddrStr = pol.srcAddrNames && pol.srcAddrNames.length > 1
-        ? pol.srcAddrNames.map(n => `"${n}"`).join(' ')
+        ? pol.srcAddrNames.map(n => `"${safeCli(n)}"`).join(' ')
         : (Array.isArray(pol.srcAddrName)
-          ? pol.srcAddrName.map(n => `"${n}"`).join(' ')
-          : `"${pol.srcAddrName}"`);
+          ? pol.srcAddrName.map(n => `"${safeCli(n)}"`).join(' ')
+          : `"${safeCli(pol.srcAddrName)}"`);
       L.push(`        set srcaddr ${srcAddrStr}`);
       const dstAddrStr = Array.isArray(pol.dstAddrName)
-        ? pol.dstAddrName.map(n => `"${n}"`).join(' ')
-        : `"${pol.dstAddrName}"`;
+        ? pol.dstAddrName.map(n => `"${safeCli(n)}"`).join(' ')
+        : `"${safeCli(pol.dstAddrName)}"`;
       L.push(`        set dstaddr ${dstAddrStr}`);
       L.push(`        set service ${svcStr}`);
       L.push(`        set action ${actionVerb}`);
@@ -1468,14 +1480,14 @@ function generateConfig(selectedPolicies, opts = {}) {
       const hasUtm = sp.antivirus || sp.webfilter || sp.ips || sp.sslSsh || sp.profileGroup;
       if (hasUtm) {
         L.push(`        set utm-status enable`);
-        if (sp.profileGroup)  L.push(`        set profile-protocol-options "${sp.profileGroup}"`);
-        if (sp.antivirus)     L.push(`        set av-profile "${sp.antivirus}"`);
-        if (sp.webfilter)     L.push(`        set webfilter-profile "${sp.webfilter}"`);
-        if (sp.ips)           L.push(`        set ips-sensor "${sp.ips}"`);
-        if (sp.sslSsh)        L.push(`        set ssl-ssh-profile "${sp.sslSsh}"`);
+        if (sp.profileGroup)  L.push(`        set profile-protocol-options "${safeCli(sp.profileGroup)}"`);
+        if (sp.antivirus)     L.push(`        set av-profile "${safeCli(sp.antivirus)}"`);
+        if (sp.webfilter)     L.push(`        set webfilter-profile "${safeCli(sp.webfilter)}"`);
+        if (sp.ips)           L.push(`        set ips-sensor "${safeCli(sp.ips)}"`);
+        if (sp.sslSsh)        L.push(`        set ssl-ssh-profile "${safeCli(sp.sslSsh)}"`);
       }
       if (pol.tags && pol.tags.length > 0) {
-        L.push(`        set comments "${pol.tags.join(', ')}"`);
+        L.push(`        set comments "${safeCli(pol.tags.join(', '))}"`);
       }
       L.push(`    next`);
     }
@@ -1557,12 +1569,12 @@ function formatExistingPolicies(policies) {
   const lines = ['config firewall policy'];
   for (const p of policies) {
     lines.push(`    edit ${p.policyid}`);
-    if (p.name)  lines.push(`        set name "${p.name}"`);
-    lines.push(`        set srcintf "${(p.srcintf  || []).join('" "')}"`);
-    lines.push(`        set dstintf "${(p.dstintf  || []).join('" "')}"`);
-    lines.push(`        set srcaddr "${(p.srcaddr  || []).join('" "')}"`);
-    lines.push(`        set dstaddr "${(p.dstaddr  || []).join('" "')}"`);
-    lines.push(`        set service "${(p.service  || []).join('" "')}"`);
+    if (p.name)  lines.push(`        set name "${safeCli(p.name)}"`);
+    lines.push(`        set srcintf "${(p.srcintf  || []).map(safeCli).join('" "')}"`);
+    lines.push(`        set dstintf "${(p.dstintf  || []).map(safeCli).join('" "')}"`);
+    lines.push(`        set srcaddr "${(p.srcaddr  || []).map(safeCli).join('" "')}"`);
+    lines.push(`        set dstaddr "${(p.dstaddr  || []).map(safeCli).join('" "')}"`);
+    lines.push(`        set service "${(p.service  || []).map(safeCli).join('" "')}"`);
     lines.push(`        set action ${p.action || 'accept'}`);
     if (p.nat)                lines.push('        set nat enable');
     if (p.status === 'disable') lines.push('        set status disable');

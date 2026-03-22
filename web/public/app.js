@@ -67,7 +67,7 @@ function el(id) { return document.getElementById(id); }
 function qs(sel, ctx = document) { return ctx.querySelector(sel); }
 
 function badgeHtml(type) {
-  const labels = { config: 'CONFIG', auto: 'AUTO', route: 'ROUTE', sdwan: 'SDWAN', subnet: 'SUBNET' };
+  const labels = { config: 'CONFIG', predefined: 'CONFIG', auto: 'AUTO', route: 'ROUTE', sdwan: 'SDWAN', subnet: 'SUBNET' };
   return `<span class="badge-${type}">${labels[type] || type.toUpperCase()}</span>`;
 }
 
@@ -559,7 +559,7 @@ async function matrix() {
       try {
         const data = await api(`/api/matrix?action=${state.matrix.action}`);
         el('matrix-wrap').innerHTML = '<canvas id="matrix-canvas"></canvas>';
-        renderMatrix(data, state.matrix.action);
+        renderMatrix(data, state.matrix.action, signal);
       } catch (e) {
         el('matrix-wrap').innerHTML = `<div class="alert alert-error">${escHtml(e.message)}</div>`;
       }
@@ -568,13 +568,13 @@ async function matrix() {
 
   try {
     const data = await api(`/api/matrix?action=${state.matrix.action}`);
-    renderMatrix(data, state.matrix.action);
+    renderMatrix(data, state.matrix.action, signal);
   } catch (e) {
     el('matrix-wrap').innerHTML = `<div class="alert alert-error">${escHtml(e.message)}</div>`;
   }
 }
 
-function renderMatrix(data, mode = 'accept') {
+function renderMatrix(data, mode = 'accept', signal) {
   const { srcSubnets, dstSubnets, cells, maxCount } = data;
 
   if (!srcSubnets.length || !dstSubnets.length) {
@@ -755,13 +755,13 @@ function renderMatrix(data, mode = 'accept') {
       ctx.drawImage(offscreen, 0, 0);
       tooltip.style.display = 'none';
     }
-  });
+  }, signal ? { signal } : undefined);
 
   canvas.addEventListener('mouseleave', () => {
     _lastHoverCell = { si: -1, di: -1 };
     ctx.drawImage(offscreen, 0, 0);
     tooltip.style.display = 'none';
-  });
+  }, signal ? { signal } : undefined);
 
   // Click → filter flows
   canvas.addEventListener('click', e => {
@@ -787,7 +787,7 @@ function renderMatrix(data, mode = 'accept') {
         }
       }
     }
-  });
+  }, signal ? { signal } : undefined);
 
   canvas.style.cursor = 'crosshair';
 }
@@ -835,7 +835,7 @@ function renderGroups(subnets) {
       return `
         <div class="dst-row">
           <div class="dst-info">
-            <div class="dst-ip">${typeTag(d.type)} ${d.key}${d.type === 'public' && d.country ? ` <span class="geo-tag">${d.flag || ''} ${d.country}</span>` : ''}</div>
+            <div class="dst-ip">${typeTag(d.type)} ${d.key}${d.type === 'public' && d.country ? ` <span class="geo-tag">${escHtml(d.flag || '')} ${escHtml(d.country)}</span>` : ''}</div>
             <div class="dst-services">${svcTags}${extra}${!d.services.length ? `<span style="color:var(--text2);font-size:11px;">ports: ${portStr || '?'}</span>` : ''}</div>
           </div>
           <div class="dst-stats">
@@ -885,8 +885,9 @@ async function toggleHostPanel(subnetB64, subnet) {
     return;
   }
 
-  // First open: fetch and render
-  if (!panel.dataset.loaded) {
+  // First open: fetch and render (guard against concurrent fetches)
+  if (!panel.dataset.loaded && !panel.dataset.loading) {
+    panel.dataset.loading = '1';
     panel.style.display = 'block';
     panel.innerHTML = '<div class="host-loading"><div class="progress-spinner" style="margin:0 auto 8px"></div>Chargement des hôtes…</div>';
     try {
@@ -895,8 +896,8 @@ async function toggleHostPanel(subnetB64, subnet) {
       panel.dataset.loaded = '1';
     } catch (e) {
       panel.innerHTML = `<div class="alert alert-error" style="margin:8px 16px">Erreur : ${escHtml(e.message)}</div>`;
-    }
-  } else {
+    } finally { delete panel.dataset.loading; }
+  } else if (panel.dataset.loaded) {
     panel.style.display = 'block';
   }
 }
@@ -2460,8 +2461,14 @@ function populateDrawer(idx) {
       ${mergeMode === 'range' ? `<input class="drawer-input svc-merge-range" value="${escHtml(p._mergeRange || mergeRangeSuggestion)}" placeholder="${mergeRangeSuggestion}" style="width:100px;font-size:11px">` : `<span style="font-size:10px;color:var(--text2)">${mergePorts.join(', ')}</span>`}
       <button class="btn-sm btn-accent svc-do-merge" style="font-size:10px">Fusionner</button>
     </div>` : '';
+  const stripPd = n => (n || '').replace(/PREDEFINED$/i, '');
   const svcsHtml = svcList.map(svc => {
-    if (svc.found) return `<div class="drawer-field" title="${escHtml(svc.portHint || '')}"><span class="drawer-field-label">${escHtml(svc.label || svc.name)}</span><span class="drawer-field-value" style="color:var(--success)">&#10003; ${escHtml(svc.name)}${badgeHtml(svc.source === 'predefined' ? 'predefined' : 'config')}</span><button class="btn-del-item" data-del-type="svc" data-svc-key="${escHtml(svc.label || svc.name)}" title="Retirer ce service de la policy">✕</button></div>`;
+    if (svc.found) {
+      const dispLabel = stripPd(svc.label || svc.name);
+      const dispName  = stripPd(svc.name);
+      const rawKey    = svc.label || svc.name; // keep raw for data-svc-key (CLI needs full name)
+      return `<div class="drawer-field" title="${escHtml(svc.portHint || '')}"><span class="drawer-field-label">${escHtml(dispLabel)}</span><span class="drawer-field-value" style="color:var(--success)">&#10003; ${escHtml(dispName)}${badgeHtml(svc.source === 'predefined' ? 'predefined' : 'config')}</span><button class="btn-del-item" data-del-type="svc" data-svc-key="${escHtml(rawKey)}" title="Retirer ce service de la policy">✕</button></div>`;
+    }
     // Detect port-notation labels like "UDP/11436" from FortiGate logs
     const _pnm = svc.label?.match(/^(TCP|UDP)\/(\d+)$/i);
     const svcProto = _pnm ? _pnm[1].toUpperCase() : (svc.proto || '').toUpperCase();
@@ -2545,9 +2552,10 @@ async function analyse() {
 
   // Render sub-view into #sub-content
   _renderTarget = 'sub-content';
-  const subViews = { flows, matrix, groups, ports };
-  await (subViews[sub] || flows)();
-  _renderTarget = null;
+  try {
+    const subViews = { flows, matrix, groups, ports };
+    await (subViews[sub] || flows)();
+  } finally { _renderTarget = null; }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -2577,9 +2585,10 @@ async function polices() {
   });
 
   _renderTarget = 'sub-content';
-  const subViews = { policies, consilpolicies, denied };
-  await (subViews[sub] || policies)();
-  _renderTarget = null;
+  try {
+    const subViews = { policies, consilpolicies, denied };
+    await (subViews[sub] || policies)();
+  } finally { _renderTarget = null; }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -3967,6 +3976,7 @@ async function analyzeDeployPolicies() {
   deployState.baseAnalyzedPolicies  = analyzed.map(p => ({ ...p })); // snapshot for reset
   deployState.generatedCli          = null;
   deployState.selected              = new Set(analyzed.map((_, i) => i));
+  _drawerHistory = [];  // clear undo history from previous session
 
   const bar = el('deploy-merge-bar');
   if (bar) bar.style.display = '';
@@ -4597,9 +4607,20 @@ function wireDeployTable() {
     const srcPos = arr.findIndex((_, i) => i === _dragSrcIdx);
     const tgtPos = arr.findIndex((_, i) => i === targetIdx);
     if (srcPos < 0 || tgtPos < 0) return;
+    // Remap selected indices after splice
+    const wasSrcSelected = deployState.selected.has(srcPos);
+    const newSelected = new Set();
+    for (const idx of deployState.selected) {
+      if (idx === srcPos) continue; // handled separately after splice
+      let adj = idx;
+      if (idx > srcPos) adj--;
+      if (adj >= tgtPos) adj++;
+      newSelected.add(adj);
+    }
     const [moved] = arr.splice(srcPos, 1);
     arr.splice(tgtPos, 0, moved);
-    deployState.selected = new Set(arr.map((_, i) => i));
+    if (wasSrcSelected) newSelected.add(tgtPos);
+    deployState.selected = newSelected;
     renderDeployPolicies(filterDeployPolicies(), false);
   });
 }
@@ -4749,13 +4770,15 @@ function renderDeployPolicies(analyzed, resetPage = true) {
 
     // Services — compact
     const svcList = p.analysis?.services || [];
+    const stripPredef = n => (n || '').replace(/PREDEFINED$/i, '');
     const svcCells = svcList.map(svc => {
       if (svc.found) {
-        return `<span class="match-ok" style="font-size:10px" title="${escHtml(svc.portHint || svc.label || svc.name)}">&#10003; ${escHtml(svc.name)}${badgeHtml('config')}</span>`;
+        const dispName = stripPredef(svc.name);
+        return `<span class="match-ok" style="font-size:10px" title="${escHtml(svc.portHint || stripPredef(svc.label) || dispName)}">&#10003; ${escHtml(dispName)}${badgeHtml('config')}</span>`;
       }
       const customName = svc.suggestedName && svc.suggestedName !== (svc.isNamed ? svc.label : `FF_SVC_${svc.port}_${svc.proto}`) ? svc.suggestedName : '';
       const displayName = customName || svc.label || (svc.port ? `${svc.port}/${svc.proto}` : '');
-      return `<span class="inline-editable missing" style="font-size:10px" title="${escHtml(svc.portHint || displayName)}">${displayName ? escHtml(displayName) + ' ' : ''}${badgeHtml('auto')}</span>`;
+      return `<span class="match-ok" style="font-size:10px;color:var(--warn)" title="${escHtml(svc.portHint || displayName)}">${displayName ? escHtml(displayName) + ' ' : ''}${badgeHtml('auto')}</span>`;
     }).join(' ');
 
     // Interfaces — read-only text, editable in drawer
@@ -4806,6 +4829,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
       <tr class="deploy-policy-row ${isAgg ? 'seq-row' : ''}" data-idx="${idx}" ${isAgg ? `data-seq-members="${p._sequenceMembers.join(',')}"` : ''}>
         <td><input type="checkbox" ${chkAttr}></td>
         <td class="status-cell" title="${escHtml(statusTitle)}"><div class="status-bar status-${rowStatus}"></div></td>
+        <td class="impact-cell"><div class="impact-bar" style="width:${barW}%"></div><span class="impact-val">${fmtNum(p.sessions || 0)}</span></td>
         <td>${dirBadge}</td>
         <td>${warnBadge}${seqBadge}${srcSubnetText}${srcModeBadge}</td>
         <td>${srcAddrCell}</td>
@@ -4814,7 +4838,6 @@ function renderDeployPolicies(analyzed, resetPage = true) {
         <td>${dstAddrCell}</td>
         ${allDstAutoFlag ? '' : `<td>${dstIntf}</td>`}
         <td>${svcCells || '<span style="color:var(--text2)">–</span>'}</td>
-        <td class="impact-cell"><div class="impact-bar" style="width:${barW}%"></div><span class="impact-val">${fmtNum(p.sessions || 0)}</span></td>
       </tr>`;
   }
 
@@ -4870,11 +4893,11 @@ function renderDeployPolicies(analyzed, resetPage = true) {
         <thead><tr>
           <th><input type="checkbox" id="chk-all-deploy"></th>
           <th></th>
+          <th>Sessions</th>
           <th>Dir.</th>
           <th>Source</th><th>Src addr</th>${allSrcAutoFlag ? '' : '<th>Src intf</th>'}
           <th>Destination</th><th>Dst addr</th>${allDstAutoFlag ? '' : '<th>Dst intf</th>'}
           <th>Services</th>
-          <th>Sessions</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
@@ -5051,31 +5074,34 @@ async function generateDeployConf() {
     // Sync textarea edits back to state
     pre.addEventListener('input', () => { deployState.generatedCli = pre.value; });
 
-    // Wire copy + download buttons (idempotent — replace each time)
-    el('btn-copy-cli')?.addEventListener('click', () => {
+    // Wire copy + download buttons (onclick= to avoid accumulating listeners)
+    const btnCopy = el('btn-copy-cli');
+    if (btnCopy) btnCopy.onclick = () => {
       const text = el('deploy-cli-pre')?.value || deployState.generatedCli || '';
       navigator.clipboard.writeText(text).then(() => {
-        const b = el('btn-copy-cli');
-        if (b) { const old = b.textContent; b.textContent = '✓ Copié !'; setTimeout(() => { b.textContent = old; }, 1800); }
+        if (btnCopy) { const old = btnCopy.textContent; btnCopy.textContent = '✓ Copié !'; setTimeout(() => { btnCopy.textContent = old; }, 1800); }
       });
-    });
-    el('btn-download-cli')?.addEventListener('click', () => {
+    };
+    const btnDl = el('btn-download-cli');
+    if (btnDl) btnDl.onclick = () => {
       const text = el('deploy-cli-pre')?.value || deployState.generatedCli || '';
       const blob = new Blob([text], { type: 'text/plain' });
       const url  = URL.createObjectURL(blob);
       const a    = document.createElement('a');
       a.href = url; a.download = 'fortiflow_deploy.conf'; a.click();
       URL.revokeObjectURL(url);
-    });
-    el('btn-cli-toggle')?.addEventListener('click', () => {
+    };
+    const btnToggle = el('btn-cli-toggle');
+    if (btnToggle) btnToggle.onclick = () => {
       const p2 = el('deploy-cli-pre');
       const b  = el('btn-cli-toggle');
       if (!p2 || !b) return;
       const collapsed = p2.style.display === 'none';
       p2.style.display = collapsed ? '' : 'none';
       b.textContent = collapsed ? '▾ Réduire' : '▸ Développer';
-    });
-    el('btn-diff-toggle')?.addEventListener('click', () => {
+    };
+    const btnDiff = el('btn-diff-toggle');
+    if (btnDiff) btnDiff.onclick = () => {
       const wrap = el('deploy-diff-wrap');
       const btn  = el('btn-diff-toggle');
       if (!wrap) return;
@@ -5101,7 +5127,7 @@ async function generateDeployConf() {
       btn.textContent = '✕ Fermer diff';
       // safe: only escHtml user content used
       wrap.innerHTML = html; // nosec — content sanitized via escHtml
-    });
+    };
 
     // Scroll to preview
     wrap?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -5150,6 +5176,9 @@ function showPreflightModal(pf) {
 
 document.querySelectorAll('.nav-item[data-view]').forEach(item => {
   item.addEventListener('click', () => navigateTo(item.dataset.view));
+  item.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); navigateTo(item.dataset.view); }
+  });
 });
 
 el('file-input').addEventListener('change', e => {

@@ -277,7 +277,7 @@ html, body {
   display: none;
   position: fixed;
   inset: 0;
-  background: rgba(9,9,14,0.92);
+  background: color-mix(in srgb, var(--bg0) 92%, transparent);
   z-index: 1000;
   flex-direction: column;
   align-items: center;
@@ -919,7 +919,7 @@ td.mono { font-family: var(--mono); }
 
 /* CLI preview block */
 .deploy-cli-pre {
-  background: #060608; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg0); border: 1px solid var(--border); border-radius: var(--radius);
   padding: 16px 18px; font-size: 11px; line-height: 1.8; max-height: 420px;
   overflow: auto; white-space: pre; color: #7ec89e; font-family: 'Fira Mono', 'Consolas', monospace;
 }
@@ -1098,6 +1098,7 @@ td.mono { font-family: var(--mono); }
 
 /* ── Service tooltip ─────────────────────────────────────────────────────────── */
 
+td:has([data-tip]) { overflow: visible; }
 [data-tip] { position: relative; }
 [data-tip]::after {
   content: attr(data-tip); position: absolute; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%);

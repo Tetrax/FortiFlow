@@ -19,18 +19,18 @@
 
     <div class="sidebar-section">
       <div class="sidebar-label">Navigation</div>
-      <div class="nav-item active" data-view="dashboard">
+      <div class="nav-item active" data-view="dashboard" role="button" tabindex="0">
         <span class="nav-icon">◈</span> Dashboard
       </div>
-      <div class="nav-item" data-view="analyse">
+      <div class="nav-item" data-view="analyse" role="button" tabindex="0">
         <span class="nav-icon">≡</span> Analyse
         <span class="nav-badge" id="badge-analyse">–</span>
       </div>
-      <div class="nav-item" data-view="polices">
+      <div class="nav-item" data-view="polices" role="button" tabindex="0">
         <span class="nav-icon">◎</span> Policies
         <span class="nav-badge" id="badge-polices">–</span>
       </div>
-      <div class="nav-item" data-view="deploy">
+      <div class="nav-item" data-view="deploy" role="button" tabindex="0">
         <span class="nav-icon">⊙</span> Déploiement
       </div>
     </div>
@@ -75,7 +75,7 @@
         <div class="topbar-sub"  id="view-sub">Chargez un fichier de log pour commencer</div>
       </div>
       <div style="display:flex;gap:8px;align-items:center;">
-        <button id="btn-theme" title="Thème clair/sombre" style="background:none;border:none;cursor:pointer;font-size:16px;padding:4px 6px;color:var(--text2);">🌙</button>
+        <button id="btn-theme" title="Thème clair/sombre" aria-label="Basculer le thème clair/sombre" style="background:none;border:none;cursor:pointer;font-size:16px;padding:4px 6px;color:var(--text2);">🌙</button>
         <div style="display:flex;gap:8px;" id="topbar-actions"></div>
       </div>
     </div>
