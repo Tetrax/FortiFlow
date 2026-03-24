@@ -18,7 +18,18 @@ export default async function IdeaDetailPage({ params, searchParams }: PageProps
 
   const idea = await prisma.idea.findFirst({
     where: { id, isVisible: true },
-    include: { category: { select: { name: true, icon: true } } },
+    select: {
+      id: true,
+      title: true,
+      description: true,
+      status: true,
+      isAnonymous: true,
+      authorName: true,
+      votesCount: true,
+      adminResponse: true,
+      createdAt: true,
+      category: { select: { name: true, icon: true } },
+    },
   })
 
   if (!idea) notFound()
@@ -49,7 +60,6 @@ export default async function IdeaDetailPage({ params, searchParams }: PageProps
               <p className="font-medium">Votre idée a bien été reçue !</p>
               <p className="text-sm mt-1">
                 Elle sera examinée par le CSE dans les meilleurs délais.
-                {idea.authorEmail && ' Vous recevrez un email de confirmation.'}
               </p>
             </div>
           </div>

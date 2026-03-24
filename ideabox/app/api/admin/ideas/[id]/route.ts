@@ -10,6 +10,31 @@ interface RouteParams {
   params: Promise<{ id: string }>
 }
 
+// GET : récupérer une idée (admin uniquement, toutes visibilités)
+export async function GET(_request: NextRequest, { params }: RouteParams) {
+  try {
+    const session = await auth()
+    if (!session?.user?.id) {
+      return NextResponse.json({ error: 'Non autorisé.' }, { status: 401 })
+    }
+
+    const { id: ideaId } = await params
+    const idea = await prisma.idea.findUnique({
+      where: { id: ideaId },
+      include: { category: { select: { name: true, icon: true } } },
+    })
+
+    if (!idea) {
+      return NextResponse.json({ error: 'Idée introuvable.' }, { status: 404 })
+    }
+
+    return NextResponse.json(idea)
+  } catch (error) {
+    console.error('Erreur GET /api/admin/ideas/[id] :', error)
+    return NextResponse.json({ error: 'Erreur serveur.' }, { status: 500 })
+  }
+}
+
 // Schéma de validation pour le PATCH
 const patchIdeaSchema = z.object({
   status: z.nativeEnum(IdeaStatus).optional(),

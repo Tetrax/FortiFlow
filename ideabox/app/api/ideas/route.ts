@@ -23,6 +23,8 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url)
     const categoryId = searchParams.get('categoryId')
     const status = searchParams.get('status') as IdeaStatus | null
+    const search = searchParams.get('search')?.trim() ?? ''
+    const sort = searchParams.get('sort') === 'votes' ? 'votes' : 'date'
     const page = Math.max(1, parseInt(searchParams.get('page') ?? '1', 10))
     const limit = Math.min(50, Math.max(1, parseInt(searchParams.get('limit') ?? '12', 10)))
     const skip = (page - 1) * limit
@@ -32,7 +34,12 @@ export async function GET(request: NextRequest) {
       isVisible: true,
       ...(categoryId ? { categoryId } : {}),
       ...(status && Object.values(IdeaStatus).includes(status) ? { status } : {}),
+      ...(search ? { title: { contains: search } } : {}),
     }
+
+    const orderBy = sort === 'votes'
+      ? { votesCount: 'desc' as const }
+      : { createdAt: 'desc' as const }
 
     const [ideas, total] = await Promise.all([
       prisma.idea.findMany({
@@ -40,7 +47,7 @@ export async function GET(request: NextRequest) {
         include: {
           category: { select: { name: true, icon: true } },
         },
-        orderBy: { createdAt: 'desc' },
+        orderBy,
         skip,
         take: limit,
       }),
@@ -89,7 +96,7 @@ export async function POST(request: NextRequest) {
 
     // Garde-fou 1 : limite anti-spam par IP
     const ip = getClientIp(request.headers)
-    const rateLimitError = checkRateLimit(ip)
+    const rateLimitError = await checkRateLimit(ip)
     if (rateLimitError) {
       return NextResponse.json({ error: rateLimitError }, { status: 429 })
     }
@@ -124,7 +131,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Catégorie introuvable.' }, { status: 404 })
     }
 
-    // Créer l'idée
+    // Créer l'idée — cachée par défaut, publication manuelle par le CSE
     const idea = await prisma.idea.create({
       data: {
         title: data.title,
@@ -133,6 +140,7 @@ export async function POST(request: NextRequest) {
         isAnonymous: data.isAnonymous,
         authorName: data.isAnonymous ? null : data.authorName ?? null,
         authorEmail: data.isAnonymous ? null : (data.authorEmail || null),
+        isVisible: false,
       },
     })
 

@@ -9,7 +9,8 @@ import { inputClass } from '@/lib/styles'
 function LoginForm() {
   const router = useRouter()
   const searchParams = useSearchParams()
-  const callbackUrl = searchParams.get('callbackUrl') ?? '/admin'
+  const rawCallback = searchParams.get('callbackUrl') ?? ''
+  const callbackUrl = rawCallback.startsWith('/') && !rawCallback.startsWith('//') ? rawCallback : '/admin'
   const errorParam = searchParams.get('error')
 
   const [username, setUsername] = useState('')

@@ -49,13 +49,23 @@ model Idea {
   status        IdeaStatus      @default(NEW)
   adminResponse String?         @db.Text
   votesCount    Int             @default(0)
-  isVisible     Boolean         @default(true)
+  isVisible     Boolean         @default(false)
   createdAt     DateTime        @default(now())
   updatedAt     DateTime        @updatedAt
   votes         Vote[]
   statusHistory StatusHistory[]
 
   @@map("ideas")
+}
+
+// Rate limit anti-spam par IP (persistant)
+model RateLimit {
+  id          String   @id @default(cuid())
+  ip          String
+  submittedAt DateTime @default(now())
+
+  @@index([ip, submittedAt])
+  @@map("rate_limits")
 }
 
 // Vote sur une idée (anti-double-vote par token)

@@ -50,7 +50,7 @@ export default function AdminIdeaPage() {
   useEffect(() => {
     async function load() {
       try {
-        const res = await fetch(`/api/ideas/${ideaId}`)
+        const res = await fetch(`/api/admin/ideas/${ideaId}`)
         if (!res.ok) { if (res.status === 404) router.push('/admin/idees'); return }
         const data = (await res.json()) as Idea
         setIdea(data)

@@ -15,6 +15,7 @@ const NAV_ITEMS = [
   { href: '/admin', label: '📊 Tableau de bord', exact: true, adminOnly: false },
   { href: '/admin/idees', label: '💡 Idées', exact: false, adminOnly: false },
   { href: '/admin/comptes', label: '👥 Comptes', exact: false, adminOnly: true },
+  { href: '/admin/profil', label: '👤 Profil', exact: false, adminOnly: false },
 ]
 
 export default function AdminLayout({ children, adminName, adminRole }: AdminLayoutProps) {
@@ -67,7 +68,7 @@ export default function AdminLayout({ children, adminName, adminRole }: AdminLay
               )}
               <ThemeToggle />
               <button
-                onClick={() => signOut({ callbackUrl: '/admin/login' })}
+                onClick={() => signOut({ callbackUrl: `${window.location.origin}/` })}
                 className="text-sm text-red-500 hover:text-red-400 font-medium"
               >
                 Déconnexion

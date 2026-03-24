@@ -24,6 +24,14 @@ export default async function SoumettreePage() {
       </nav>
 
       <main className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
+        <div className="mb-6 bg-amber-50 dark:bg-amber-900/20 border border-amber-300 dark:border-amber-700/50 rounded-xl p-4 text-sm text-amber-800 dark:text-amber-300 flex items-start gap-3">
+          <span className="text-xl shrink-0">⚠️</span>
+          <p>
+            <strong>Information importante :</strong> Seules les idées retenues par le CSE sont affichées publiquement.
+            Si votre idée n'apparaît pas, c'est qu'elle n'a pas été validée pour publication — elle a néanmoins bien été reçue et examinée par notre équipe.
+          </p>
+        </div>
+
         <div className="text-center mb-10">
           <h1 className="text-3xl font-bold text-[var(--text-primary)] mb-3">💡 Soumettre une idée</h1>
           <p className="text-[var(--text-secondary)] max-w-xl mx-auto">
@@ -36,7 +44,7 @@ export default async function SoumettreePage() {
           <IdeaForm categories={categories} />
         </div>
 
-        <div className="mt-6 bg-[var(--bg-accent)] border border-[#6B21E8]/30 rounded-xl p-4 text-sm text-[var(--text-on-accent)] flex items-start gap-3">
+        <div className="mt-4 bg-[var(--bg-accent)] border border-[#6B21E8]/30 rounded-xl p-4 text-sm text-[var(--text-on-accent)] flex items-start gap-3">
           <span className="text-xl shrink-0">🔒</span>
           <p>
             <strong className="text-[var(--text-primary)]">Votre confidentialité est protégée.</strong> Par défaut, votre idée est

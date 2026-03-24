@@ -12,6 +12,7 @@ export default function IdeaForm({ categories }: IdeaFormProps) {
   const router = useRouter()
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [submitted, setSubmitted] = useState(false)
   const [isAnonymous, setIsAnonymous] = useState(true)
 
   const [form, setForm] = useState({
@@ -52,8 +53,7 @@ export default function IdeaForm({ categories }: IdeaFormProps) {
       })
 
       if (res.ok) {
-        const data = (await res.json()) as { id: string }
-        router.push(`/idees/${data.id}?submitted=1`)
+        setSubmitted(true)
       } else {
         const data = (await res.json()) as { error?: string }
         setError(data.error ?? 'Une erreur est survenue. Réessayez.')
@@ -63,6 +63,33 @@ export default function IdeaForm({ categories }: IdeaFormProps) {
     } finally {
       setLoading(false)
     }
+  }
+
+  if (submitted) {
+    return (
+      <div className="text-center py-8 space-y-4">
+        <div className="text-5xl">🎉</div>
+        <h2 className="text-xl font-bold text-[var(--text-primary)]">Votre idée a bien été reçue !</h2>
+        <p className="text-[var(--text-secondary)] max-w-sm mx-auto">
+          Elle sera examinée par le CSE dans les meilleurs délais. Merci pour votre contribution.
+        </p>
+        <div className="flex justify-center gap-3 pt-2">
+          <button
+            onClick={() => { setSubmitted(false); setForm({ title: '', description: '', categoryId: '', authorName: '', authorEmail: '' }); setIsAnonymous(true) }}
+            className="text-sm underline text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+          >
+            Soumettre une autre idée
+          </button>
+          <span className="text-[var(--text-secondary)]">·</span>
+          <button
+            onClick={() => router.push('/')}
+            className="text-sm underline text-[var(--text-secondary)] hover:text-[var(--text-primary)] transition-colors"
+          >
+            Retour à l'accueil
+          </button>
+        </div>
+      </div>
+    )
   }
 
   return (

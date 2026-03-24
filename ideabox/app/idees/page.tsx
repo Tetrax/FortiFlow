@@ -21,6 +21,9 @@ interface ApiResponse {
   pagination: { total: number; pages: number; page: number }
 }
 
+const selectClass =
+  'rounded-lg border border-[var(--border)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B21E8] bg-[var(--bg-card)] text-[var(--text-primary)]'
+
 export default function IdeesPage() {
   const [ideas, setIdeas] = useState<Idea[]>([])
   const [categories, setCategories] = useState<Category[]>([])
@@ -28,6 +31,9 @@ export default function IdeesPage() {
   const [error, setError] = useState<string | null>(null)
   const [selectedCategory, setSelectedCategory] = useState('')
   const [selectedStatus, setSelectedStatus] = useState('')
+  const [sort, setSort] = useState('date')
+  const [search, setSearch] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useState('')
   const [page, setPage] = useState(1)
   const [totalPages, setTotalPages] = useState(1)
   const [total, setTotal] = useState(0)
@@ -39,13 +45,20 @@ export default function IdeesPage() {
       .catch(() => console.error('Erreur chargement catégories'))
   }, [])
 
+  // Debounce recherche : attend 350ms après la dernière frappe
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(search), 350)
+    return () => clearTimeout(timer)
+  }, [search])
+
   const loadIdeas = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      const params = new URLSearchParams({ page: String(page), limit: '12' })
+      const params = new URLSearchParams({ page: String(page), limit: '12', sort })
       if (selectedCategory) params.set('categoryId', selectedCategory)
       if (selectedStatus) params.set('status', selectedStatus)
+      if (debouncedSearch) params.set('search', debouncedSearch)
 
       const res = await fetch(`/api/ideas?${params.toString()}`)
       if (!res.ok) throw new Error('Erreur serveur')
@@ -59,12 +72,14 @@ export default function IdeesPage() {
     } finally {
       setLoading(false)
     }
-  }, [page, selectedCategory, selectedStatus])
+  }, [page, selectedCategory, selectedStatus, sort, debouncedSearch])
 
   useEffect(() => { void loadIdeas() }, [loadIdeas])
 
   function handleCategoryChange(id: string) { setSelectedCategory(id); setPage(1) }
   function handleStatusChange(status: string) { setSelectedStatus(status as IdeaStatus | ''); setPage(1) }
+  function handleSortChange(s: string) { setSort(s); setPage(1) }
+  function handleSearchChange(s: string) { setSearch(s); setPage(1) }
 
   return (
     <div className="min-h-screen bg-[var(--bg-primary)]">
@@ -81,7 +96,7 @@ export default function IdeesPage() {
             <div>
               <h1 className="text-3xl font-bold text-[var(--text-primary)]">💡 Les idées</h1>
               <p className="text-[var(--text-secondary)] mt-1">
-                {total > 0 ? `${total} idée${total > 1 ? 's' : ''} soumise${total > 1 ? 's' : ''}` : 'Aucune idée pour le moment'}
+                {total > 0 ? `${total} idée${total > 1 ? 's' : ''} publiée${total > 1 ? 's' : ''}` : 'Aucune idée pour le moment'}
               </p>
             </div>
             <Link
@@ -95,14 +110,34 @@ export default function IdeesPage() {
       </header>
 
       <main className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <div className="mb-8">
-          <CategoryFilter
-            categories={categories}
-            selectedCategory={selectedCategory}
-            selectedStatus={selectedStatus}
-            onCategoryChange={handleCategoryChange}
-            onStatusChange={handleStatusChange}
+        <div className="mb-8 space-y-3">
+          {/* Barre de recherche */}
+          <input
+            type="search"
+            value={search}
+            onChange={(e) => handleSearchChange(e.target.value)}
+            placeholder="Rechercher une idée…"
+            className="w-full rounded-lg border border-[var(--border)] px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B21E8] bg-[var(--bg-card)] text-[var(--text-primary)] placeholder:text-[var(--text-secondary)]"
           />
+
+          <div className="flex flex-col sm:flex-row gap-3">
+            <CategoryFilter
+              categories={categories}
+              selectedCategory={selectedCategory}
+              selectedStatus={selectedStatus}
+              onCategoryChange={handleCategoryChange}
+              onStatusChange={handleStatusChange}
+            />
+            <select
+              value={sort}
+              onChange={(e) => handleSortChange(e.target.value)}
+              className={selectClass}
+              aria-label="Trier par"
+            >
+              <option value="date">📅 Plus récentes</option>
+              <option value="votes">🔥 Plus votées</option>
+            </select>
+          </div>
         </div>
 
         {loading && (
@@ -163,7 +198,6 @@ export default function IdeesPage() {
         )}
       </main>
 
-      {/* Disclaimer CSE — visible et bien identifié */}
       <footer className="border-t border-amber-300 bg-amber-50 dark:bg-amber-900/20 dark:border-amber-700/50">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex items-start gap-3 text-sm text-amber-800 dark:text-amber-300">
           <span className="text-xl shrink-0 mt-0.5">⚠️</span>
