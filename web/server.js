@@ -450,10 +450,6 @@ app.post('/api/deploy/config-upload', upload.single('conffile'), async (req, res
       s.data.flows = null;
     }
 
-    // DEBUG — WAN detection diagnostics (à retirer après fix)
-    console.log('[DEBUG WAN] defaultRoutes:', (fortiConfig.staticRoutes || []).filter(r => r.dst === '0.0.0.0/0'));
-    console.log('[DEBUG WAN] interfaces WAN status:', Object.values(fortiConfig.interfaces).map(i => `${i.name}=${i.isWan ? 'WAN' : 'LAN'}`).join(', '));
-
     // Build a fast policyid → policy lookup (keyed as string for log compatibility)
     const policyMap = new Map();
     for (const pol of fortiConfig.existingPolicies || []) {
@@ -480,22 +476,6 @@ app.post('/api/deploy/config-upload', upload.single('conffile'), async (req, res
   } finally {
     fs.unlink(req.file.path, () => {});
   }
-});
-
-// GET /api/deploy/debug-interfaces — dump raw isWan state for troubleshooting
-app.get('/api/deploy/debug-interfaces', (req, res) => {
-  const s = requireSession(req, res);
-  if (!s) return;
-  if (!s.fortiConfig) return res.status(404).json({ error: 'no config' });
-  const { interfaces, staticRoutes } = s.fortiConfig;
-  const defaultRoutes = (staticRoutes || []).filter(r => r.dst === '0.0.0.0/0');
-  res.json({
-    defaultRoutes,
-    interfaces: Object.values(interfaces).map(i => ({
-      name: i.name, isWan: i.isWan, _roleWan: i._roleWan, isTunnel: i.isTunnel,
-      cidr: i.cidr, mode: i.mode,
-    })),
-  });
 });
 
 // GET /api/deploy/interfaces — return interfaces, zones, sdwan, WAN candidates
