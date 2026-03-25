@@ -376,10 +376,13 @@ function parseFortiConfig(text) {
     }
     // Tunnel = explicitement type tunnel ET sans vlanid (les sous-interfaces VLAN ne sont jamais des tunnels)
     const isTunnel = props.type === 'tunnel' && !props.vlanid;
-    // WAN : priorité au set role (lan/dmz/undefined = LAN, wan = WAN), sinon détection par IP
-    const roleLan = props.role === 'lan' || props.role === 'dmz';
-    const roleWan = props.role === 'wan';
-    const isWan = !isTunnel && (roleWan || (!roleLan && !isPrivateIP(props.ip?.split(' ')[0] || '') && !!props.ip));
+    // WAN : priorité au set role (lan/dmz/undefined = LAN, wan = WAN)
+    // puis mode dhcp/pppoe (route par défaut dynamique = WAN)
+    // sinon détection par IP (fallback)
+    const roleLan  = props.role === 'lan' || props.role === 'dmz';
+    const roleWan  = props.role === 'wan';
+    const modeDhcp = props.mode === 'dhcp' || props.mode === 'pppoe';
+    const isWan = !isTunnel && (roleWan || (!roleLan && (modeDhcp || (!isPrivateIP(props.ip?.split(' ')[0] || '') && !!props.ip))));
     interfaces[name] = {
       name,
       rawIp:    props.ip || '',
