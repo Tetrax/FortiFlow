@@ -2743,7 +2743,7 @@ async function deploy() {
           </div>
           <span class="toolbar-sep"></span>
           <span style="margin-left:auto"></span>
-          <input type="text" id="deploy-search" class="deploy-search-input" placeholder="Rechercher (IP, subnet, service, policy...)" value="${escHtml(deployState.searchFilter || '')}" title="Filtrer les policies par texte libre">
+          <input type="text" id="deploy-search" class="deploy-search-input" placeholder="Rechercher (IP, subnet, service, srcintf:X, dstintf:Y...)" value="${escHtml(deployState.searchFilter || '')}" title="Filtrer par texte libre. Syntaxe spéciale : srcintf:NOM ou dstintf:NOM pour filtrer par interface exacte">
         </div>
         <div class="missing-bar" id="deploy-missing-bar" style="display:none">
           <span id="deploy-missing-text"></span>
@@ -3399,8 +3399,17 @@ function mergeServices(group) {
 function filterDeployPolicies() {
   const q = (deployState.searchFilter || '').toLowerCase().trim();
   if (!q || !deployState.analyzed) return deployState.analyzed || [];
-  const terms = q.split(/\s+/);
+
+  // Syntaxe spéciale : srcintf:X, dstintf:X (filtres exacts sur l'interface)
+  const srcIntfFilter = (q.match(/\bsrcintf:(\S+)/) || [])[1] || null;
+  const dstIntfFilter = (q.match(/\bdstintf:(\S+)/) || [])[1] || null;
+  const plainQ = q.replace(/\b(?:src|dst)intf:\S+/g, '').trim();
+  const terms = plainQ ? plainQ.split(/\s+/) : [];
+
   return deployState.analyzed.filter(p => {
+    if (srcIntfFilter && (p._srcintf || '').toLowerCase() !== srcIntfFilter) return false;
+    if (dstIntfFilter && (p._dstintf || '').toLowerCase() !== dstIntfFilter) return false;
+    if (!terms.length) return true;
     const haystack = [
       p.srcSubnet, ...(p.srcSubnets || []),
       p.dstTarget, p._srcAddrName, p._dstAddrName,
