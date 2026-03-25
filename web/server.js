@@ -522,6 +522,23 @@ app.post('/api/deploy/dynamic-routes', (req, res) => {
     // Replace fullRoutes entirely — real routing table is ground truth
     s.fortiConfig.fullRoutes = parsed;
     sortRoutes(s.fortiConfig.fullRoutes);
+
+    // Re-correction WAN/LAN depuis la vraie table de routage :
+    // seule l'interface portant 0.0.0.0/0 est WAN, les autres sont LAN
+    const defaultDevices = new Set(
+      parsed.filter(r => r.dst === '0.0.0.0/0').map(r => r.device).filter(Boolean)
+    );
+    if (defaultDevices.size > 0) {
+      for (const iface of Object.values(s.fortiConfig.interfaces || {})) {
+        if (iface.isTunnel || iface._roleWan) continue;
+        iface.isWan = defaultDevices.has(iface.name);
+      }
+      for (const zone of Object.values(s.fortiConfig.zones || {})) {
+        zone.isWan = zone.members.length > 0 &&
+          zone.members.every(m => s.fortiConfig.interfaces[m]?.isWan);
+      }
+    }
+
     return res.json({ added: parsed.length, total: parsed.length, routes: parsed, replaced: true });
   } else if (protocol === 'ospf') {
     parsed = parseOspfRoutingTable(cliOutput);
