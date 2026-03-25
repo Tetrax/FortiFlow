@@ -78,22 +78,25 @@ function protoName(proto) {
 // Single-pass builder: computes all 4 subnet-group variants + port stats in
 // one iteration over flows, avoiding 5 separate passes.
 function buildAllSubnetGroupsAndPorts(flows, topN = 25) {
-  const all     = {};  // all flows
-  const allowed = {};  // accept only (not deny/drop)
-  const accept  = {};  // accept only (for matrix)
-  const deny    = {};  // deny + drop (for matrix + denied count)
+  const all          = {};  // all flows
+  const allowed      = {};  // accept only (not deny/drop)
+  const allowedByIntf = {}; // accept only, keyed by (srcSubnet|srcintf) — for per-interface policy grouping
+  const accept       = {};  // accept only (for matrix)
+  const deny         = {};  // deny + drop (for matrix + denied count)
 
   const tcpMap = new Map();
   const udpMap = new Map();
 
-  function addToGroup(groups, flow) {
+  // groupKey: explicit key override (e.g. "10.1.6.0/24|vlan850"); defaults to srcSubnet
+  function addToGroup(groups, flow, groupKey) {
     if (!isPrivate(flow.srcip)) return;
     const srcSubnet = getSubnet24(flow.srcip);
     if (!srcSubnet) return;
-    if (!groups[srcSubnet]) {
-      groups[srcSubnet] = { subnet: srcSubnet, srcIPs: new Set(), dsts: {} };
+    const key = groupKey !== undefined ? groupKey : srcSubnet;
+    if (!groups[key]) {
+      groups[key] = { subnet: srcSubnet, srcIPs: new Set(), dsts: {} };
     }
-    const sg = groups[srcSubnet];
+    const sg = groups[key];
     sg.srcIPs.add(flow.srcip);
     const dstKey  = isPrivate(flow.dstip) ? getSubnet24(flow.dstip) : flow.dstip;
     const dstType = isPrivate(flow.dstip) ? 'private' : 'public';
@@ -118,7 +121,14 @@ function buildAllSubnetGroupsAndPorts(flows, topN = 25) {
     const isAccept = f.action === 'accept';
 
     addToGroup(all, f);
-    if (!isDeny)    addToGroup(allowed, f);
+    if (!isDeny) {
+      addToGroup(allowed, f);
+      // Also group by (srcSubnet|srcintf) when srcintf is present — keeps per-interface flows separate
+      const srcSubnet24 = getSubnet24(f.srcip);
+      if (srcSubnet24 && isPrivate(f.srcip)) {
+        addToGroup(allowedByIntf, f, f.srcintf ? `${srcSubnet24}|${f.srcintf}` : srcSubnet24);
+      }
+    }
     if (isAccept)   addToGroup(accept, f);
     if (isDeny)     addToGroup(deny, f);
 
@@ -146,10 +156,11 @@ function buildAllSubnetGroupsAndPorts(flows, topN = 25) {
   }
 
   return {
-    subnetGroups:         all,
-    allowedSubnetGroups:  allowed,
-    acceptSubnetGroups:   accept,
-    denySubnetGroups:     deny,
+    subnetGroups:           all,
+    allowedSubnetGroups:    allowed,
+    allowedByIntfGroups:    allowedByIntf,
+    acceptSubnetGroups:     accept,
+    denySubnetGroups:       deny,
     portStats: {
       tcp: toTopList(tcpMap, 'TCP'),
       udp: toTopList(udpMap, 'UDP'),
@@ -161,7 +172,7 @@ function buildAnalysis(flowMap) {
   const flows = Array.from(flowMap.values());
 
   // ── Single pass: all subnet groups + port stats ──
-  const { subnetGroups, allowedSubnetGroups, acceptSubnetGroups, denySubnetGroups, portStats } =
+  const { subnetGroups, allowedSubnetGroups, allowedByIntfGroups, acceptSubnetGroups, denySubnetGroups, portStats } =
     buildAllSubnetGroupsAndPorts(flows);
 
   // ── Global stats (single pass) ──
@@ -252,7 +263,7 @@ function buildAnalysis(flowMap) {
   }
 
   // ── Policy suggestions (flux acceptés seulement) ──
-  const policies = buildPolicies(allowedSubnetGroups);
+  const policies = buildPolicies(allowedByIntfGroups);
 
   // ── Matrices accept vs deny (private→private heatmap) ──
   const matrix     = buildMatrix(acceptSubnetGroups);
@@ -287,7 +298,12 @@ function buildPolicies(subnetGroups) {
   const policies = [];
   let id = 1;
 
-  for (const [srcSubnet, sg] of Object.entries(subnetGroups)) {
+  for (const [groupKey, sg] of Object.entries(subnetGroups)) {
+    // Support composite keys: "10.1.6.0/24|vlan850" (srcintf-keyed) or plain "10.1.6.0/24"
+    const pipeIdx = groupKey.indexOf('|');
+    const srcSubnet    = pipeIdx >= 0 ? groupKey.slice(0, pipeIdx) : groupKey;
+    const flowSrcintf  = pipeIdx >= 0 ? groupKey.slice(pipeIdx + 1) : null;
+
     for (const [dstKey, dst] of Object.entries(sg.dsts)) {
       const services  = [...dst.services].sort();
       const ports     = [...dst.ports].map(Number).sort((a, b) => a - b);
@@ -308,6 +324,7 @@ function buildPolicies(subnetGroups) {
       policies.push({
         id: id++,
         srcSubnet,
+        flowSrcintf,   // interface observed in logs — used by analyzePolicies for srcintf detection
         dstTarget:   dstKey,
         dstType:     dst.type,
         services,

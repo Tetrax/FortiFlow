@@ -67,7 +67,7 @@ function el(id) { return document.getElementById(id); }
 function qs(sel, ctx = document) { return ctx.querySelector(sel); }
 
 function badgeHtml(type) {
-  const labels = { config: 'CONFIG', predefined: 'CONFIG', auto: 'AUTO', route: 'ROUTE', sdwan: 'SDWAN', subnet: 'SUBNET' };
+  const labels = { config: 'CONFIG', predefined: 'PREDEF', auto: 'AUTO', route: 'ROUTE', sdwan: 'SDWAN', subnet: 'SUBNET' };
   return `<span class="badge-${type}">${labels[type] || type.toUpperCase()}</span>`;
 }
 
@@ -1602,7 +1602,8 @@ function showMergeDiff(mode) {
   const original = deployState._analyzedOriginal || deployState.analyzed;
   if (!original) return;
   let preview;
-  if (mode === 'policy')   preview = mergeByPolicyId(original.map(p => ({ ...p })));
+  if (mode === 'policy')        preview = mergeByPolicyId(original.map(p => ({ ...p })));
+  else if (mode === 'service')  preview = mergeByService(original.map(p => ({ ...p })));
   else preview = mergeAnalyzedPolicies(original.map(p => ({ ...p })), mode);
 
   const beforeCount = original.length;
@@ -1991,6 +1992,20 @@ function mountDrawer() {
       const hint = document.getElementById('drawer-undo-hint');
       if (hint) hint.style.display = '';
     };
+    // Select-all services toggle
+    if (e.target.matches('.svc-sel-all')) {
+      _snapAndShow();
+      const _svcList = p.analysis?.services || [];
+      const _getSvcPP = s => { const m = s.label?.match(/^(TCP|UDP)\/(\d+)$/i); return m ? { port: parseInt(m[2],10), proto: m[1].toUpperCase() } : { port: s.port, proto: (s.proto||'').toUpperCase() }; };
+      const _selectable = _svcList.filter(s => { if (s.found) return false; const m = s.label?.match(/^(TCP|UDP)\/(\d+)$/i); return m || (!s.isNamed && s.port); });
+      if (!p._selectedSvcKeys) p._selectedSvcKeys = new Set();
+      const _allKeys = _selectable.map(s => { const {port, proto} = _getSvcPP(s); return `${port}/${proto}`; });
+      const _allSel = _allKeys.every(k => p._selectedSvcKeys.has(k));
+      if (_allSel) _allKeys.forEach(k => p._selectedSvcKeys.delete(k));
+      else _allKeys.forEach(k => p._selectedSvcKeys.add(k));
+      populateDrawer(_drawerIdx);
+      return;
+    }
     // Service selection toggle
     const svcRow = e.target.closest('.svc-selectable');
     const svcChk = e.target.matches('.svc-sel-chk') ? e.target : null;
@@ -2518,7 +2533,7 @@ function populateDrawer(idx) {
       <div class="drawer-section-title">Interfaces destination</div>
       <div class="drawer-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-dstintf">${ifOptsDst}</select></div>
     </div>
-    ${svcList.length ? `<div class="drawer-section"><div class="drawer-section-title">Services (${svcList.length})${selectableSvcs.length > 1 ? `<span style="font-size:10px;color:var(--text2);font-weight:400;margin-left:8px">Cliquer pour sélectionner et fusionner</span>` : ''}</div>${svcsHtml}${mergeBar}${propagateBanner}</div>` : ''}
+    ${svcList.length ? `<div class="drawer-section"><div class="drawer-section-title">Services (${svcList.length})${selectableSvcs.length > 1 ? `<label style="font-size:10px;color:var(--text2);font-weight:400;margin-left:8px;display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" class="svc-sel-all" ${selectedSvcs.length === selectableSvcs.length ? 'checked' : ''} style="cursor:pointer;margin:0"> Tout sélectionner</label>` : ''}</div>${svcsHtml}${mergeBar}${propagateBanner}</div>` : ''}
   `;
 }
 
@@ -2713,6 +2728,7 @@ async function deploy() {
               <div class="dropdown-item" data-merge="lan">Fusionner LAN</div>
               <div class="dropdown-item" data-merge="all">Tout fusionner</div>
               <div class="dropdown-item" data-merge="policy">Fusionner par policy</div>
+              <div class="dropdown-item" data-merge="service">Fusionner par service</div>
               <div class="dropdown-sep"></div>
               <div class="dropdown-item" data-merge="reset">↺ Réinitialiser</div>
             </div>
@@ -3793,6 +3809,162 @@ function mergeByPolicyId(policies) {
   return merged;
 }
 
+// ── Fusion par service : policies partageant le même ensemble de services
+//    ET la même paire d'interfaces sont regroupées en une seule règle multi-src/multi-dst.
+function mergeByService(policies) {
+  const groups = new Map(); // serviceKey||srcintf||dstintf → [policies]
+
+  for (const p of policies) {
+    const svcKey = serviceSetKey(p);
+    const src    = p._srcintf || p.analysis?.srcIface || '';
+    const dst    = p._dstintf || p.analysis?.dstIface || '';
+    const key    = `${svcKey}||${src}||${dst}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(p);
+  }
+
+  const merged = [];
+
+  for (const [, group] of groups) {
+    if (group.length === 1) { merged.push({ ...group[0] }); continue; }
+
+    const base          = group[0];
+    const allServices   = mergeServices(group);
+    const totalSessions = group.reduce((s, p) => s + (p.sessions || 0), 0);
+    const allPolicyIds  = [...new Set(group.flatMap(p => p.policyIds || []))].sort((a, b) => Number(a) - Number(b));
+
+    const isWan      = group.some(p => p.dstType === 'public' || p.dstTarget === 'all' || p._isWan);
+    const srcSubnets = [...new Set(group.map(p => p.srcSubnet).filter(Boolean))].sort();
+    const dstTargets = isWan
+      ? ['all']
+      : [...new Set(group.map(p => p.dstTarget).filter(t => t && t !== 'all'))];
+    const multiSrc   = srcSubnets.length > 1;
+    const multiDst   = !isWan && dstTargets.length > 1;
+
+    const allSrcHosts = [...new Set(group.flatMap(p => p.srcHosts || []))].sort();
+    const allDstHosts = [...new Set(group.flatMap(p => p.dstHosts || []))].sort();
+
+    // Merge host name maps
+    const mergedSrcHostNames = {};
+    const mergedDstHostNames = {};
+    const mergedSrcHF = new Set();
+    const mergedDstHF = new Set();
+    for (const p of group) {
+      Object.assign(mergedSrcHostNames, p._srcHostNames || {});
+      Object.assign(mergedDstHostNames, p._dstHostNames || {});
+      (p._srcHostsFound || []).forEach(h => mergedSrcHF.add(h));
+      (p._dstHostsFound || []).forEach(h => mergedDstHF.add(h));
+    }
+
+    // Build _multiSrcSubnets
+    let multiSrcSubnets = null;
+    if (multiSrc) {
+      multiSrcSubnets = srcSubnets.map(subnet => {
+        const subnetPols = group.filter(p => p.srcSubnet === subnet);
+        const hosts      = [...new Set(subnetPols.flatMap(p => p.srcHosts || []))].sort();
+        const srcAddr    = subnetPols.find(p => p.analysis?.srcAddr?.found)?.analysis?.srcAddr
+                         || subnetPols[0]?.analysis?.srcAddr;
+        return { subnet, hosts, useSubnet: hosts.length >= 5,
+          addrName: srcAddr?.found ? srcAddr.name : '', addrFound: !!(srcAddr?.found) };
+      });
+    }
+
+    // Build _multiDstSubnets
+    const DST_SUBNET_THRESHOLD = 5;
+    let multiDstSubnets = null;
+    if (multiDst) {
+      multiDstSubnets = dstTargets.map(subnet => {
+        const subnetPols = group.filter(p => p.dstTarget === subnet);
+        const hosts      = [...new Set(subnetPols.flatMap(p => p.dstHosts || []))].sort();
+        const dstAddr    = subnetPols.find(p => p.analysis?.dstAddr?.found)?.analysis?.dstAddr
+                         || subnetPols[0]?.analysis?.dstAddr;
+        return { subnet, hosts, useSubnet: hosts.length >= DST_SUBNET_THRESHOLD,
+          addrName: dstAddr?.found ? dstAddr.name : '', addrFound: !!(dstAddr?.found) };
+      });
+    }
+
+    // Check for existing address groups (src)
+    let existingSrcGrp = null;
+    if (multiSrc && deployState.addrGroups) {
+      const srcAddrNames = srcSubnets.map(s => {
+        const sp = group.find(p => p.srcSubnet === s);
+        return sp?.analysis?.srcAddr?.found ? sp.analysis.srcAddr.name : null;
+      });
+      if (srcAddrNames.every(Boolean)) {
+        const memberNames = new Set(srcAddrNames);
+        for (const [grpName, grp] of Object.entries(deployState.addrGroups)) {
+          const grpMembers = new Set(grp.members);
+          if (grpMembers.size === memberNames.size && [...memberNames].every(m => grpMembers.has(m))) {
+            existingSrcGrp = grpName; break;
+          }
+        }
+      }
+    }
+
+    // Check for existing address groups (dst)
+    let existingDstGrp = null;
+    if (multiDst && deployState.addrGroups) {
+      const dstAddrNames = dstTargets.map(s => {
+        const dp = group.find(p => p.dstTarget === s);
+        return dp?.analysis?.dstAddr?.found ? dp.analysis.dstAddr.name : null;
+      }).filter(Boolean);
+      if (dstAddrNames.length === dstTargets.length) {
+        const memberNames = new Set(dstAddrNames);
+        for (const [grpName, grp] of Object.entries(deployState.addrGroups)) {
+          const grpMembers = new Set(grp.members);
+          if (grpMembers.size === memberNames.size && [...memberNames].every(m => grpMembers.has(m))) {
+            existingDstGrp = grpName; break;
+          }
+        }
+      }
+    }
+
+    merged.push({
+      ...base,
+      srcSubnet:        srcSubnets[0],
+      srcSubnets,
+      dstTarget:        isWan ? 'all' : dstTargets[0],
+      dstTargets,
+      dstType:          isWan ? 'public' : base.dstType,
+      _isMultiDst:      multiDst,
+      _multiDstSubnets: multiDst ? multiDstSubnets : null,
+      _multiSrcSubnets: multiSrcSubnets,
+      sessions:         totalSessions,
+      serviceDesc:      allServices.map(s => s.label).join(', '),
+      policyIds:        allPolicyIds,
+      srcHosts:         allSrcHosts,
+      dstHosts:         allDstHosts,
+      _use32Src:        !multiSrc && allSrcHosts.length >= 1 && allSrcHosts.length <= AUTO32_THRESHOLD,
+      _use32Dst:        !multiDst && !isWan && allDstHosts.length >= 1 && allDstHosts.length <= AUTO32_THRESHOLD,
+      _isWan:           isWan,
+      _nat:             isWan,
+      _mergedCount:     group.length,
+      _isSvcMerge:      true,
+      _mergedFrom:      group.map(p => ({ srcSubnet: p.srcSubnet, dstTarget: p.dstTarget, analysis: { services: p.analysis?.services } })),
+      _srcAddrName:     existingSrcGrp || '',
+      _srcAddrGrpFound: !!existingSrcGrp,
+      _useSrcGroup:     !!existingSrcGrp,
+      _dstAddrName:     isWan ? 'all' : (existingDstGrp || ''),
+      _dstAddrGrpFound: !!existingDstGrp,
+      _useDstGroup:     !!existingDstGrp,
+      _policyName:      '',
+      _srcHostNames:    Object.keys(mergedSrcHostNames).length ? mergedSrcHostNames : undefined,
+      _dstHostNames:    Object.keys(mergedDstHostNames).length ? mergedDstHostNames : undefined,
+      _srcHostsFound:   mergedSrcHF.size ? [...mergedSrcHF] : undefined,
+      _dstHostsFound:   mergedDstHF.size ? [...mergedDstHF] : undefined,
+      srcAddrNames:     existingSrcGrp ? null : (multiSrc ? srcSubnets.map(s => `FF_${escSlug(s)}`) : null),
+      analysis: {
+        ...base.analysis,
+        dstAddr:   isWan ? { found: true, name: 'all', cidr: 'all' } : base.analysis?.dstAddr,
+        services:  allServices,
+        needsWork: allServices.some(s => !s.found),
+      },
+    });
+  }
+
+  return merged;
+}
+
 function applyMerge(mode) {
   if (!deployState.analyzed) return;
   if (mode === 'reset') {
@@ -3829,6 +4001,8 @@ function applyMerge(mode) {
     // Always merge from original
     if (mode === 'policy') {
       deployState.analyzed = mergeByPolicyId(deployState._analyzedOriginal);
+    } else if (mode === 'service') {
+      deployState.analyzed = mergeByService(deployState._analyzedOriginal);
     } else {
       deployState.analyzed = mergeAnalyzedPolicies(deployState._analyzedOriginal, mode);
     }

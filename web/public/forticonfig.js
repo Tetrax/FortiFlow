@@ -125,11 +125,7 @@ function networkAddress(ip, prefix) {
 function fortiSubnetToCIDR(subnet) {
   if (!subnet) return null;
   const parts = subnet.trim().split(/\s+/);
-  if (parts.length === 2) {
-    const bits = maskBits(parts[1]);
-    if (bits === null) return null;
-    return `${parts[0]}/${bits}`;
-  }
+  if (parts.length === 2) return `${parts[0]}/${maskBits(parts[1])}`;
   if (parts.length === 1 && parts[0].includes('/')) return parts[0];
   return null;
 }
@@ -138,12 +134,8 @@ function parsePorts(portrange) {
   if (!portrange) return [];
   const ports = [];
   for (const part of portrange.trim().split(/\s+/)) {
-    const clean = part.split(':')[0]; // strip :src_portrange suffix (FortiGate format)
-    let [a, b] = clean.split('-').map(Number);
-    if (b && !isNaN(b)) {
-      if (a > b) { const t = a; a = b; b = t; }
-      for (let i = a; i <= Math.min(b, a + 10000); i++) ports.push(i);
-    }
+    const [a, b] = part.split('-').map(Number);
+    if (b && !isNaN(b)) { for (let i = a; i <= Math.min(b, a + 10000); i++) ports.push(i); }
     else if (a && !isNaN(a)) ports.push(a);
   }
   return ports;
@@ -171,7 +163,7 @@ const PREDEFINED = {
  389: { proto: 'tcp', name: 'LDAP'         },
  443: { proto: 'tcp', name: 'HTTPS'        },
  445: { proto: 'tcp', name: 'SMB'          },
- 465: { proto: 'tcp', name: 'SMTPS'        },
+ 465: { proto: 'tcp', name: 'SMTP'         },
  587: { proto: 'tcp', name: 'SMTP'         },
  636: { proto: 'tcp', name: 'LDAPS'        },
  993: { proto: 'tcp', name: 'IMAPS'        },
@@ -315,16 +307,11 @@ function parseFortiConfig(text) {
   // ── Custom services ──
   const customServices = {};
   for (const [name, props] of Object.entries(rawCustomSvcs)) {
-    const proto = (props.protocol || 'TCP/UDP/SCTP').toUpperCase();
-    const icmptype = props.icmptype !== undefined && props.icmptype !== '' ? parseInt(props.icmptype, 10) : null;
-    const icmpcode = props.icmpcode !== undefined && props.icmpcode !== '' ? parseInt(props.icmpcode, 10) : null;
     customServices[name] = {
       name,
-      proto,
+      proto:    (props.protocol || 'TCP/UDP/SCTP').toUpperCase(),
       tcpPorts: parsePorts(props['tcp-portrange'] || ''),
       udpPorts: parsePorts(props['udp-portrange'] || ''),
-      icmptype,
-      icmpcode,
     };
   }
 
@@ -361,9 +348,7 @@ function parseFortiConfig(text) {
   // ── Interfaces ──
   const interfaces = {};
   for (const [name, props] of Object.entries(rawInterfaces)) {
-    if (props.type === 'loopback') continue;
-    // Garder les tunnels même si status down (ils existent dans la conf et servent aux policies)
-    if (props.status === 'down' && props.type !== 'tunnel') continue;
+    if (props.type === 'loopback' || props.status === 'down') continue;
 
     let cidr = null, prefix = null;
     if (props.ip) {
@@ -614,8 +599,6 @@ function parseBgpNetworkTable(text) {
 }
 
 // Longest-prefix match dans la table de routes
-// PRE-CONDITION: routes DOIT être trié par préfixe décroissant (via sortRoutes)
-// — la première correspondance trouvée est la plus spécifique
 // skipDefault=true pour les recherches srcintf (pas de fallback 0.0.0.0/0)
 function findInterfaceByRoute(dstCidr, routes, skipDefault) {
   if (!routes || routes.length === 0) return null;
@@ -799,100 +782,23 @@ function validateAgainstExisting(generatedPolicies, existingPolicies) {
   return warnings;
 }
 
-// Match an ICMP/CODE/TYPE label (FortiGate log format) against custom ICMP services
-function findIcmpService(label, customServices) {
-  const m = label.match(/^ICMP\/(\d+)\/(\d+)$/i);
-  if (!m) return null;
-  const type = parseInt(m[1], 10), code = parseInt(m[2], 10);
-  // Standard ICMP/type/code ordering
-  for (const [name, svc] of Object.entries(customServices)) {
-    if (svc.proto !== 'ICMP' && svc.proto !== 'ICMP6') continue;
-    if (svc.icmptype === null) continue; // ALL_ICMP — skip for specific match
-    if (svc.icmptype !== type) continue;
-    if (svc.icmpcode !== null && svc.icmpcode !== code) continue;
-    return { name, source: 'custom', portHint: `ICMP type ${type} code ${code}` };
-  }
-  // No specific match → try ALL_ICMP fallback
-  for (const [name, svc] of Object.entries(customServices)) {
-    if (svc.proto === 'ICMP' && svc.icmptype === null) return { name, source: 'custom', portHint: `ICMP type ${type} code ${code}` };
-  }
-  return null;
-}
-
-// Fuzzy name match: find a service by label similarity (prefix/contains) + observed ports filter
-function findServiceByName(label, observedPorts, protoName, customServices) {
-  // Never fuzzy-match port-notation labels — they have their own resolution path
-  if (/^(TCP|UDP)\/\d+$/i.test(label)) return null;
-  const norm = label.toLowerCase().replace(/[-_\s]/g, '');
-
-  // 1. Case-insensitive exact match in custom services
-  for (const [name, cs] of Object.entries(customServices)) {
-    if (name.toLowerCase() === label.toLowerCase()) {
-      const tcp = (cs.tcpPorts || []).slice(0, 8).join(', ');
-      const udp = (cs.udpPorts || []).slice(0, 8).join(', ');
-      const portHint = [tcp && `TCP: ${tcp}`, udp && `UDP: ${udp}`].filter(Boolean).join(' / ') || null;
-      return { found: true, name, source: 'custom', portHint };
-    }
-  }
-
-  // 2. Prefix match in PREDEFINED names (e.g. "NETBIOS" matches "NetBIOS_NS", "NetBIOS_DS")
-  const predefCandidates = [];
-  for (const [port, entry] of Object.entries(PREDEFINED)) {
-    const en = entry.name.toLowerCase().replace(/[-_\s]/g, '');
-    const minLen = Math.max(5, Math.min(norm.length, en.length) - 2);
-    if ((en.startsWith(norm) || norm.startsWith(en)) && norm.length >= 5 && en.length >= 5) {
-      predefCandidates.push({ port: parseInt(port, 10), proto: entry.proto, name: entry.name });
-    }
-  }
-  if (predefCandidates.length > 0) {
-    // Filter by observed ports if available
-    const byPort = observedPorts?.length
-      ? predefCandidates.filter(c => observedPorts.includes(c.port))
-      : predefCandidates;
-    const pool = byPort.length > 0 ? byPort : predefCandidates;
-    // Accept if all matching entries point to the same root name (e.g. NetBIOS_NS / NetBIOS_DS → "NetBIOS")
-    const roots = [...new Set(pool.map(c => c.name.replace(/[-_][A-Z0-9]+$/i, '')))];
-    if (roots.length === 1) {
-      // Pick the one whose port is most observed, or just the first
-      const best = byPort[0] || pool[0];
-      const portHint = pool.map(c => `${c.proto.toUpperCase()}: ${c.port}`).join(', ');
-      return { found: true, name: best.name, source: 'predefined', portHint };
-    }
-  }
-
-  // 3. Prefix match in custom service names (min 5 chars)
-  for (const [name, cs] of Object.entries(customServices)) {
-    const cn = name.toLowerCase().replace(/[-_\s]/g, '');
-    if ((cn.startsWith(norm) || norm.startsWith(cn)) && norm.length >= 5 && cn.length >= 5) {
-      return { found: true, name, source: 'custom', portHint: null };
-    }
-  }
-
-  return null;
-}
-
-function findService(port, protoName, customServices, opts) {
+function findService(port, protoName, customServices) {
   const p     = parseInt(port, 10);
   const isUdp = /^(udp|17)$/i.test(String(protoName));
-  const maxPortCount = opts?.maxPortCount || Infinity;  // skip services broader than this
 
   const matches = [];
 
   // Check predefined
   const predef = findPredefinedService(p, protoName);
-  if (predef) matches.push({ name: predef, source: 'predefined', portCount: 1 });
+  if (predef) matches.push({ name: predef, source: 'predefined' });
 
   // Check custom services from config (may be multiple)
   for (const [name, svc] of Object.entries(customServices)) {
     const ports = isUdp ? svc.udpPorts : svc.tcpPorts;
-    if (ports.length <= maxPortCount && ports.includes(p)) {
-      matches.push({ name, source: 'custom', portCount: ports.length });
-    }
+    if (ports.includes(p)) matches.push({ name, source: 'custom' });
   }
 
   if (matches.length === 0) return { found: false };
-  // Prefer most specific match (fewest ports)
-  matches.sort((a, b) => a.portCount - b.portCount);
   return { found: true, name: matches[0].name, source: matches[0].source, allMatches: matches };
 }
 
@@ -924,90 +830,33 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
       for (const svc of p.services) {
         const knownPredef = Object.values(PREDEFINED).some(e => e.name === svc);
         const customMatch = customServices[svc];
-        // Try ICMP/CODE/TYPE label matching if not directly found
-        const icmpMatch = (!knownPredef && !customMatch) ? findIcmpService(svc, customServices) : null;
-
-        // Fuzzy name match (e.g. "NETBIOS" → "NetBIOS_NS" / "NetBIOS_DS")
-        // Skip port-notation labels (e.g. "TCP/853") — they use the port-based fallback path
-        const isPortNotationLabel = /^(TCP|UDP)\/\d+$/i.test(svc);
-        const fuzzyMatch = (!knownPredef && !customMatch && !icmpMatch && !isPortNotationLabel)
-          ? findServiceByName(svc, p.ports, protoLabel, customServices)
-          : null;
-
-        // Fallback: if name-based lookup failed, try matching by port against custom services
-        let portFallback = null;
-        if (!knownPredef && !customMatch && !icmpMatch && !fuzzyMatch) {
-          // Port-notation label (e.g. "UDP/11436"): use the port embedded in the label
-          const pnm = svc.match(/^(TCP|UDP)\/(\d+)$/i);
-          if (pnm) {
-            const m = findService(parseInt(pnm[2], 10), pnm[1], customServices, { maxPortCount: 100 });
-            if (m.found) portFallback = m;
-          } else if (p.ports?.length > 0) {
-            // Named service (e.g. "NETBIOS-RPC"): try all observed ports, accept only if
-            // all matches resolve to the same service (unambiguous single candidate)
-            const candidates = [];
-            for (const port of p.ports) {
-              const m = findService(port, protoLabel, customServices, { maxPortCount: 5 });
-              if (m.found) candidates.push(m);
-            }
-            const uniqNames = [...new Set(candidates.map(m => m.name))];
-            if (uniqNames.length === 1) portFallback = candidates[0];
-          }
-        }
 
         // Build port hint for tooltip
         let portHint = '';
-        if (icmpMatch) {
-          portHint = icmpMatch.portHint;
-        } else if (customMatch || portFallback) {
-          const cs = customMatch || customServices[portFallback.name];
-          if (cs && (cs.proto === 'ICMP' || cs.proto === 'ICMP6')) {
-            portHint = cs.icmptype !== null
-              ? `${cs.proto} type ${cs.icmptype}${cs.icmpcode !== null ? ` code ${cs.icmpcode}` : ''}`
-              : cs.proto;
-          } else if (cs) {
-            const tcp = cs.tcpPorts.slice(0, 8).join(', ');
-            const udp = cs.udpPorts.slice(0, 8).join(', ');
-            portHint = [tcp && `TCP: ${tcp}`, udp && `UDP: ${udp}`].filter(Boolean).join(' / ');
-          } else if (portFallback) {
-            portHint = `${protoLabel}: ${p.ports[0]} (observé)`;
-          }
-        } else if (fuzzyMatch) {
-          portHint = fuzzyMatch.portHint || '';
+        if (customMatch) {
+          const tcp = customMatch.tcpPorts.slice(0, 8).join(', ');
+          const udp = customMatch.udpPorts.slice(0, 8).join(', ');
+          portHint = [tcp && `TCP: ${tcp}`, udp && `UDP: ${udp}`].filter(Boolean).join(' / ');
         } else if (knownPredef) {
           const entries = Object.entries(PREDEFINED).filter(([, e]) => e.name === svc);
           portHint = entries.map(([port, e]) => `${e.proto === 'both' ? 'TCP+UDP' : e.proto.toUpperCase()}: ${port}`).join(', ');
-        } else if (p.ports?.length === 1) {
-          // Only show observed port when there's exactly one — otherwise it's ambiguous
-          portHint = `${protoLabel}: ${p.ports[0]} (observé)`;
+        } else if (p.ports?.length) {
+          // Inconnu — montrer les ports observés dans les logs pour ce flux
+          const proto = protoLabel;
+          portHint = p.ports.slice(0, 8).map(pt => `${proto}: ${pt}`).join(', ') + ' (observé)';
         }
 
-        const found = knownPredef || !!customMatch || !!icmpMatch || !!fuzzyMatch || !!portFallback;
-        const resolvedName = icmpMatch ? icmpMatch.name
-          : fuzzyMatch ? fuzzyMatch.name
-          : portFallback ? portFallback.name
-          : (knownPredef || customMatch ? svc : null);
         serviceItems.push({
           label: svc,
-          found,
-          name:  resolvedName,
-          source: icmpMatch ? icmpMatch.source : fuzzyMatch ? fuzzyMatch.source : portFallback ? portFallback.source : (knownPredef ? 'predefined' : customMatch ? 'custom' : null),
-          suggestedName: resolvedName || svc,
+          found: knownPredef || !!customMatch,
+          name:  knownPredef || customMatch ? svc : null,
+          source: knownPredef ? 'predefined' : customMatch ? 'custom' : null,
+          suggestedName: svc,
           isNamed: true,
           portHint,
         });
       }
     }
-    // Dédupliquer : si un label ICMP/X/Y résout vers le même nom qu'un service nommé explicite, supprimer le doublon
-    const seenNames = new Set();
-    const deduped = [];
-    for (const item of serviceItems) {
-      const key = item.name || item.label;
-      if (!seenNames.has(key)) { seenNames.add(key); deduped.push(item); }
-    }
-    serviceItems.length = 0;
-    deduped.forEach(i => serviceItems.push(i));
-
     // Fallback sur les ports bruts si aucun service nommé reconnu (ou tous ISDB)
     if (serviceItems.length === 0 && p.ports?.length) {
       for (const port of p.ports.slice(0, 10)) {
@@ -1025,20 +874,14 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
       }
     }
 
-    // Auto-detect source interface
-    // Priority: 1. srcintf observed in logs (most reliable), 2. route table lookup
+    // Auto-detect source interface (full route table: static + connected, no default route fallback)
     const routes = fortiConfig.fullRoutes || fortiConfig.staticRoutes || [];
     let srcIfaceName   = null;
-    let srcIfaceSource = 'auto'; // 'log' | 'route' | 'subnet'
-    if (p.flowSrcintf) {
-      srcIfaceName   = p.flowSrcintf;
-      srcIfaceSource = 'log';
-    } else {
-      const srcRouteDevice = findInterfaceByRoute(p.srcSubnet, routes, true);
-      if (srcRouteDevice) {
-        srcIfaceName   = srcRouteDevice;
-        srcIfaceSource = 'route';
-      }
+    let srcIfaceSource = 'auto'; // 'route' | 'connected' | 'subnet'
+    const srcRouteDevice = findInterfaceByRoute(p.srcSubnet, routes, true);
+    if (srcRouteDevice) {
+      srcIfaceName   = srcRouteDevice;
+      srcIfaceSource = 'route';
     }
 
     // Auto-detect destination interface
@@ -1163,25 +1006,6 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
 }
 
 // ─── CLI config generator ─────────────────────────────────────────────────────
-
-// Sanitise une valeur pour insertion dans une commande CLI FortiGate (entre quotes)
-function safeCli(str) { return (str || '').replace(/["\\]/g, '_').replace(/[\r\n]/g, ''); }
-
-// Consolidate sorted port numbers into compact range notation for FortiGate CLI
-// e.g. [1046,1047,1131,1132,1133] → "1046-1047 1131-1133"
-function consolidatePortRanges(ports) {
-  if (!ports || ports.length === 0) return '';
-  const sorted = [...ports].sort((a, b) => a - b);
-  const ranges = [];
-  let start = sorted[0], prev = sorted[0];
-  for (let i = 1; i <= sorted.length; i++) {
-    const cur = sorted[i];
-    if (cur === prev + 1) { prev = cur; continue; }
-    ranges.push(start === prev ? String(start) : `${start}-${prev}`);
-    start = cur; prev = cur;
-  }
-  return ranges.join(' ');
-}
 
 function generateConfig(selectedPolicies, opts = {}) {
   const {
@@ -1357,13 +1181,7 @@ function generateConfig(selectedPolicies, opts = {}) {
       } else {
         const customName = p.serviceNames?.[svc.label] || svc.suggestedName;
         serviceNames.push(customName);
-        if (svc.ports?.length) {
-          // Merged multi-port service
-          newServices.set(customName, { name: customName, ports: svc.ports, proto: svc.proto });
-        } else if (svc.portRange) {
-          // Range service e.g. "7000-35000"
-          newServices.set(customName, { name: customName, portRange: svc.portRange, proto: svc.proto });
-        } else if (svc.port) {
+        if (svc.port) {
           newServices.set(`${svc.port}/${svc.proto}`, {
             name: customName, port: svc.port, proto: svc.proto,
           });
@@ -1403,28 +1221,6 @@ function generateConfig(selectedPolicies, opts = {}) {
     });
   }
 
-  // ── Sort policies: most specific first (least permissive → most permissive) ──
-  // Criteria (descending specificity):
-  //   1. Source prefix length (larger = more specific)
-  //   2. Destination prefix length (larger = more specific; "all"/public = 0)
-  //   3. Number of services (fewer = more specific)
-  const _prefixLen = (cidr) => {
-    if (!cidr || cidr === 'all') return 0;
-    const m = String(cidr).match(/\/(\d+)/);
-    return m ? parseInt(m[1], 10) : 32;
-  };
-  const _maxPrefix = (subnetStr) => {
-    if (!subnetStr) return 0;
-    return Math.max(...String(subnetStr).split(',').map(s => _prefixLen(s.trim())));
-  };
-  policyBlocks.sort((a, b) => {
-    const srcDiff = _maxPrefix(b.srcSubnet) - _maxPrefix(a.srcSubnet);
-    if (srcDiff !== 0) return srcDiff;
-    const dstDiff = _prefixLen(b.dstTarget) - _prefixLen(a.dstTarget);
-    if (dstDiff !== 0) return dstDiff;
-    return a.serviceNames.length - b.serviceNames.length;
-  });
-
   // ── Build CLI output ──
   const L = [];
   L.push(`# Policies: ${policyBlocks.length}  |  Adresses: ${newAddresses.size}  |  Groupes: ${newAddrGroups.size}  |  Services: ${newServices.size}`);
@@ -1439,7 +1235,7 @@ function generateConfig(selectedPolicies, opts = {}) {
       const [ip, pfxStr] = (cidr || '').split('/');
       const prefix = parseInt(pfxStr, 10) || 32;
       const mask   = cidrToMask(prefix);
-      L.push(`    edit "${safeCli(name)}"`);
+      L.push(`    edit "${name}"`);
       L.push(`        set subnet ${ip} ${mask}`);
       L.push(`    next`);
     }
@@ -1453,8 +1249,8 @@ function generateConfig(selectedPolicies, opts = {}) {
     L.push('# ══════════════════════════════════════════════════');
     L.push('config firewall addrgrp');
     for (const [grpName, members] of newAddrGroups) {
-      const memberStr = members.map(m => `"${safeCli(m)}"`).join(' ');
-      L.push(`    edit "${safeCli(grpName)}"`);
+      const memberStr = members.map(m => `"${m}"`).join(' ');
+      L.push(`    edit "${grpName}"`);
       L.push(`        set member ${memberStr}`);
       L.push(`    next`);
     }
@@ -1471,11 +1267,10 @@ function generateConfig(selectedPolicies, opts = {}) {
       const proto = String(svc.proto).toUpperCase();
       const isUdp = proto === 'UDP' || proto === '17';
       const isTcp = !isUdp;
-      const portrangeVal = svc.portRange || (svc.ports?.length ? consolidatePortRanges(svc.ports) : String(svc.port));
-      L.push(`    edit "${safeCli(svc.name)}"`);
+      L.push(`    edit "${svc.name}"`);
       L.push(`        set protocol TCP/UDP/SCTP`);
-      if (isTcp) L.push(`        set tcp-portrange ${portrangeVal}`);
-      if (isUdp) L.push(`        set udp-portrange ${portrangeVal}`);
+      if (isTcp) L.push(`        set tcp-portrange ${svc.port}`);
+      if (isUdp) L.push(`        set udp-portrange ${svc.port}`);
       L.push(`    next`);
     }
     L.push('end');
@@ -1488,26 +1283,26 @@ function generateConfig(selectedPolicies, opts = {}) {
     L.push('# ══════════════════════════════════════════════════');
     L.push('config firewall policy');
     for (const pol of policyBlocks) {
-      const svcStr = pol.serviceNames.map(s => `"${safeCli(s)}"`).join(' ');
+      const svcStr = pol.serviceNames.map(s => `"${s}"`).join(' ');
       L.push(`    edit 0`);
-      if (pol.name) L.push(`        set name "${safeCli(pol.name)}"`);
+      if (pol.name) L.push(`        set name "${pol.name}"`);
       const srcintfStr = Array.isArray(pol.srcintf)
-        ? pol.srcintf.map(i => `"${safeCli(i)}"`).join(' ')
-        : `"${safeCli(pol.srcintf)}"`;
+        ? pol.srcintf.map(i => `"${i}"`).join(' ')
+        : `"${pol.srcintf}"`;
       const dstintfStr = Array.isArray(pol.dstintf)
-        ? pol.dstintf.map(i => `"${safeCli(i)}"`).join(' ')
-        : `"${safeCli(pol.dstintf)}"`;
+        ? pol.dstintf.map(i => `"${i}"`).join(' ')
+        : `"${pol.dstintf}"`;
       L.push(`        set srcintf ${srcintfStr}`);
       L.push(`        set dstintf ${dstintfStr}`);
       const srcAddrStr = pol.srcAddrNames && pol.srcAddrNames.length > 1
-        ? pol.srcAddrNames.map(n => `"${safeCli(n)}"`).join(' ')
+        ? pol.srcAddrNames.map(n => `"${n}"`).join(' ')
         : (Array.isArray(pol.srcAddrName)
-          ? pol.srcAddrName.map(n => `"${safeCli(n)}"`).join(' ')
-          : `"${safeCli(pol.srcAddrName)}"`);
+          ? pol.srcAddrName.map(n => `"${n}"`).join(' ')
+          : `"${pol.srcAddrName}"`);
       L.push(`        set srcaddr ${srcAddrStr}`);
       const dstAddrStr = Array.isArray(pol.dstAddrName)
-        ? pol.dstAddrName.map(n => `"${safeCli(n)}"`).join(' ')
-        : `"${safeCli(pol.dstAddrName)}"`;
+        ? pol.dstAddrName.map(n => `"${n}"`).join(' ')
+        : `"${pol.dstAddrName}"`;
       L.push(`        set dstaddr ${dstAddrStr}`);
       L.push(`        set service ${svcStr}`);
       L.push(`        set action ${actionVerb}`);
@@ -1519,14 +1314,14 @@ function generateConfig(selectedPolicies, opts = {}) {
       const hasUtm = sp.antivirus || sp.webfilter || sp.ips || sp.sslSsh || sp.profileGroup;
       if (hasUtm) {
         L.push(`        set utm-status enable`);
-        if (sp.profileGroup)  L.push(`        set profile-protocol-options "${safeCli(sp.profileGroup)}"`);
-        if (sp.antivirus)     L.push(`        set av-profile "${safeCli(sp.antivirus)}"`);
-        if (sp.webfilter)     L.push(`        set webfilter-profile "${safeCli(sp.webfilter)}"`);
-        if (sp.ips)           L.push(`        set ips-sensor "${safeCli(sp.ips)}"`);
-        if (sp.sslSsh)        L.push(`        set ssl-ssh-profile "${safeCli(sp.sslSsh)}"`);
+        if (sp.profileGroup)  L.push(`        set profile-protocol-options "${sp.profileGroup}"`);
+        if (sp.antivirus)     L.push(`        set av-profile "${sp.antivirus}"`);
+        if (sp.webfilter)     L.push(`        set webfilter-profile "${sp.webfilter}"`);
+        if (sp.ips)           L.push(`        set ips-sensor "${sp.ips}"`);
+        if (sp.sslSsh)        L.push(`        set ssl-ssh-profile "${sp.sslSsh}"`);
       }
       if (pol.tags && pol.tags.length > 0) {
-        L.push(`        set comments "${safeCli(pol.tags.join(', '))}"`);
+        L.push(`        set comments "${pol.tags.join(', ')}"`);
       }
       L.push(`    next`);
     }
@@ -1553,8 +1348,8 @@ function preflightValidation(selectedPolicies, config) {
     const label = `Policy #${i + 1}`;
 
     // Missing interfaces
-    const srcIntf = p._srcintf || a.srcIface;
-    const dstIntf = p._dstintf || a.dstIface;
+    const srcIntf = p._srcintf || a.srcIntfName;
+    const dstIntf = p._dstintf || a.dstIntfName;
     if (!srcIntf) issues.push({ level: 'error', msg: `${label}: interface source manquante` });
     if (!dstIntf) issues.push({ level: 'error', msg: `${label}: interface destination manquante` });
     if (srcIntf && dstIntf && srcIntf === dstIntf) {
@@ -1603,26 +1398,6 @@ function preflightValidation(selectedPolicies, config) {
   return { issues, errors, warnings, ok: errors === 0 };
 }
 
-function formatExistingPolicies(policies) {
-  if (!policies?.length) return '';
-  const lines = ['config firewall policy'];
-  for (const p of policies) {
-    lines.push(`    edit ${p.policyid}`);
-    if (p.name)  lines.push(`        set name "${safeCli(p.name)}"`);
-    lines.push(`        set srcintf "${(p.srcintf  || []).map(safeCli).join('" "')}"`);
-    lines.push(`        set dstintf "${(p.dstintf  || []).map(safeCli).join('" "')}"`);
-    lines.push(`        set srcaddr "${(p.srcaddr  || []).map(safeCli).join('" "')}"`);
-    lines.push(`        set dstaddr "${(p.dstaddr  || []).map(safeCli).join('" "')}"`);
-    lines.push(`        set service "${(p.service  || []).map(safeCli).join('" "')}"`);
-    lines.push(`        set action ${p.action || 'accept'}`);
-    if (p.nat)                lines.push('        set nat enable');
-    if (p.status === 'disable') lines.push('        set status disable');
-    lines.push('    next');
-  }
-  lines.push('end');
-  return lines.join('\n');
-}
-
 module.exports = {
   parseFortiConfig,
   analyzePolicies,
@@ -1640,5 +1415,4 @@ module.exports = {
   parseOspfRoutingTable,
   parseBgpNetworkTable,
   sortRoutes,
-  formatExistingPolicies,
 };

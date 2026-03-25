@@ -161,7 +161,7 @@ function extractFlow(fields) {
 
 function aggregateFlow(flowMap, flow) {
   if (!flow.srcip || !flow.dstip) return false;
-  const key = `${flow.srcip}|${flow.dstip}|${flow.dstport}|${flow.proto}|${flow.action}|${flow.service}`;
+  const key = `${flow.srcip}|${flow.dstip}|${flow.dstport}|${flow.proto}|${flow.action}|${flow.service}|${flow.srcintf}`;
   if (!flowMap.has(key)) {
     flowMap.set(key, {
       srcip: flow.srcip, dstip: flow.dstip,
