@@ -12,7 +12,7 @@ const { createSession, getSession, setSessionData, setFortiConfig,
         setSessionError, deleteSession, getStats }       = require('./lib/store');
 const { parseFortiConfig, analyzePolicies,
         generateConfig, validateAgainstExisting,
-        preflightValidation, detectWanCandidates,
+        preflightValidation,
         parseFullRoutingTable, parseOspfRoutingTable, parseBgpNetworkTable,
         sortRoutes, formatExistingPolicies }             = require('./lib/forticonfig');
 
@@ -457,10 +457,6 @@ app.post('/api/deploy/config-upload', upload.single('conffile'), async (req, res
     }
     s.policyMap = policyMap;
 
-    // Build a Set of WAN interface names for quick lookup
-    const wanInfo = detectWanCandidates(fortiConfig.interfaces, fortiConfig.zones, fortiConfig.sdwanMembers);
-    s.wanNames = new Set(wanInfo.interfaces.map(i => i.name));
-
     res.json({
       addresses:        Object.keys(fortiConfig.addresses).length,
       addrGroups:       Object.keys(fortiConfig.addressGroups || {}).length,
@@ -489,13 +485,8 @@ app.get('/api/deploy/interfaces', (req, res) => {
   if (!s.fortiConfig) return res.status(404).json({ error: 'Aucune config FortiGate chargée' });
 
   const { interfaces, zones, sdwanMembers, sdwanZoneNames, sdwanEnabled, sdwanIntfName } = s.fortiConfig;
-  const wanNames = s.wanNames || new Set();
-
   res.json({
-    interfaces: Object.values(interfaces).map(iface => ({
-      ...iface,
-      isWan: wanNames.has(iface.name),
-    })),
+    interfaces: Object.values(interfaces).map(iface => ({ ...iface })),
     zones: Object.values(zones).map(z => ({ name: z.name, members: z.members })),
     sdwanMembers,
     sdwanZoneNames: sdwanZoneNames || [],
@@ -537,9 +528,6 @@ app.post('/api/deploy/dynamic-routes', (req, res) => {
         zone.isWan = zone.members.length > 0 &&
           zone.members.every(m => s.fortiConfig.interfaces[m]?.isWan);
       }
-      // Rebuild wanNames so /api/deploy/interfaces reflects the correction
-      const wanInfo = detectWanCandidates(s.fortiConfig.interfaces, s.fortiConfig.zones, s.fortiConfig.sdwanMembers);
-      s.wanNames = new Set(wanInfo.interfaces.map(i => i.name));
     }
 
     return res.json({ added: parsed.length, total: parsed.length, routes: parsed, replaced: true });
