@@ -2919,15 +2919,23 @@ async function deploy() {
       if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
       if (!deployState.dynRouteStatus) deployState.dynRouteStatus = {};
       deployState.dynRouteStatus[proto] = { added: data.added, total: data.total };
+      // Re-fetch interfaces : la table injectée peut avoir corrigé isWan/LAN
+      if (proto === 'all') {
+        const ir = await fetch(`/api/deploy/interfaces?session=${state.session}`);
+        if (ir.ok) deployState.interfaces = await ir.json();
+      }
     } catch (err) {
       if (!deployState.dynRouteStatus) deployState.dynRouteStatus = {};
       deployState.dynRouteStatus[proto] = { error: err.message };
     } finally {
       btn.disabled = false;
-      btn.textContent = 'Injecter les routes';
+      btn.textContent = 'Appliquer la table de routage';
       // Re-render only the panel badge (avoid full redeploy)
       const panel = document.querySelector('.dyn-routes-panel');
       if (panel) panel.outerHTML = renderDynamicRoutesPanel();
+      // Re-render interfaces panel si visible
+      const ifPanel = document.querySelector('#deploy-step3 .interfaces-panel, .iface-panel');
+      if (ifPanel) { const fresh = renderInterfaces(deployState.interfaces); if (fresh) ifPanel.outerHTML = fresh; }
     }
   });
   } // end _dynRouteWired
