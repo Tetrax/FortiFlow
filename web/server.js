@@ -522,11 +522,12 @@ app.post('/api/deploy/dynamic-routes', (req, res) => {
     if (defaultDevices.size > 0) {
       for (const iface of Object.values(s.fortiConfig.interfaces || {})) {
         if (iface.isTunnel || iface._roleWan) continue;
+        if (iface.isSdwan) { iface.isWan = true; continue; }
         iface.isWan = defaultDevices.has(iface.name);
       }
       for (const zone of Object.values(s.fortiConfig.zones || {})) {
         zone.isWan = zone.members.length > 0 &&
-          zone.members.every(m => s.fortiConfig.interfaces[m]?.isWan);
+          zone.members.some(m => s.fortiConfig.interfaces[m]?.isWan);
       }
     }
 

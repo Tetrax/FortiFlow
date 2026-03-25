@@ -451,10 +451,13 @@ function parseFortiConfig(text) {
   if (defaultRouteDevices.size > 0) {
     for (const iface of Object.values(interfaces)) {
       if (iface.isTunnel || iface._roleWan) continue;
+      // Les membres SD-WAN sont tous WAN même si un seul porte le 0.0.0.0/0
+      if (iface.isSdwan) { iface.isWan = true; continue; }
       iface.isWan = defaultRouteDevices.has(iface.name);
     }
     for (const zone of Object.values(zones)) {
-      zone.isWan = zone.members.length > 0 && zone.members.every(m => interfaces[m]?.isWan);
+      // Zone WAN si au moins un membre est WAN (SD-WAN = membres mixtes possibles)
+      zone.isWan = zone.members.length > 0 && zone.members.some(m => interfaces[m]?.isWan);
     }
   }
 
