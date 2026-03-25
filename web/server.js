@@ -478,6 +478,22 @@ app.post('/api/deploy/config-upload', upload.single('conffile'), async (req, res
   }
 });
 
+// GET /api/deploy/debug-interfaces — dump raw isWan state for troubleshooting
+app.get('/api/deploy/debug-interfaces', (req, res) => {
+  const s = requireSession(req, res);
+  if (!s) return;
+  if (!s.fortiConfig) return res.status(404).json({ error: 'no config' });
+  const { interfaces, staticRoutes } = s.fortiConfig;
+  const defaultRoutes = (staticRoutes || []).filter(r => r.dst === '0.0.0.0/0');
+  res.json({
+    defaultRoutes,
+    interfaces: Object.values(interfaces).map(i => ({
+      name: i.name, isWan: i.isWan, _roleWan: i._roleWan, isTunnel: i.isTunnel,
+      cidr: i.cidr, mode: i.mode,
+    })),
+  });
+});
+
 // GET /api/deploy/interfaces — return interfaces, zones, sdwan, WAN candidates
 app.get('/api/deploy/interfaces', (req, res) => {
   const s = requireSession(req, res);
