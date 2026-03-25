@@ -450,6 +450,10 @@ app.post('/api/deploy/config-upload', upload.single('conffile'), async (req, res
       s.data.flows = null;
     }
 
+    // DEBUG — WAN detection diagnostics (à retirer après fix)
+    console.log('[DEBUG WAN] defaultRoutes:', (fortiConfig.staticRoutes || []).filter(r => r.dst === '0.0.0.0/0'));
+    console.log('[DEBUG WAN] interfaces WAN status:', Object.values(fortiConfig.interfaces).map(i => `${i.name}=${i.isWan ? 'WAN' : 'LAN'}`).join(', '));
+
     // Build a fast policyid → policy lookup (keyed as string for log compatibility)
     const policyMap = new Map();
     for (const pol of fortiConfig.existingPolicies || []) {
