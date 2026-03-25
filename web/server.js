@@ -537,6 +537,9 @@ app.post('/api/deploy/dynamic-routes', (req, res) => {
         zone.isWan = zone.members.length > 0 &&
           zone.members.every(m => s.fortiConfig.interfaces[m]?.isWan);
       }
+      // Rebuild wanNames so /api/deploy/interfaces reflects the correction
+      const wanInfo = detectWanCandidates(s.fortiConfig.interfaces, s.fortiConfig.zones, s.fortiConfig.sdwanMembers);
+      s.wanNames = new Set(wanInfo.interfaces.map(i => i.name));
     }
 
     return res.json({ added: parsed.length, total: parsed.length, routes: parsed, replaced: true });
