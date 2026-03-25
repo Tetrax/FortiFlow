@@ -2880,6 +2880,22 @@ async function deploy() {
     if (lastGroupHdr) lastGroupHdr.style.display = groupHasVisible ? '' : 'none';
   });
 
+  // ── Dynamic routes copy cmd (wired once) ──
+  if (!window._dynCopyWired) {
+    window._dynCopyWired = true;
+    document.addEventListener('click', e => {
+      const btn = e.target.closest('.dyn-copy-cmd');
+      if (!btn) return;
+      const cmd = btn.dataset.cmd;
+      navigator.clipboard.writeText(cmd).then(() => {
+        const orig = btn.textContent;
+        btn.textContent = '✓ Copié';
+        btn.disabled = true;
+        setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 1500);
+      });
+    });
+  }
+
   // ── Dynamic routes inject (wired once) ──
   if (!window._dynRouteWired) {
     window._dynRouteWired = true;
@@ -3084,13 +3100,14 @@ function renderDynamicRoutesPanel() {
   return `
   <div class="dyn-routes-panel">
     <div class="dyn-routes-title">🗺 Table de routage réelle</div>
-    <div style="font-size:11px;color:var(--text2);margin-bottom:10px">
+    <div style="font-size:13px;color:var(--text2);margin-bottom:12px">
       Collez le output de la commande ci-dessous pour remplacer la table de routage parsée par la <strong>table réelle</strong> du FortiGate.
       Permet un mapping interfaces/WAN exact, incluant routes dynamiques et chemins actifs.
     </div>
     <div class="dyn-route-block">
-      <div style="font-size:10px;color:var(--text2);margin-bottom:6px;font-family:var(--mono)">
-        FG# <strong style="color:var(--text)">get router info routing-table all</strong>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <code style="font-size:13px;font-family:var(--mono);color:var(--text2)">FG# </code><strong style="font-size:13px;font-family:var(--mono);color:var(--text)">get router info routing-table all</strong>
+        <button class="btn-sm dyn-copy-cmd" data-cmd="get router info routing-table all" title="Copier la commande" style="margin-left:4px">📋 Copier</button>
       </div>
       <textarea class="dyn-route-ta" data-proto="all" rows="6"
         placeholder="Collez ici le résultat de : get router info routing-table all"></textarea>
