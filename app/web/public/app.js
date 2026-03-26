@@ -4160,7 +4160,12 @@ async function analyzeDeployPolicies() {
     setLoadingText(`${rawPolicies.length} policies récupérées — analyse en cours…`);
     setLoadingPct(30);
   } catch (err) { resetAnalyzeBtn(); alert(err.message); return; }
-  if (!rawPolicies) { resetAnalyzeBtn(); return; }
+  if (!rawPolicies || rawPolicies.length === 0) {
+    resetAnalyzeBtn();
+    alert('Aucune policy à analyser. Vérifiez que le fichier de trafic est bien chargé (étape 1).');
+    if (body) body.innerHTML = '<div class="empty-state" style="padding:24px">Aucune policy disponible. Chargez un fichier de trafic en étape 1.</div>';
+    return;
+  }
 
   // Ask server to analyze (addr + service matching against the loaded .conf)
   let analyzed;
@@ -4381,6 +4386,10 @@ function buildModePills(idx, type, currentMode, hasHosts) {
 function addrCell(addrAnalysis, currentName, idx, field) {
   if (!addrAnalysis?.found) {
     const displayName = currentName || addrAnalysis?.suggestedName || '';
+    // Si l'utilisateur a tapé un nom custom → neutre (sera créé), sinon orange (action requise)
+    if (currentName) {
+      return `<span class="inline-editable found" data-idx="${idx}" data-field="${field}" title="Cliquer pour modifier">${escHtml(currentName)} ${badgeHtml('auto')}</span>`;
+    }
     return `<span class="inline-editable missing" data-idx="${idx}" data-field="${field}" title="Cliquer pour modifier">${displayName ? escHtml(displayName) + ' ' : ''}${badgeHtml('auto')}</span>`;
   }
   const matches = addrAnalysis.allMatches || [{ name: addrAnalysis.name, source: addrAnalysis.source }];
@@ -4450,7 +4459,14 @@ function isPolicyComplete(p) {
   if (!p._dstintf) return false;
 
   // Source addresses / hosts
-  if (p._multiSrcSubnets?.length) {
+  // IMPORTANT: même ordre que buildRow — hosts d'abord, puis multi-src, puis single
+  const _srcModeResolved = p._srcMode || (p._use32Src ? 'hosts' : 'subnet');
+  if (_srcModeResolved === 'hosts' && (p.srcHosts || []).length > 0) {
+    const foundSet = new Set(p._srcHostsFound || []);
+    for (const h of (p.srcHosts || [])) {
+      if (!foundSet.has(h) && !(p._srcHostNames?.[h])) return false;
+    }
+  } else if (p._multiSrcSubnets?.length) {
     const srcFoundSet = new Set(p._srcHostsFound || []);
     for (const s of p._multiSrcSubnets) {
       if (s.useSubnet !== false) {
@@ -4461,11 +4477,6 @@ function isPolicyComplete(p) {
         }
       }
     }
-  } else if (p._srcMode === 'hosts' || p._use32Src) {
-    const foundSet = new Set(p._srcHostsFound || []);
-    for (const h of (p.srcHosts || [])) {
-      if (!foundSet.has(h) && !(p._srcHostNames?.[h])) return false;
-    }
   } else {
     if (!a.srcAddr?.found && !p._srcAddrName) return false;
   }
@@ -4474,7 +4485,14 @@ function isPolicyComplete(p) {
   if (p._useSrcGroup && !p._srcAddrGrpFound && !p._srcAddrName) return false;
 
   // Destination addresses / hosts
-  if (p._isMultiDst && p._multiDstSubnets?.length) {
+  // IMPORTANT: même ordre que buildRow — hosts d'abord, puis multi-dst, puis single
+  const _dstModeResolved = p._dstMode || (p._use32Dst ? 'hosts' : 'subnet');
+  if (_dstModeResolved === 'hosts' && (p.dstHosts || []).length > 0) {
+    const foundSet = new Set(p._dstHostsFound || []);
+    for (const h of (p.dstHosts || [])) {
+      if (!foundSet.has(h) && !(p._dstHostNames?.[h])) return false;
+    }
+  } else if (p._isMultiDst && p._multiDstSubnets?.length) {
     const dstFoundSet = new Set(p._dstHostsFound || []);
     for (const s of p._multiDstSubnets) {
       if (s.useSubnet !== false) {
@@ -4485,11 +4503,6 @@ function isPolicyComplete(p) {
         }
       }
     }
-  } else if (p._dstMode === 'hosts' || p._use32Dst) {
-    const foundSet = new Set(p._dstHostsFound || []);
-    for (const h of (p.dstHosts || [])) {
-      if (!foundSet.has(h) && !(p._dstHostNames?.[h])) return false;
-    }
   } else if (p.dstType !== 'public') {
     if (!a.dstAddr?.found && !p._dstAddrName) return false;
   }
@@ -4498,12 +4511,13 @@ function isPolicyComplete(p) {
   if (p._useDstGroup && !p._dstAddrGrpFound && !p._dstAddrName) return false;
 
   // Services — must be found, merged, or explicitly renamed by user
+  // Aligné avec svcCells: orange si pas de customName (= suggestedName identique au label auto)
   for (const svc of a.services || []) {
     if (svc.found || svc._isMerged) continue;
     const isPortNotation = /^(TCP|UDP)\/\d+$/i.test(svc.suggestedName || '');
-    // Named service (from logs): user must have changed the name from the auto-label
-    const isUnchangedLabel = svc.isNamed && svc.suggestedName === svc.label;
-    if (!svc.suggestedName || isPortNotation || isUnchangedLabel) return false;
+    const autoLabel = svc.isNamed ? svc.label : `FF_SVC_${svc.port}_${svc.proto}`;
+    const hasCustomName = svc.suggestedName && !isPortNotation && svc.suggestedName !== autoLabel;
+    if (!hasCustomName) return false;
   }
 
   return true;
@@ -5091,7 +5105,8 @@ function renderDeployPolicies(analyzed, resetPage = true) {
       }
       const customName = svc.suggestedName && svc.suggestedName !== (svc.isNamed ? svc.label : `FF_SVC_${svc.port}_${svc.proto}`) ? svc.suggestedName : '';
       const displayName = customName || svc.label || (svc.port ? `${svc.port}/${svc.proto}` : '');
-      return `<span class="match-ok" style="font-size:10px;color:var(--warn)" title="${escHtml(svc.portHint || displayName)}">${displayName ? escHtml(displayName) + ' ' : ''}${badgeHtml('auto')}</span>`;
+      const svcColor = customName ? 'var(--text)' : 'var(--warn)';
+      return `<span class="match-ok" style="font-size:10px;color:${svcColor}" title="${escHtml(svc.portHint || displayName)}">${displayName ? escHtml(displayName) + ' ' : ''}${badgeHtml('auto')}</span>`;
     }).join(' ');
 
     // Interfaces — read-only text, editable in drawer
