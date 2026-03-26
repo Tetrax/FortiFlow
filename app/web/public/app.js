@@ -4458,13 +4458,20 @@ function isPolicyComplete(p) {
   if (!p._srcintf) return false;
   if (!p._dstintf) return false;
 
+  // Helper : un nom auto-généré FF_HOST_... non modifié = incomplet
+  const autoHostName = h => `FF_HOST_${h.replace(/\./g, '_')}`;
+  const hostNameOk = (h, namesMap) => {
+    const n = namesMap?.[h];
+    return n && n !== autoHostName(h);
+  };
+
   // Source addresses / hosts
   // IMPORTANT: même ordre que buildRow — hosts d'abord, puis multi-src, puis single
   const _srcModeResolved = p._srcMode || (p._use32Src ? 'hosts' : 'subnet');
   if (_srcModeResolved === 'hosts' && (p.srcHosts || []).length > 0) {
     const foundSet = new Set(p._srcHostsFound || []);
     for (const h of (p.srcHosts || [])) {
-      if (!foundSet.has(h) && !(p._srcHostNames?.[h])) return false;
+      if (!foundSet.has(h) && !hostNameOk(h, p._srcHostNames)) return false;
     }
   } else if (p._multiSrcSubnets?.length) {
     const srcFoundSet = new Set(p._srcHostsFound || []);
@@ -4473,7 +4480,7 @@ function isPolicyComplete(p) {
         if (!s.addrFound && !s.addrName) return false;
       } else {
         for (const h of (s.hosts || [])) {
-          if (!srcFoundSet.has(h) && !(p._srcHostNames?.[h])) return false;
+          if (!srcFoundSet.has(h) && !hostNameOk(h, p._srcHostNames)) return false;
         }
       }
     }
@@ -4490,7 +4497,7 @@ function isPolicyComplete(p) {
   if (_dstModeResolved === 'hosts' && (p.dstHosts || []).length > 0) {
     const foundSet = new Set(p._dstHostsFound || []);
     for (const h of (p.dstHosts || [])) {
-      if (!foundSet.has(h) && !(p._dstHostNames?.[h])) return false;
+      if (!foundSet.has(h) && !hostNameOk(h, p._dstHostNames)) return false;
     }
   } else if (p._isMultiDst && p._multiDstSubnets?.length) {
     const dstFoundSet = new Set(p._dstHostsFound || []);
@@ -4499,7 +4506,7 @@ function isPolicyComplete(p) {
         if (!s.addrFound && !s.addrName) return false;
       } else {
         for (const h of (s.hosts || [])) {
-          if (!dstFoundSet.has(h) && !(p._dstHostNames?.[h])) return false;
+          if (!dstFoundSet.has(h) && !hostNameOk(h, p._dstHostNames)) return false;
         }
       }
     }
