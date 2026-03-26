@@ -1516,10 +1516,10 @@ function generateConfig(selectedPolicies, opts = {}) {
         : `"${safeCli(pol.dstAddrName)}"`;
       L.push(`        set dstaddr ${dstAddrStr}`);
       L.push(`        set service ${svcStr}`);
-      L.push(`        set action ${actionVerb}`);
+      L.push(`        set action ${pol.action || actionVerb}`);
       L.push(`        set schedule "always"`);
       if (pol.nat) L.push(`        set nat enable`);
-      L.push(`        set logtraffic ${logTraffic}`);
+      L.push(`        set logtraffic ${pol.log || logTraffic}`);
       // Security profiles (UTM) — per-policy overrides global
       const sp = Object.assign({}, opts.securityProfiles || {}, pol.securityProfiles || {});
       const hasUtm = sp.antivirus || sp.webfilter || sp.ips || sp.sslSsh || sp.profileGroup;

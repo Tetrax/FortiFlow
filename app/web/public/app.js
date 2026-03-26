@@ -1872,7 +1872,7 @@ function _snapDrawer(p) {
   const snap = {};
   const keys = ['_srcAddrName','_dstAddrName','_policyName','_srcMode','_dstMode',
     '_use32Src','_use32Dst','_srcHostNames','_dstHostNames','_useSrcGroup','_useDstGroup',
-    '_srcintf','_dstintf','_nat','_mergeMode','_mergedSvcName','_mergeRange'];
+    '_srcintf','_dstintf','_nat','_action','_log','_mergeMode','_mergedSvcName','_mergeRange'];
   for (const k of keys) {
     if (!(k in p)) continue;
     const v = p[k];
@@ -1995,6 +1995,12 @@ function mountDrawer() {
       const hint = document.getElementById('drawer-undo-hint');
       if (hint) hint.style.display = '';
     };
+    // Action toggle (accept / deny)
+    if (e.target.matches('.drawer-action-btn')) {
+      p._action = e.target.dataset.action;
+      populateDrawer(_drawerIdx);
+      return;
+    }
     // Select-all services toggle
     if (e.target.matches('.svc-sel-all')) {
       _snapAndShow();
@@ -2188,6 +2194,7 @@ function mountDrawer() {
     if (e.target.matches('.drawer-srcintf')) { p._srcintf = e.target.value || undefined; renderDeployPolicies(filterDeployPolicies(), false); }
     if (e.target.matches('.drawer-dstintf')) { p._dstintf = e.target.value || undefined; renderDeployPolicies(filterDeployPolicies(), false); }
     if (e.target.matches('.drawer-nat')) { p._nat = e.target.checked; }
+    if (e.target.matches('.drawer-log-sel')) { p._log = e.target.value; }
     if (e.target.matches('.drawer-sp-sel')) {
       if (!p._secProfiles) p._secProfiles = {};
       const spKey = e.target.dataset.sp;
@@ -2550,6 +2557,19 @@ function populateDrawer(idx) {
       <div class="drawer-field"><span class="drawer-field-label">Direction</span><span class="drawer-field-value">${p._isWan ? '<span class="dir-badge wan">WAN</span>' : '<span class="dir-badge lan">LAN</span>'}</span></div>
       <div class="drawer-field"><span class="drawer-field-label">Policy IDs</span><span class="drawer-field-value">${(p.policyIds||[]).join(', ') || '—'}</span></div>
       <div class="drawer-field"><span class="drawer-field-label">Sessions</span><span class="drawer-field-value">${fmtNum(p.sessions||0)}</span></div>
+      <div class="drawer-field"><span class="drawer-field-label">Action</span>
+        <div style="display:flex;gap:4px">
+          <button class="btn-sm drawer-action-btn ${(p._action||'accept')==='accept'?'active':''}" data-action="accept" style="${(p._action||'accept')==='accept'?'background:var(--success,#22c55e);color:#fff;border-color:var(--success,#22c55e)':''}">✓ Accept</button>
+          <button class="btn-sm drawer-action-btn ${(p._action||'accept')==='deny'?'active':''}" data-action="deny" style="${(p._action||'accept')==='deny'?'background:var(--danger,#ef4444);color:#fff;border-color:var(--danger,#ef4444)':''}">✕ Deny</button>
+        </div>
+      </div>
+      <div class="drawer-field"><span class="drawer-field-label">Log</span>
+        <select class="drawer-input drawer-log-sel">
+          <option value="all" ${(p._log||'all')==='all'?'selected':''}>log all</option>
+          <option value="utm" ${p._log==='utm'?'selected':''}>log utm</option>
+          <option value="disable" ${p._log==='disable'?'selected':''}>log disable</option>
+        </select>
+      </div>
       <div class="drawer-field"><span class="drawer-field-label">NAT</span><label style="display:flex;align-items:center;gap:6px"><input type="checkbox" class="drawer-nat" ${p._nat ? 'checked' : ''}> <span style="font-size:11px;color:var(--text2)">Activer le NAT</span></label></div>
       <div class="drawer-field"><span class="drawer-field-label">Nom policy</span><input class="drawer-input drawer-policy-name" value="${escHtml(p._policyName || '')}" placeholder="FF_POLICY_..."></div>
     </div>
@@ -5090,6 +5110,9 @@ function renderDeployPolicies(analyzed, resetPage = true) {
       dstIntf = `<span class="mono" style="font-size:10px;color:${p._dstintf ? 'var(--text)' : 'var(--text2)'}">${escHtml(dstLabel)}${sameWarn}${dstIfBadge}</span>`;
     }
 
+    const actionBadge = (p._action === 'deny')
+      ? `<span class="dir-badge" style="background:var(--danger,#ef4444);color:#fff">DENY</span> `
+      : '';
     const dirBadge = p._isWan
       ? `<span class="dir-badge wan">WAN</span>`
       : `<span class="dir-badge lan">LAN</span>`;
@@ -5123,7 +5146,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
         <td><input type="checkbox" ${chkAttr}></td>
         <td class="status-cell" title="${escHtml(statusTitle)}"><div class="status-bar status-${rowStatus}"></div></td>
         <td class="impact-cell"><div class="impact-bar" style="width:${barW}%"></div><span class="impact-val">${fmtNum(p.sessions || 0)}</span></td>
-        <td>${dirBadge}</td>
+        <td>${actionBadge}${dirBadge}</td>
         <td>${warnBadge}${seqBadge}${srcSubnetText}${srcModeBadge}</td>
         <td>${srcAddrCell}</td>
         ${allSrcAutoFlag ? '' : `<td>${srcIntf}</td>`}
@@ -5288,6 +5311,8 @@ async function generateDeployConf() {
       dstHosts:     (p.dstHosts || []).filter(h => !p._excludedDstHosts?.has(h)),
       tags:         p._tags || [],
       securityProfiles: p._secProfiles || null,
+      action:       p._action || null,
+      log:          p._log    || null,
     }));
   } else {
     selectedPolicies = deployState.analyzed
