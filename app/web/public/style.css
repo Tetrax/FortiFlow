@@ -960,6 +960,9 @@ td.mono { font-family: var(--mono); }
 .deploy-policy-table th.sortable-th:hover { color: var(--text1); background: var(--bg3, var(--bg2)); }
 .deploy-policy-table th.sort-active { color: var(--accent, #4f8ef7); }
 .deploy-policy-row:hover { background: var(--bg2); }
+.policy-deny-row { background: rgba(239,68,68,0.08) !important; }
+.policy-deny-row:hover { background: rgba(239,68,68,0.15) !important; }
+.policy-deny-row td { border-bottom-color: rgba(239,68,68,0.2); }
 
 .match-ok   { color: var(--success); font-size: 11px; }
 .match-miss { color: var(--danger);  font-size: 11px; }

@@ -610,6 +610,14 @@ app.post('/api/deploy/generate', (req, res) => {
     // SD-WAN zone takes priority; if none, preferredWanIntf falls to null (detectWanCandidates handles it)
     const analyzed = analyzePolicies(selectedPolicies, configToUse, o.preferredWanIntf || null);
 
+    // Re-inject per-policy overrides from frontend (action, log, securityProfiles)
+    for (let i = 0; i < analyzed.length; i++) {
+      const src = selectedPolicies[i] || {};
+      if (src.action)           analyzed[i].action           = src.action;
+      if (src.log)              analyzed[i].log              = src.log;
+      if (src.securityProfiles) analyzed[i].securityProfiles = src.securityProfiles;
+    }
+
     // Inject frontend-merged services (multi-port / range) into each policy's analysis
     for (let i = 0; i < analyzed.length; i++) {
       const merged = selectedPolicies[i]?._mergedServices;

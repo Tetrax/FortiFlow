@@ -1999,6 +1999,7 @@ function mountDrawer() {
     if (e.target.matches('.drawer-action-btn')) {
       p._action = e.target.dataset.action;
       populateDrawer(_drawerIdx);
+      renderDeployPolicies(filterDeployPolicies(), false);
       return;
     }
     // Select-all services toggle
@@ -5141,7 +5142,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     const rowStatus = isPolicyComplete(p) ? 'ok' : (p.analysis?.status || 'warn');
     const statusTitle = (p.analysis?.missingFields || []).join(', ') || '';
     return `
-      <tr class="deploy-policy-row ${isAgg ? 'seq-row' : ''}" data-idx="${idx}" ${isAgg ? `data-seq-members="${p._sequenceMembers.join(',')}"` : ''}>
+      <tr class="deploy-policy-row ${isAgg ? 'seq-row' : ''} ${p._action === 'deny' ? 'policy-deny-row' : ''}" data-idx="${idx}" ${isAgg ? `data-seq-members="${p._sequenceMembers.join(',')}"` : ''}>
         <td><button class="btn-del-item deploy-del-policy" data-idx="${idx}" ${isAgg ? `data-seq-members="${p._sequenceMembers.join(',')}"` : ''} title="Supprimer cette policy">✕</button></td>
         <td><input type="checkbox" ${chkAttr}></td>
         <td class="status-cell" title="${escHtml(statusTitle)}"><div class="status-bar status-${rowStatus}"></div></td>
