@@ -1544,6 +1544,8 @@ const deployState = {
   collapsedGroups: new Set(),      // collapsed group keys for interface-pair view
   wizardStep:    1,                // 1: config upload, 2: routes, 3: interfaces, 4: policies
   use32Global:   false,            // global /32 mode (use real hosts instead of /24)
+  sortCol:       null,             // active sort column key
+  sortDir:       'desc',           // 'asc' | 'desc'
 };
 
 // Collapsed state for interface category groups (persists across re-renders)
@@ -2299,7 +2301,7 @@ function populateDrawer(idx) {
           return `<div class="drawer-host-row">
             <span class="drawer-host-ip">${escHtml(h)}</span>
             ${hostFound
-              ? `<span style="color:var(--success);font-size:10px" title="${escHtml(h)}/32">&#10003; ${escHtml(hostName)}</span>`
+              ? `<span style="color:var(--success);font-size:10px" title="${escHtml(h)}/32">&#10003; ${escHtml(hostName)}${badgeHtml('config')}</span>`
               : `<input class="drawer-host-input" data-type="src" data-host="${escHtml(h)}" value="${escHtml(inputVal(p._srcHostNames?.[h], `FF_HOST_${h.replace(/\./g,'_')}`))}" placeholder="${escHtml(hostName)}">`}
             <button class="btn-del-item" data-del-type="src-host" data-host="${escHtml(h)}" title="Retirer cet hôte">✕</button>
           </div>`;
@@ -2337,7 +2339,7 @@ function populateDrawer(idx) {
         return `<div class="drawer-host-row">
           <span class="drawer-host-ip">${escHtml(h)}</span>
           ${hostFound
-            ? `<span style="color:var(--success);font-size:10px" title="${escHtml(h)}/32">&#10003; ${escHtml(name)}</span>`
+            ? `<span style="color:var(--success);font-size:10px" title="${escHtml(h)}/32">&#10003; ${escHtml(name)}${badgeHtml('config')}</span>`
             : `<input class="drawer-host-input" data-type="src" data-host="${escHtml(h)}" value="${escHtml(inputVal(p._srcHostNames?.[h], `FF_HOST_${h.replace(/\./g,'_')}`))}" placeholder="${escHtml(name)}">`}
           <button class="btn-del-item" data-del-type="src-host" data-host="${escHtml(h)}" title="Retirer cet hôte">✕</button>
         </div>`;
@@ -2389,7 +2391,7 @@ function populateDrawer(idx) {
           return `<div class="drawer-host-row">
             <span class="drawer-host-ip">${escHtml(h)}</span>
             ${hostFound
-              ? `<span style="color:var(--success);font-size:10px" title="${escHtml(h)}/32">&#10003; ${escHtml(hostName)}</span>`
+              ? `<span style="color:var(--success);font-size:10px" title="${escHtml(h)}/32">&#10003; ${escHtml(hostName)}${badgeHtml('config')}</span>`
               : `<input class="drawer-host-input" data-type="dst" data-host="${escHtml(h)}" value="${escHtml(inputVal(p._dstHostNames?.[h], `FF_HOST_${h.replace(/\./g,'_')}`))}" placeholder="${escHtml(hostName)}">`}
             <button class="btn-del-item" data-del-type="dst-host" data-host="${escHtml(h)}" title="Retirer cet hôte">✕</button>
           </div>`;
@@ -2427,7 +2429,7 @@ function populateDrawer(idx) {
         return `<div class="drawer-host-row">
           <span class="drawer-host-ip">${escHtml(h)}</span>
           ${hostFound
-            ? `<span style="color:var(--success);font-size:10px" title="${escHtml(h)}/32">&#10003; ${escHtml(name)}</span>`
+            ? `<span style="color:var(--success);font-size:10px" title="${escHtml(h)}/32">&#10003; ${escHtml(name)}${badgeHtml('config')}</span>`
             : `<input class="drawer-host-input" data-type="dst" data-host="${escHtml(h)}" value="${escHtml(inputVal(p._dstHostNames?.[h], `FF_HOST_${h.replace(/\./g,'_')}`))}" placeholder="${escHtml(name)}">`}
           <button class="btn-del-item" data-del-type="dst-host" data-host="${escHtml(h)}" title="Retirer cet hôte">✕</button>
         </div>`;
@@ -3398,30 +3400,59 @@ function mergeServices(group) {
 // Filtre les policies analysées selon le texte de recherche
 function filterDeployPolicies() {
   const q = (deployState.searchFilter || '').toLowerCase().trim();
-  if (!q || !deployState.analyzed) return deployState.analyzed || [];
+  let result = deployState.analyzed || [];
 
-  // Syntaxe spéciale : srcintf:X, dstintf:X (filtres exacts sur l'interface)
-  const srcIntfFilter = (q.match(/\bsrcintf:(\S+)/) || [])[1] || null;
-  const dstIntfFilter = (q.match(/\bdstintf:(\S+)/) || [])[1] || null;
-  const plainQ = q.replace(/\b(?:src|dst)intf:\S+/g, '').trim();
-  const terms = plainQ ? plainQ.split(/\s+/) : [];
+  if (q) {
+    // Syntaxe spéciale : srcintf:X, dstintf:X (filtres exacts sur l'interface)
+    const srcIntfFilter = (q.match(/\bsrcintf:(\S+)/) || [])[1] || null;
+    const dstIntfFilter = (q.match(/\bdstintf:(\S+)/) || [])[1] || null;
+    const plainQ = q.replace(/\b(?:src|dst)intf:\S+/g, '').trim();
+    const terms = plainQ ? plainQ.split(/\s+/) : [];
 
-  return deployState.analyzed.filter(p => {
-    if (srcIntfFilter && (p._srcintf || '').toLowerCase() !== srcIntfFilter) return false;
-    if (dstIntfFilter && (p._dstintf || '').toLowerCase() !== dstIntfFilter) return false;
-    if (!terms.length) return true;
-    const haystack = [
-      p.srcSubnet, ...(p.srcSubnets || []),
-      p.dstTarget, p._srcAddrName, p._dstAddrName,
-      p._srcintf, p._dstintf, p._policyName,
-      ...(p.policyIds || []).map(String),
-      p.serviceDesc || '',
-      ...(p.analysis?.services || []).map(s => s.label || s.name || ''),
-      ...(p._dstIPs || []),
-      ...(p._tags || []),
-    ].join(' ').toLowerCase();
-    return terms.every(t => haystack.includes(t));
-  });
+    result = result.filter(p => {
+      if (srcIntfFilter && (p._srcintf || '').toLowerCase() !== srcIntfFilter) return false;
+      if (dstIntfFilter && (p._dstintf || '').toLowerCase() !== dstIntfFilter) return false;
+      if (!terms.length) return true;
+      const haystack = [
+        p.srcSubnet, ...(p.srcSubnets || []),
+        p.dstTarget, p._srcAddrName, p._dstAddrName,
+        p._srcintf, p._dstintf, p._policyName,
+        ...(p.policyIds || []).map(String),
+        p.serviceDesc || '',
+        ...(p.analysis?.services || []).map(s => s.label || s.name || ''),
+        ...(p._dstIPs || []),
+        ...(p._tags || []),
+      ].join(' ').toLowerCase();
+      return terms.every(t => haystack.includes(t));
+    });
+  }
+
+  // Tri par colonne
+  const { sortCol, sortDir } = deployState;
+  if (sortCol) {
+    const getVal = (p) => {
+      switch (sortCol) {
+        case 'sessions':  return p.sessions || 0;
+        case 'dir':       return p._isWan ? 1 : 0;
+        case 'source':    return (p.srcSubnet || p.srcSubnets?.[0] || '').toLowerCase();
+        case 'srcAddr':   return (p._srcAddrName || '').toLowerCase();
+        case 'srcIntf':   return (p._srcintf || '').toLowerCase();
+        case 'dst':       return (p.dstTarget || '').toLowerCase();
+        case 'dstAddr':   return (p._dstAddrName || '').toLowerCase();
+        case 'dstIntf':   return (p._dstintf || '').toLowerCase();
+        case 'services':  return (p.serviceDesc || '').toLowerCase();
+        default:          return 0;
+      }
+    };
+    result = [...result].sort((a, b) => {
+      const va = getVal(a), vb = getVal(b);
+      if (va < vb) return sortDir === 'asc' ? -1 : 1;
+      if (va > vb) return sortDir === 'asc' ? 1 : -1;
+      return 0;
+    });
+  }
+
+  return result;
 }
 
 // Cellule dstTarget — simplified: compact summary, details in drawer
@@ -4544,6 +4575,27 @@ function wireDeployTable() {
     }
   });
 
+  // ── click: .deploy-del-policy (supprimer une policy) ──
+  container.addEventListener('click', e => {
+    const btn = e.target.closest('.deploy-del-policy');
+    if (!btn) return;
+    e.stopPropagation();
+    if (btn.dataset.seqMembers) {
+      const members = new Set(btn.dataset.seqMembers.split(',').map(Number));
+      deployState.analyzed = deployState.analyzed.filter((_, i) => !members.has(i));
+      members.forEach(i => deployState.selected.delete(i));
+    } else {
+      const idx = +btn.dataset.idx;
+      deployState.analyzed.splice(idx, 1);
+      deployState.selected.delete(idx);
+      // Décaler les indices sélectionnés au-dessus de idx
+      const shifted = new Set();
+      deployState.selected.forEach(i => shifted.add(i > idx ? i - 1 : i));
+      deployState.selected = shifted;
+    }
+    renderDeployPolicies(filterDeployPolicies(), false);
+  });
+
   // ── change: .deploy-nat-chk ──
   container.addEventListener('change', e => {
     if (!e.target.matches('.deploy-nat-chk')) return;
@@ -4840,6 +4892,12 @@ function resetDeployTableWiring() {
   _dragSrcIdx       = null;
 }
 
+function thSort(label, col) {
+  const active = deployState.sortCol === col;
+  const arrow = active ? (deployState.sortDir === 'asc' ? ' ▲' : ' ▼') : '';
+  return `<th class="sortable-th${active ? ' sort-active' : ''}" data-sort="${col}" style="cursor:pointer;user-select:none">${label}${arrow}</th>`;
+}
+
 function renderDeployPolicies(analyzed, resetPage = true) {
   if (resetPage) deployState.page = 1;
 
@@ -5035,6 +5093,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     const statusTitle = (p.analysis?.missingFields || []).join(', ') || '';
     return `
       <tr class="deploy-policy-row ${isAgg ? 'seq-row' : ''}" data-idx="${idx}" ${isAgg ? `data-seq-members="${p._sequenceMembers.join(',')}"` : ''}>
+        <td><button class="btn-del-item deploy-del-policy" data-idx="${idx}" ${isAgg ? `data-seq-members="${p._sequenceMembers.join(',')}"` : ''} title="Supprimer cette policy">✕</button></td>
         <td><input type="checkbox" ${chkAttr}></td>
         <td class="status-cell" title="${escHtml(statusTitle)}"><div class="status-bar status-${rowStatus}"></div></td>
         <td class="impact-cell"><div class="impact-bar" style="width:${barW}%"></div><span class="impact-val">${fmtNum(p.sessions || 0)}</span></td>
@@ -5099,13 +5158,14 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     <div style="overflow-x:auto">
       <table class="deploy-policy-table">
         <thead><tr>
+          <th></th>
           <th><input type="checkbox" id="chk-all-deploy"></th>
           <th></th>
-          <th>Sessions</th>
-          <th>Dir.</th>
-          <th>Source</th><th>Src addr</th>${allSrcAutoFlag ? '' : '<th>Src intf</th>'}
-          <th>Destination</th><th>Dst addr</th>${allDstAutoFlag ? '' : '<th>Dst intf</th>'}
-          <th>Services</th>
+          ${thSort('Sessions', 'sessions')}
+          ${thSort('Dir.', 'dir')}
+          ${thSort('Source', 'source')}${thSort('Src addr', 'srcAddr')}${allSrcAutoFlag ? '' : thSort('Src intf', 'srcIntf')}
+          ${thSort('Destination', 'dst')}${thSort('Dst addr', 'dstAddr')}${allDstAutoFlag ? '' : thSort('Dst intf', 'dstIntf')}
+          ${thSort('Services', 'services')}
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>
@@ -5124,6 +5184,21 @@ function renderDeployPolicies(analyzed, resetPage = true) {
   document.querySelectorAll('.pg-prev') .forEach(b => b.addEventListener('click', () => goPage(Math.max(1, page - 1))));
   document.querySelectorAll('.pg-next') .forEach(b => b.addEventListener('click', () => goPage(Math.min(pages, page + 1))));
   document.querySelectorAll('.pg-last') .forEach(b => b.addEventListener('click', () => goPage(pages)));
+
+  // Wire sortable column headers
+  document.querySelectorAll('.sortable-th').forEach(th => {
+    th.addEventListener('click', () => {
+      const col = th.dataset.sort;
+      if (deployState.sortCol === col) {
+        deployState.sortDir = deployState.sortDir === 'desc' ? 'asc' : 'desc';
+      } else {
+        deployState.sortCol = col;
+        deployState.sortDir = 'desc';
+      }
+      deployState.page = 1;
+      renderDeployPolicies(filterDeployPolicies(), false);
+    });
+  });
 
   // Update missing objects notification bar (info only)
   const missingBar = el('deploy-missing-bar');
