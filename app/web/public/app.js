@@ -5068,8 +5068,10 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     let dstAddrCell;
     if (_dstModeResolved === 'hosts' && (p.dstHosts || []).length > 0) {
       const dhFoundSet = new Set(p._dstHostsFound || []);
+      const _autoHostName = h => `FF_HOST_${h.replace(/\./g, '_')}`;
+      const _hostNameOk = (h, nm) => { const n = nm?.[h]; return n && n !== _autoHostName(h); };
       const dhNames = p.dstHosts.map(h => (p._dstHostNames?.[h]) || (dhFoundSet.has(h) ? h : h));
-      const dhAllNamed = p.dstHosts.every(h => dhFoundSet.has(h) || !!(p._dstHostNames?.[h]));
+      const dhAllNamed = p.dstHosts.every(h => dhFoundSet.has(h) || _hostNameOk(h, p._dstHostNames));
       const dhDisplay = dhNames.join(', ');
       dstAddrCell = dhAllNamed
         ? `<span class="inline-editable found" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(dhDisplay)}">${escHtml(dhDisplay)}</span>`
