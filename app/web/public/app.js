@@ -1546,6 +1546,7 @@ const deployState = {
   use32Global:   false,            // global /32 mode (use real hosts instead of /24)
   sortCol:       null,             // active sort column key
   sortDir:       'desc',           // 'asc' | 'desc'
+  availableProfiles: null,         // { antivirus, webfilter, ips, sslSsh } chargés depuis l'API
 };
 
 // Collapsed state for interface category groups (persists across re-renders)
@@ -2187,6 +2188,12 @@ function mountDrawer() {
     if (e.target.matches('.drawer-srcintf')) { p._srcintf = e.target.value || undefined; renderDeployPolicies(filterDeployPolicies(), false); }
     if (e.target.matches('.drawer-dstintf')) { p._dstintf = e.target.value || undefined; renderDeployPolicies(filterDeployPolicies(), false); }
     if (e.target.matches('.drawer-nat')) { p._nat = e.target.checked; }
+    if (e.target.matches('.drawer-sp-sel')) {
+      if (!p._secProfiles) p._secProfiles = {};
+      const spKey = e.target.dataset.sp;
+      if (e.target.value) p._secProfiles[spKey] = e.target.value;
+      else delete p._secProfiles[spKey];
+    }
     syncRowStatus(_drawerIdx);
   });
   // Propagation check on service name blur
@@ -2228,6 +2235,23 @@ function mountDrawer() {
       populateDrawer(_drawerIdx);
     }
   });
+}
+
+function buildDrawerSecProfiles(p, idx) {
+  const sp = deployState.availableProfiles;
+  if (!sp || !(sp.antivirus?.length || sp.webfilter?.length || sp.ips?.length || sp.sslSsh?.length)) return '';
+  const cur = p._secProfiles || {};
+  const mkOpts = (list, cur) => `<option value="">— aucun —</option>` +
+    (list || []).map(n => `<option value="${escHtml(n)}" ${cur === n ? 'selected' : ''}>${escHtml(n)}</option>`).join('');
+  const row = (label, key, list) => !list?.length ? '' :
+    `<div class="drawer-field"><span class="drawer-field-label">${label}</span><select class="drawer-input drawer-sp-sel" data-idx="${idx}" data-sp="${key}" style="font-size:10px">${mkOpts(list, cur[key])}</select></div>`;
+  return `<div class="drawer-section">
+    <div class="drawer-section-title">Profils de sécurité</div>
+    ${row('Antivirus', 'antivirus', sp.antivirus)}
+    ${row('Web Filter', 'webfilter', sp.webfilter)}
+    ${row('IPS', 'ips', sp.ips)}
+    ${row('SSL/SSH', 'sslSsh', sp.sslSsh)}
+  </div>`;
 }
 
 function openDrawer(idx) {
@@ -2311,7 +2335,7 @@ function populateDrawer(idx) {
         <span class="drawer-multisrc-subnet" style="font-family:var(--mono);font-size:11px;min-width:120px">${escHtml(s.subnet)}</span>
         <button class="btn-sm drawer-multisrc-mode" data-si="${si}" style="font-size:9px;padding:2px 8px">${isSubnet ? '/24' : `/32 (${s.hosts?.length || 0}h)`}</button>
         ${isSubnet ? statusIcon : ''}
-        ${isSubnet ? (s.addrFound ? `<span style="color:var(--success);font-size:10px" title="${escHtml(s.subnet)}">${escHtml(s.addrName)}</span>` : nameInput) : ''}
+        ${isSubnet ? (s.addrFound ? `<span style="color:var(--success);font-size:10px" title="${escHtml(s.subnet)}">${escHtml(s.addrName)}${badgeHtml('config')}</span>` : nameInput) : ''}
         <button class="btn-del-item" data-del-type="src-subnet" data-si="${si}" title="Retirer ce subnet">✕</button>
       </div>${hostsHtml}`;
     }).join('');
@@ -2401,7 +2425,7 @@ function populateDrawer(idx) {
         <span class="drawer-multidst-subnet">${escHtml(s.subnet)}</span>
         <button class="btn-sm drawer-multidst-mode" data-si="${si}" style="font-size:9px;padding:2px 8px">${isSubnet ? '/24' : `/32 (${s.hosts?.length || 0}h)`}</button>
         ${isSubnet ? statusIcon : ''}
-        ${isSubnet ? (s.addrFound ? `<span style="color:var(--success);font-size:10px" title="${escHtml(s.subnet)}">${escHtml(s.addrName)}</span>` : nameInput) : ''}
+        ${isSubnet ? (s.addrFound ? `<span style="color:var(--success);font-size:10px" title="${escHtml(s.subnet)}">${escHtml(s.addrName)}${badgeHtml('config')}</span>` : nameInput) : ''}
         <button class="btn-del-item" data-del-type="dst-subnet" data-si="${si}" title="Retirer ce subnet">✕</button>
       </div>${hostsHtml}`;
     }).join('');
@@ -2536,6 +2560,7 @@ function populateDrawer(idx) {
       <div class="drawer-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-dstintf">${ifOptsDst}</select></div>
     </div>
     ${svcList.length ? `<div class="drawer-section"><div class="drawer-section-title">Services (${svcList.length})${selectableSvcs.length > 1 ? `<label style="font-size:10px;color:var(--text2);font-weight:400;margin-left:8px;display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" class="svc-sel-all" ${selectedSvcs.length === selectableSvcs.length ? 'checked' : ''} style="cursor:pointer;margin:0"> Tout sélectionner</label>` : ''}</div>${svcsHtml}${mergeBar}${propagateBanner}</div>` : ''}
+    ${buildDrawerSecProfiles(p, idx)}
   `;
 }
 
@@ -4249,6 +4274,7 @@ async function analyzeDeployPolicies() {
       fillSel('sp-wf', sp.webfilter);
       fillSel('sp-ips', sp.ips);
       fillSel('sp-ssl', sp.sslSsh);
+      deployState.availableProfiles = sp;
       const hasAny = (sp.antivirus?.length || sp.webfilter?.length || sp.ips?.length || sp.sslSsh?.length);
       const spBar = el('security-profiles-bar');
       if (spBar && hasAny) spBar.style.display = '';
@@ -5261,6 +5287,7 @@ async function generateDeployConf() {
       srcHosts:     (p.srcHosts || []).filter(h => !p._excludedSrcHosts?.has(h)),
       dstHosts:     (p.dstHosts || []).filter(h => !p._excludedDstHosts?.has(h)),
       tags:         p._tags || [],
+      securityProfiles: p._secProfiles || null,
     }));
   } else {
     selectedPolicies = deployState.analyzed

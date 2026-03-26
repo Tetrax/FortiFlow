@@ -1520,8 +1520,8 @@ function generateConfig(selectedPolicies, opts = {}) {
       L.push(`        set schedule "always"`);
       if (pol.nat) L.push(`        set nat enable`);
       L.push(`        set logtraffic ${logTraffic}`);
-      // Security profiles (UTM)
-      const sp = opts.securityProfiles || {};
+      // Security profiles (UTM) — per-policy overrides global
+      const sp = Object.assign({}, opts.securityProfiles || {}, pol.securityProfiles || {});
       const hasUtm = sp.antivirus || sp.webfilter || sp.ips || sp.sslSsh || sp.profileGroup;
       if (hasUtm) {
         L.push(`        set utm-status enable`);
