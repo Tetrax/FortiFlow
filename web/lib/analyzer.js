@@ -262,14 +262,8 @@ function buildAnalysis(flowMap) {
     }
   }
 
-  // ── Filtre direction dominante ──
-  // Si le log contient des flows dans les deux sens (ex: Z-SIEGE→AGGREGAT et AGGREGAT→Z-SIEGE),
-  // on exclut automatiquement les groupes dont le srcintf est minoritaire (trafic inverse parasite).
-  // Seuil : si un srcintf représente ≥60% des groupes, les autres sont du trafic inverse.
-  const filteredByIntfGroups = filterDominantDirection(allowedByIntfGroups);
-
   // ── Policy suggestions (flux acceptés seulement) ──
-  const policies = buildPolicies(filteredByIntfGroups);
+  const policies = buildPolicies(allowedByIntfGroups);
 
   // ── Matrices accept vs deny (private→private heatmap) ──
   const matrix     = buildMatrix(acceptSubnetGroups);
@@ -296,43 +290,6 @@ function buildAnalysis(flowMap) {
     matrix,
     denyMatrix,
   };
-}
-
-// ─── Filtre direction dominante ──────────────────────────────────────────────
-// Détecte le srcintf dominant dans allowedByIntfGroups.
-// Si un srcintf représente ≥60% des groupes, les groupes avec un srcintf différent
-// (et non-null) sont considérés comme du trafic inverse parasite et exclus.
-function filterDominantDirection(groups) {
-  const keys = Object.keys(groups);
-  if (!keys.length) return groups;
-
-  // Compter les groupes par srcintf (les clés sans '|' = pas de srcintf connu)
-  const countByIntf = {};
-  for (const k of keys) {
-    const pipe = k.indexOf('|');
-    const intf = pipe >= 0 ? k.slice(pipe + 1) : null;
-    if (!intf) continue;
-    countByIntf[intf] = (countByIntf[intf] || 0) + 1;
-  }
-
-  const total = Object.values(countByIntf).reduce((s, n) => s + n, 0);
-  if (!total) return groups; // pas de srcintf dans les logs → pas de filtrage
-
-  // Trouver l'interface dominante
-  const [dominantIntf, dominantCount] = Object.entries(countByIntf)
-    .sort((a, b) => b[1] - a[1])[0];
-
-  // Seuil : ≥60% pour considérer une direction comme dominante
-  if (dominantCount / total < 0.6) return groups;
-
-  // Garder seulement les groupes sans srcintf OU avec le srcintf dominant
-  const filtered = {};
-  for (const [k, v] of Object.entries(groups)) {
-    const pipe = k.indexOf('|');
-    const intf = pipe >= 0 ? k.slice(pipe + 1) : null;
-    if (!intf || intf === dominantIntf) filtered[k] = v;
-  }
-  return filtered;
 }
 
 // ─── Policy suggestions ───────────────────────────────────────────────────────
