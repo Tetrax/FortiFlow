@@ -4,11 +4,14 @@ import { auth } from '@/lib/auth'
 import { prisma } from '@/lib/prisma'
 import Link from 'next/link'
 import { IdeaStatus } from '@prisma/client'
+import DashboardCharts from '@/components/DashboardCharts'
 
 export default async function AdminDashboard() {
   const session = await auth()
 
-  const [totalIdeas, byStatus, recentIdeas] = await Promise.all([
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+
+  const [totalIdeas, byStatus, recentIdeas, byCategory, recentVotes] = await Promise.all([
     prisma.idea.count(),
     prisma.idea.groupBy({ by: ['status'], _count: { status: true } }),
     prisma.idea.findMany({
@@ -16,11 +19,44 @@ export default async function AdminDashboard() {
       orderBy: { createdAt: 'desc' },
       include: { category: { select: { name: true, icon: true } } },
     }),
+    prisma.category.findMany({
+      where: { isActive: true },
+      include: { _count: { select: { ideas: true } } },
+      orderBy: { name: 'asc' },
+    }),
+    prisma.vote.findMany({
+      where: { createdAt: { gte: thirtyDaysAgo } },
+      select: { createdAt: true },
+    }),
   ])
 
   const countByStatus = Object.fromEntries(
     byStatus.map((s) => [s.status, s._count.status])
   ) as Record<IdeaStatus, number>
+
+  // Taux d'acceptation
+  const accepted = (countByStatus.ACCEPTED ?? 0) + (countByStatus.DONE ?? 0)
+  const acceptanceRate = totalIdeas > 0 ? Math.round((accepted / totalIdeas) * 100) : 0
+
+  // Catégories pour le graphique
+  const categoryChartData = byCategory.map((c) => ({
+    name: c.name,
+    icon: c.icon,
+    count: c._count.ideas,
+  }))
+
+  // Votes par jour sur 30 jours
+  const votesMap: Record<string, number> = {}
+  for (const vote of recentVotes) {
+    const day = vote.createdAt.toISOString().slice(0, 10)
+    votesMap[day] = (votesMap[day] ?? 0) + 1
+  }
+  const votesTimeline = Array.from({ length: 30 }, (_, i) => {
+    const d = new Date(thirtyDaysAgo.getTime() + i * 24 * 60 * 60 * 1000)
+    const key = d.toISOString().slice(0, 10)
+    const label = d.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' })
+    return { date: label, votes: votesMap[key] ?? 0 }
+  })
 
   const stats = [
     { label: 'Idées totales', value: totalIdeas, icon: '💡', color: 'text-[var(--text-primary)]' },
@@ -34,6 +70,12 @@ export default async function AdminDashboard() {
   return (
     <>
       <h1 className="text-2xl font-bold text-[var(--text-primary)] mb-8">📊 Tableau de bord</h1>
+
+      <DashboardCharts
+        byCategory={categoryChartData}
+        votesTimeline={votesTimeline}
+        acceptanceRate={acceptanceRate}
+      />
 
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4 mb-10">
         {stats.map((stat) => (

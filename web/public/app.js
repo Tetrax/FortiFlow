@@ -5000,8 +5000,8 @@ function renderDeployPolicies(analyzed, resetPage = true) {
       const sameWarn = (p._srcintf && p._dstintf && p._srcintf === p._dstintf) ? ' ⚠' : '';
       const srcIfSrc = p._srcIfaceSource || 'auto';
       const dstIfSrc = p._dstIfaceSource || 'auto';
-      const srcIfBadge = srcIfSrc === 'route' ? badgeHtml('route') : srcIfSrc === 'sdwan' ? badgeHtml('sdwan') : '';
-      const dstIfBadge = dstIfSrc === 'route' ? badgeHtml('route') : dstIfSrc === 'sdwan' ? badgeHtml('sdwan') : '';
+      const srcIfBadge = srcIfSrc === 'route' ? badgeHtml('route') : srcIfSrc === 'sdwan' ? badgeHtml('sdwan') : srcIfSrc === 'subnet' ? badgeHtml('subnet') : srcIfSrc === 'log' ? badgeHtml('route') : '';
+      const dstIfBadge = dstIfSrc === 'route' ? badgeHtml('route') : dstIfSrc === 'sdwan' ? badgeHtml('sdwan') : dstIfSrc === 'subnet' ? badgeHtml('subnet') : '';
       srcIntf = `<span class="mono" style="font-size:10px;color:${p._srcintf ? 'var(--text)' : 'var(--text2)'}">${escHtml(srcLabel)}${srcIfBadge}</span>`;
       dstIntf = `<span class="mono" style="font-size:10px;color:${p._dstintf ? 'var(--text)' : 'var(--text2)'}">${escHtml(dstLabel)}${sameWarn}${dstIfBadge}</span>`;
     }
