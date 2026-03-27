@@ -1206,7 +1206,11 @@ function generateConfig(selectedPolicies, opts = {}) {
     const cidr = `${ip}/32`;
     const existing = findAddress(cidr, addresses);
     if (existing.found) return { name: existing.name, isNew: false };
-    const name = customNames?.[ip] || `FF_HOST_${ip.replace(/\./g, '_')}`;
+    // Nettoyer le nom si corruption "IP=Nom" stockée par l'ancien import positionnel
+    const raw = customNames?.[ip];
+    const pfx = ip + '=';
+    const cleanedName = raw && raw.startsWith(pfx) ? raw.slice(pfx.length) : raw;
+    const name = cleanedName || `FF_HOST_${ip.replace(/\./g, '_')}`;
     return { name, isNew: true };
   }
 

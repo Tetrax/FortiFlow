@@ -1184,12 +1184,16 @@ app.post('/api/deploy/generate', (req, res) => {
     for (let i = 0; i < analyzed.length; i++) {
       const src = selectedPolicies[i] || {};
 
-      // Re-inject suggestedName from frontend analysis (user renamed via modal or Excel)
+      // Re-inject port/suggestedName from frontend analysis (perdu lors de la re-analyse)
       const srcServices = src.analysis?.services || [];
       for (const reAnalyzed of analyzed[i].analysis.services) {
         const orig = srcServices.find(s => s.label === reAnalyzed.label);
-        if (orig?.suggestedName && !reAnalyzed.found) {
-          reAnalyzed.suggestedName = orig.suggestedName;
+        if (orig && !reAnalyzed.found) {
+          if (orig.suggestedName) reAnalyzed.suggestedName = orig.suggestedName;
+          if (orig.port)          reAnalyzed.port          = orig.port;
+          if (orig.proto)         reAnalyzed.proto         = orig.proto;
+          if (orig.ports)         reAnalyzed.ports         = orig.ports;
+          if (orig.portRange)     reAnalyzed.portRange     = orig.portRange;
         }
       }
 
