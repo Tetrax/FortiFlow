@@ -1599,6 +1599,28 @@ const deployState = {
 // Collapsed state for interface category groups (persists across re-renders)
 const ifaceGroupCollapsed = { lan: false, wan: false, vpn: false };
 
+// ── Sérialisation des policies (Set → Array pour JSON) ──────────────────────
+function serializeAnalyzed(analyzed) {
+  if (!analyzed) return analyzed;
+  return analyzed.map(p => {
+    const out = { ...p };
+    if (p._selectedSvcKeys  instanceof Set) out._selectedSvcKeys  = [...p._selectedSvcKeys];
+    if (p._excludedSrcHosts instanceof Set) out._excludedSrcHosts = [...p._excludedSrcHosts];
+    if (p._excludedDstHosts instanceof Set) out._excludedDstHosts = [...p._excludedDstHosts];
+    return out;
+  });
+}
+function deserializeAnalyzed(analyzed) {
+  if (!analyzed) return analyzed;
+  return analyzed.map(p => {
+    const out = { ...p };
+    if (Array.isArray(p._selectedSvcKeys))  out._selectedSvcKeys  = new Set(p._selectedSvcKeys);
+    if (Array.isArray(p._excludedSrcHosts)) out._excludedSrcHosts = new Set(p._excludedSrcHosts);
+    if (Array.isArray(p._excludedDstHosts)) out._excludedDstHosts = new Set(p._excludedDstHosts);
+    return out;
+  });
+}
+
 // ── F6: Export/Import session ──
 async function exportSession() {
   try {
@@ -1609,8 +1631,8 @@ async function exportSession() {
       ...serverData,
       deployState: {
         fortiConfig:          deployState.fortiConfig,
-        analyzed:             deployState.analyzed,
-        baseAnalyzedPolicies: deployState.baseAnalyzedPolicies,
+        analyzed:             serializeAnalyzed(deployState.analyzed),
+        baseAnalyzedPolicies: serializeAnalyzed(deployState.baseAnalyzedPolicies),
         selected:             [...deployState.selected],
         searchFilter:         deployState.searchFilter,
         interfaces:           deployState.interfaces,
@@ -1675,9 +1697,9 @@ function importSession(file) {
         // Restaurer le deployState si présent
         if (data.deployState) {
           const ds = data.deployState;
-          deployState.fortiConfig          = ds.fortiConfig          || null;
-          deployState.analyzed             = ds.analyzed             || null;
-          deployState.baseAnalyzedPolicies = ds.baseAnalyzedPolicies || ds.analyzed || null;
+          deployState.fortiConfig          = ds.fortiConfig                                     || null;
+          deployState.analyzed             = deserializeAnalyzed(ds.analyzed)                   || null;
+          deployState.baseAnalyzedPolicies = deserializeAnalyzed(ds.baseAnalyzedPolicies || ds.analyzed) || null;
           deployState.selected             = new Set(ds.selected || []);
           deployState.searchFilter         = ds.searchFilter  || '';
           deployState.interfaces           = ds.interfaces    || null;
