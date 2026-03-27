@@ -1367,15 +1367,21 @@ function generateConfig(selectedPolicies, opts = {}) {
       } else {
         const customName = p.serviceNames?.[svc.label] || svc.suggestedName;
         serviceNames.push(customName);
+        // Si port/proto absents mais label au format TCP/5010 ou UDP/53, les extraire
+        let resolvedPort  = svc.port;
+        let resolvedProto = svc.proto;
+        if (!resolvedPort && !svc.ports?.length && !svc.portRange) {
+          const labelMatch = /^(TCP|UDP)\/(\d+)$/i.exec(svc.label || '');
+          if (labelMatch) { resolvedProto = labelMatch[1].toUpperCase(); resolvedPort = parseInt(labelMatch[2], 10); }
+        }
+
         if (svc.ports?.length) {
-          // Merged multi-port service
           newServices.set(customName, { name: customName, ports: svc.ports, proto: svc.proto });
         } else if (svc.portRange) {
-          // Range service e.g. "7000-35000"
           newServices.set(customName, { name: customName, portRange: svc.portRange, proto: svc.proto });
-        } else if (svc.port) {
-          newServices.set(`${svc.port}/${svc.proto}`, {
-            name: customName, port: svc.port, proto: svc.proto,
+        } else if (resolvedPort) {
+          newServices.set(`${resolvedPort}/${resolvedProto}`, {
+            name: customName, port: resolvedPort, proto: resolvedProto,
           });
         }
       }

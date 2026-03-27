@@ -2297,15 +2297,15 @@ function mountDrawer() {
     _snapDrawer(p);
     const hint = document.getElementById('drawer-undo-hint');
     if (hint) hint.style.display = '';
-    if (e.target.matches('.drawer-src-name'))  { p._srcAddrName = e.target.value; syncInlineCell(_drawerIdx, '_srcAddrName', e.target.value); }
-    if (e.target.matches('.drawer-dst-name'))  { p._dstAddrName = e.target.value; syncInlineCell(_drawerIdx, '_dstAddrName', e.target.value); }
+    if (e.target.matches('.drawer-src-name'))  { p._srcAddrName = e.target.value; syncAddrCell(_drawerIdx, 'src'); }
+    if (e.target.matches('.drawer-dst-name'))  { p._dstAddrName = e.target.value; syncAddrCell(_drawerIdx, 'dst'); }
     if (e.target.matches('.drawer-policy-name')) p._policyName = e.target.value;
     if (e.target.matches('.drawer-host-input')) {
       const host = e.target.dataset.host;
       const type = e.target.dataset.type;
       if (type === 'src') { if (!p._srcHostNames) p._srcHostNames = {}; p._srcHostNames[host] = e.target.value; }
       else { if (!p._dstHostNames) p._dstHostNames = {}; p._dstHostNames[host] = e.target.value; }
-      syncHostCell(_drawerIdx, type);
+      syncAddrCell(_drawerIdx, type);
     }
     if (e.target.matches('.svc-merge-name')) { p._mergedSvcName = e.target.value; return; }
     if (e.target.matches('.svc-merge-range')) { p._mergeRange = e.target.value; return; }
@@ -2316,25 +2316,28 @@ function mountDrawer() {
         const k = _m ? `${parseInt(_m[2],10)}/${_m[1].toUpperCase()}` : (s.isNamed ? `label:${s.label}` : `${s.port}/${s.proto}`);
         return k === svcKey;
       });
-      if (svc) svc.suggestedName = e.target.value;
+      if (svc) { svc.suggestedName = e.target.value; syncSvcCell(_drawerIdx); }
     }
     if (e.target.matches('.drawer-multidst-name')) {
       const si = +e.target.dataset.si;
       if (p._multiDstSubnets?.[si]) p._multiDstSubnets[si].addrName = e.target.value;
+      syncAddrCell(_drawerIdx, 'dst');
     }
     if (e.target.matches('.drawer-multisrc-name')) {
       const si = +e.target.dataset.si;
       if (p._multiSrcSubnets?.[si]) {
         p._multiSrcSubnets[si].addrName = e.target.value;
-        // Also update srcAddrNames array for CLI generation
         if (p.srcAddrNames && p.srcAddrNames[si] !== undefined) p.srcAddrNames[si] = e.target.value;
       }
+      syncAddrCell(_drawerIdx, 'src');
     }
     if (e.target.matches('.drawer-grp-name')) {
       p._dstAddrName = e.target.value;
+      syncAddrCell(_drawerIdx, 'dst');
     }
     if (e.target.matches('.drawer-src-grp-name')) {
       p._srcAddrName = e.target.value;
+      syncAddrCell(_drawerIdx, 'src');
     }
     syncRowStatus(_drawerIdx);
   });
@@ -2517,14 +2520,14 @@ function mountDrawer() {
             if (opHosts.includes(ap.hostIp) && !opFound.has(ap.hostIp)) {
               if (ap.addrType === 'src') { if (!op._srcHostNames) op._srcHostNames = {}; op._srcHostNames[ap.hostIp] = ap.newName; }
               else { if (!op._dstHostNames) op._dstHostNames = {}; op._dstHostNames[ap.hostIp] = ap.newName; }
-              syncHostCell(i, ap.addrType);
+              syncAddrCell(i, ap.addrType);
             }
           } else {
             // Mode /24 : propagate addr object name
             const field   = ap.addrType === 'src' ? '_srcAddrName' : '_dstAddrName';
             const opCidr  = ap.addrType === 'src' ? op.analysis?.srcAddr?.cidr  : op.analysis?.dstAddr?.cidr;
             const opFound = ap.addrType === 'src' ? op.analysis?.srcAddr?.found : op.analysis?.dstAddr?.found;
-            if (opCidr === ap.cidr && !opFound) { op[field] = ap.newName; syncInlineCell(i, field, ap.newName); }
+            if (opCidr === ap.cidr && !opFound) { op[field] = ap.newName; syncAddrCell(i, ap.addrType); }
           }
         }
         delete p._propagateAddrPending;
@@ -2758,6 +2761,34 @@ function syncHostCell(idx, type) {
     cell.innerHTML = escHtml(dhDisplay) + (dhAllNamed ? '' : ' ' + badgeHtml('auto'));
     cell.className = `inline-editable ${dhAllNamed ? 'found' : 'missing'}`;
   }
+  syncRowStatus(idx);
+}
+
+function _buildSvcCellHtml(p) {
+  const svcList = p.analysis?.services || [];
+  const stripPredef = n => (n || '').replace(/PREDEFINED$/i, '');
+  const html = svcList.map(svc => {
+    if (svc.found) {
+      const dispName = stripPredef(svc.name);
+      return `<span class="match-ok" style="font-size:10px" title="${escHtml(svc.portHint || stripPredef(svc.label) || dispName)}">&#10003; ${escHtml(dispName)}${badgeHtml('config')}</span>`;
+    }
+    const isPortNotation = /^(TCP|UDP)\/\d+$/i.test(svc.suggestedName || '');
+    const autoLabel = svc.isNamed ? svc.label : `FF_SVC_${svc.port}_${svc.proto}`;
+    const customName = svc.suggestedName && !isPortNotation && svc.suggestedName !== autoLabel ? svc.suggestedName : '';
+    const displayName = customName || svc.label || (svc.port ? `${svc.port}/${svc.proto}` : '');
+    if (customName) {
+      return `<span class="match-ok" style="font-size:10px;color:var(--success)" title="${escHtml(svc.portHint || displayName)}">&#10003; ${escHtml(customName)}${badgeHtml('auto')}</span>`;
+    }
+    return `<span class="match-ok" style="font-size:10px;color:var(--warn)" title="${escHtml(svc.portHint || displayName)}">${displayName ? escHtml(displayName) + ' ' : ''}${badgeHtml('auto')}</span>`;
+  }).join(' ');
+  return html || '<span style="color:var(--text2)">–</span>';
+}
+
+function syncSvcCell(idx) {
+  const p = deployState.analyzed?.[idx];
+  if (!p) return;
+  const cell = document.querySelector(`.svc-cell[data-svc-idx="${idx}"]`);
+  if (cell) cell.innerHTML = _buildSvcCellHtml(p);
   syncRowStatus(idx);
 }
 
@@ -4886,6 +4917,94 @@ function buildModePills(idx, type, currentMode, hasHosts) {
 }
 
 // Build an address cell — simplified: inline-editable text (click to edit in drawer)
+function _buildSrcAddrCell(p, idx) {
+  if (p.srcSubnets && p.srcSubnets.length > 1) {
+    if (p._useSrcGroup) {
+      const srcGrpDisplay = p._srcAddrName || `FF_POLICY_${(p.policyIds||[])[0] || idx}_SRC`;
+      return p._srcAddrGrpFound
+        ? `<span class="inline-editable found" data-idx="${idx}" data-field="_srcAddrName">${escHtml(p._srcAddrName)}</span>`
+        : `<span class="inline-editable missing" data-idx="${idx}" data-field="_srcAddrName">${escHtml(srcGrpDisplay)} ${badgeHtml('auto')}</span>`;
+    }
+    const subs = p._multiSrcSubnets || [];
+    const srcFoundSet = new Set(p._srcHostsFound || []);
+    const _autoHostName = h => `FF_HOST_${h.replace(/\./g, '_')}`;
+    const _hostNameOk = (h) => { const n = cleanHostName(h, p._srcHostNames?.[h]); return n && n !== _autoHostName(h); };
+    const allDone = subs.every(s => {
+      if (s.useSubnet !== false) return s.addrFound || !!s.addrName;
+      return (s.hosts || []).every(h => srcFoundSet.has(h) || _hostNameOk(h));
+    });
+    const names = subs.map(s => {
+      if (s.useSubnet !== false) return s.addrName || s.subnet;
+      return (s.hosts || []).map(h => cleanHostName(h, p._srcHostNames?.[h]) || h).join(', ');
+    }).join(', ');
+    return allDone
+      ? `<span class="inline-editable found" data-idx="${idx}" data-field="_srcAddrName" title="${escHtml(names)}">${escHtml(names)}</span>`
+      : `<span class="inline-editable missing" data-idx="${idx}" data-field="_srcAddrName" title="${escHtml(names)}">${escHtml(names)} ${badgeHtml('auto')}</span>`;
+  }
+  if ((p._srcMode === 'hosts' || p._use32Src) && p.srcHosts?.length) {
+    const hFoundSet = new Set(p._srcHostsFound || []);
+    const _autoHostName = h => `FF_HOST_${h.replace(/\./g, '_')}`;
+    const _hostNameOk = (h) => { const n = cleanHostName(h, p._srcHostNames?.[h]); return n && n !== _autoHostName(h); };
+    const hNames = p.srcHosts.map(h => cleanHostName(h, p._srcHostNames?.[h]) || h);
+    const allNamed = p.srcHosts.every(h => hFoundSet.has(h) || _hostNameOk(h));
+    const hDisplay = hNames.join(', ');
+    return allNamed
+      ? `<span class="inline-editable found" data-idx="${idx}" data-field="_srcAddrName" title="${escHtml(hDisplay)}">${escHtml(hDisplay)}</span>`
+      : `<span class="inline-editable missing" data-idx="${idx}" data-field="_srcAddrName" title="${escHtml(hDisplay)}">${escHtml(hDisplay)} ${badgeHtml('auto')}</span>`;
+  }
+  return addrCell(p.analysis?.srcAddr, p._srcAddrName, idx, '_srcAddrName');
+}
+
+function _buildDstAddrCell(p, idx) {
+  if (p._isMultiDst && p._multiDstSubnets?.length) {
+    if (p._useDstGroup) {
+      const dstGrpDisplay = p._dstAddrName || `GRP_${(p.policyIds||[])[0] || idx}_DST`;
+      return p._dstAddrGrpFound
+        ? `<span class="inline-editable found" data-idx="${idx}" data-field="_dstAddrName">${escHtml(p._dstAddrName)}</span>`
+        : `<span class="inline-editable missing" data-idx="${idx}" data-field="_dstAddrName">${escHtml(dstGrpDisplay)} ${badgeHtml('auto')}</span>`;
+    }
+    const subs = p._multiDstSubnets;
+    const dstFoundSet = new Set(p._dstHostsFound || []);
+    const _autoHostName = h => `FF_HOST_${h.replace(/\./g, '_')}`;
+    const _hostNameOk = (h) => { const n = cleanHostName(h, p._dstHostNames?.[h]); return n && n !== _autoHostName(h); };
+    const allDone = subs.every(s => {
+      if (s.useSubnet !== false) return s.addrFound || !!s.addrName;
+      return (s.hosts || []).every(h => dstFoundSet.has(h) || _hostNameOk(h));
+    });
+    const names = subs.map(s => {
+      if (s.useSubnet !== false) return s.addrName || s.subnet;
+      return (s.hosts || []).map(h => cleanHostName(h, p._dstHostNames?.[h]) || h).join(', ');
+    }).join(', ');
+    return allDone
+      ? `<span class="inline-editable found" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(names)}">${escHtml(names)}</span>`
+      : `<span class="inline-editable missing" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(names)}">${escHtml(names)} ${badgeHtml('auto')}</span>`;
+  }
+  const _dstModeResolved = p._dstMode || (p._use32Dst ? 'hosts' : 'subnet');
+  if (_dstModeResolved === 'hosts' && (p.dstHosts || []).length > 0) {
+    const dhFoundSet = new Set(p._dstHostsFound || []);
+    const _autoHostName = h => `FF_HOST_${h.replace(/\./g, '_')}`;
+    const _hostNameOk = (h) => { const n = cleanHostName(h, p._dstHostNames?.[h]); return n && n !== _autoHostName(h); };
+    const dhNames = p.dstHosts.map(h => cleanHostName(h, p._dstHostNames?.[h]) || h);
+    const dhAllNamed = p.dstHosts.every(h => dhFoundSet.has(h) || _hostNameOk(h));
+    const dhDisplay = dhNames.join(', ');
+    return dhAllNamed
+      ? `<span class="inline-editable found" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(dhDisplay)}">${escHtml(dhDisplay)}</span>`
+      : `<span class="inline-editable missing" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(dhDisplay)}">${escHtml(dhDisplay)} ${badgeHtml('auto')}</span>`;
+  }
+  return addrCell(p.analysis?.dstAddr, p._dstAddrName, idx, '_dstAddrName');
+}
+
+function syncAddrCell(idx, type) {
+  const p = deployState.analyzed?.[idx];
+  if (!p) return;
+  const field = type === 'src' ? '_srcAddrName' : '_dstAddrName';
+  const cell = document.querySelector(`.inline-editable[data-idx="${idx}"][data-field="${field}"]`);
+  if (!cell) return;
+  const html = type === 'src' ? _buildSrcAddrCell(p, idx) : _buildDstAddrCell(p, idx);
+  cell.outerHTML = html;
+  syncRowStatus(idx);
+}
+
 function addrCell(addrAnalysis, currentName, idx, field) {
   if (!addrAnalysis?.found) {
     const displayName = currentName || addrAnalysis?.suggestedName || '';
@@ -4956,69 +5075,76 @@ function policyIdsCell(p) {
 
 function isPolicyComplete(p) {
   const a = p.analysis || {};
+  const dbg = () => {};
 
   // Interfaces must be explicitly selected
-  if (!p._srcintf) return false;
-  if (!p._dstintf) return false;
+  if (!p._srcintf) { dbg('FAIL: no _srcintf'); return false; }
+  if (!p._dstintf) { dbg('FAIL: no _dstintf'); return false; }
 
   // Helper : un nom auto-généré FF_HOST_... non modifié = incomplet
   const autoHostName = h => `FF_HOST_${h.replace(/\./g, '_')}`;
   const hostNameOk = (h, namesMap) => {
-    const n = namesMap?.[h];
+    const n = cleanHostName(h, namesMap?.[h]);
     return n && n !== autoHostName(h);
   };
 
   // Source addresses / hosts
-  // IMPORTANT: même ordre que buildRow — hosts d'abord, puis multi-src, puis single
-  const _srcModeResolved = p._srcMode || (p._use32Src ? 'hosts' : 'subnet');
-  if (_srcModeResolved === 'hosts' && (p.srcHosts || []).length > 0) {
-    const foundSet = new Set(p._srcHostsFound || []);
-    for (const h of (p.srcHosts || [])) {
-      if (!foundSet.has(h) && !hostNameOk(h, p._srcHostNames)) return false;
-    }
-  } else if (p._multiSrcSubnets?.length) {
+  // _multiSrcSubnets a la priorité — srcHosts est une liste plate qui peut contenir
+  // des hosts dont le subnet a été switché en /24 (useSubnet !== false), il ne faut pas les vérifier
+  if (p._multiSrcSubnets?.length) {
     const srcFoundSet = new Set(p._srcHostsFound || []);
     for (const s of p._multiSrcSubnets) {
       if (s.useSubnet !== false) {
-        if (!s.addrFound && !s.addrName) return false;
+        if (!s.addrFound && !s.addrName) { dbg(`FAIL: multiSrc subnet ${s.subnet} no addrName`); return false; }
       } else {
         for (const h of (s.hosts || [])) {
-          if (!srcFoundSet.has(h) && !hostNameOk(h, p._srcHostNames)) return false;
+          if (!srcFoundSet.has(h) && !hostNameOk(h, p._srcHostNames)) { dbg(`FAIL: multiSrc host ${h} not found/named`); return false; }
         }
       }
     }
   } else {
-    if (!a.srcAddr?.found && !p._srcAddrName) return false;
+    const _srcModeResolved = p._srcMode || (p._use32Src ? 'hosts' : 'subnet');
+    if (_srcModeResolved === 'hosts' && (p.srcHosts || []).length > 0) {
+      const foundSet = new Set(p._srcHostsFound || []);
+      for (const h of (p.srcHosts || [])) {
+        if (!foundSet.has(h) && !hostNameOk(h, p._srcHostNames)) { dbg(`FAIL: src host ${h} not found/named`); return false; }
+      }
+    } else {
+      if (!a.srcAddr?.found && !p._srcAddrName) { dbg('FAIL: srcAddr not found/named'); return false; }
+    }
   }
 
   // Source group (addrgrp): if active and not already found, must have a typed name
-  if (p._useSrcGroup && !p._srcAddrGrpFound && !p._srcAddrName) return false;
+  if (p._useSrcGroup && !p._srcAddrGrpFound && !p._srcAddrName) { dbg('FAIL: srcGroup missing name'); return false; }
 
   // Destination addresses / hosts
-  // IMPORTANT: même ordre que buildRow — hosts d'abord, puis multi-dst, puis single
-  const _dstModeResolved = p._dstMode || (p._use32Dst ? 'hosts' : 'subnet');
-  if (_dstModeResolved === 'hosts' && (p.dstHosts || []).length > 0) {
-    const foundSet = new Set(p._dstHostsFound || []);
-    for (const h of (p.dstHosts || [])) {
-      if (!foundSet.has(h) && !hostNameOk(h, p._dstHostNames)) return false;
-    }
-  } else if (p._isMultiDst && p._multiDstSubnets?.length) {
+  // _multiDstSubnets a la priorité — dstHosts peut contenir des hosts dont le subnet
+  // a été switché en /24 (useSubnet !== false), il ne faut pas les vérifier
+  if (p._isMultiDst && p._multiDstSubnets?.length) {
     const dstFoundSet = new Set(p._dstHostsFound || []);
     for (const s of p._multiDstSubnets) {
       if (s.useSubnet !== false) {
-        if (!s.addrFound && !s.addrName) return false;
+        if (!s.addrFound && !s.addrName) { dbg(`FAIL: multiDst subnet ${s.subnet} no addrName`); return false; }
       } else {
         for (const h of (s.hosts || [])) {
-          if (!dstFoundSet.has(h) && !hostNameOk(h, p._dstHostNames)) return false;
+          if (!dstFoundSet.has(h) && !hostNameOk(h, p._dstHostNames)) { dbg(`FAIL: multiDst host ${h} not found/named`); return false; }
         }
       }
     }
-  } else if (p.dstType !== 'public') {
-    if (!a.dstAddr?.found && !p._dstAddrName) return false;
+  } else {
+    const _dstModeResolved = p._dstMode || (p._use32Dst ? 'hosts' : 'subnet');
+    if (_dstModeResolved === 'hosts' && (p.dstHosts || []).length > 0) {
+      const foundSet = new Set(p._dstHostsFound || []);
+      for (const h of (p.dstHosts || [])) {
+        if (!foundSet.has(h) && !hostNameOk(h, p._dstHostNames)) { dbg(`FAIL: dst host ${h} not found/named`); return false; }
+      }
+    } else if (p.dstType !== 'public') {
+      if (!a.dstAddr?.found && !p._dstAddrName) { dbg('FAIL: dstAddr not found/named'); return false; }
+    }
   }
 
   // Destination group (addrgrp)
-  if (p._useDstGroup && !p._dstAddrGrpFound && !p._dstAddrName) return false;
+  if (p._useDstGroup && !p._dstAddrGrpFound && !p._dstAddrName) { dbg('FAIL: dstGroup missing name'); return false; }
 
   // Services — must be found, merged, or explicitly renamed by user
   // Aligné avec svcCells: orange si pas de customName (= suggestedName identique au label auto)
@@ -5027,7 +5153,7 @@ function isPolicyComplete(p) {
     const isPortNotation = /^(TCP|UDP)\/\d+$/i.test(svc.suggestedName || '');
     const autoLabel = svc.isNamed ? svc.label : `FF_SVC_${svc.port}_${svc.proto}`;
     const hasCustomName = svc.suggestedName && !isPortNotation && svc.suggestedName !== autoLabel;
-    if (!hasCustomName) return false;
+    if (!hasCustomName) { dbg(`FAIL: svc ${svc.label||svc.name} no custom name (suggested="${svc.suggestedName}" auto="${autoLabel}")`); return false; }
   }
 
   return true;
@@ -5264,7 +5390,7 @@ function wireDeployTable() {
       const parts = field.split('_'); // svc_PORT_PROTO
       const policy = deployState.analyzed[+idx];
       const svc = (policy?.analysis?.services || []).find(s => String(s.port) === parts[1] && s.proto === parts[2]);
-      if (svc) svc.suggestedName = e.target.value;
+      if (svc) { svc.suggestedName = e.target.value; syncSvcCell(+idx); }
     } else {
       if (deployState.analyzed[+idx]) deployState.analyzed[+idx][field] = e.target.value;
     }
@@ -5543,100 +5669,11 @@ function renderDeployPolicies(analyzed, resetPage = true) {
       : `class="deploy-chk" data-idx="${idx}" ${chkChecked ? 'checked' : ''}`;
 
     // Src addr — simplified inline-editable
-    let srcAddrCell;
-    if (p.srcSubnets && p.srcSubnets.length > 1) {
-      if (p._useSrcGroup) {
-        // Group mode: show group name
-        const srcGrpDisplay = p._srcAddrName || `FF_POLICY_${(p.policyIds||[])[0] || idx}_SRC`;
-        srcAddrCell = p._srcAddrGrpFound
-          ? `<span class="inline-editable found" data-idx="${idx}" data-field="_srcAddrName">${escHtml(p._srcAddrName)}</span>`
-          : `<span class="inline-editable missing" data-idx="${idx}" data-field="_srcAddrName">${escHtml(srcGrpDisplay)} ${badgeHtml('auto')}</span>`;
-      } else {
-        // No group: show individual subnet names / host counts
-        const subs = p._multiSrcSubnets || [];
-        const srcFoundSet = new Set(p._srcHostsFound || []);
-        const allDone = subs.every(s => {
-          if (s.useSubnet !== false) return s.addrFound || !!s.addrName;
-          return (s.hosts || []).every(h => srcFoundSet.has(h) || !!(cleanHostName(h, p._srcHostNames?.[h])));
-        });
-        const names = subs.map(s => {
-          if (s.useSubnet !== false) return s.addrName || s.subnet;
-          const srcFoundSet2 = new Set(p._srcHostsFound || []);
-          return (s.hosts || []).map(h => {
-            return cleanHostName(h, p._srcHostNames?.[h]) || h;
-          }).join(', ');
-        }).join(', ');
-        srcAddrCell = allDone
-          ? `<span class="inline-editable found" data-idx="${idx}" data-field="_srcAddrName" title="${escHtml(names)}">${escHtml(names)}</span>`
-          : `<span class="inline-editable missing" data-idx="${idx}" data-field="_srcAddrName" title="${escHtml(names)}">${escHtml(names)} ${badgeHtml('auto')}</span>`;
-      }
-    } else if ((p._srcMode === 'hosts' || p._use32Src) && p.srcHosts?.length) {
-      // /32 hosts mode (single src): show host names
-      const hFoundSet = new Set(p._srcHostsFound || []);
-      const hNames = p.srcHosts.map(h => cleanHostName(h, p._srcHostNames?.[h]) || (hFoundSet.has(h) ? h : h));
-      const allNamed = p.srcHosts.every(h => hFoundSet.has(h) || !!(cleanHostName(h, p._srcHostNames?.[h])));
-      const hDisplay = hNames.join(', ');
-      srcAddrCell = allNamed
-        ? `<span class="inline-editable found" data-idx="${idx}" data-field="_srcAddrName" title="${escHtml(hDisplay)}">${escHtml(hDisplay)}</span>`
-        : `<span class="inline-editable missing" data-idx="${idx}" data-field="_srcAddrName" title="${escHtml(hDisplay)}">${escHtml(hDisplay)} ${badgeHtml('auto')}</span>`;
-    } else {
-      srcAddrCell = addrCell(p.analysis?.srcAddr, p._srcAddrName, idx, '_srcAddrName');
-    }
-
-    // Dst addr — simplified
-    const _dstModeResolved = p._dstMode || (p._use32Dst ? 'hosts' : 'subnet');
-    let dstAddrCell;
-    if (_dstModeResolved === 'hosts' && (p.dstHosts || []).length > 0) {
-      const dhFoundSet = new Set(p._dstHostsFound || []);
-      const _autoHostName = h => `FF_HOST_${h.replace(/\./g, '_')}`;
-      const _hostNameOk = (h, nm) => { const n = cleanHostName(h, nm?.[h]); return n && n !== _autoHostName(h); };
-      const dhNames = p.dstHosts.map(h => cleanHostName(h, p._dstHostNames?.[h]) || (dhFoundSet.has(h) ? h : h));
-      const dhAllNamed = p.dstHosts.every(h => dhFoundSet.has(h) || _hostNameOk(h, p._dstHostNames));
-      const dhDisplay = dhNames.join(', ');
-      dstAddrCell = dhAllNamed
-        ? `<span class="inline-editable found" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(dhDisplay)}">${escHtml(dhDisplay)}</span>`
-        : `<span class="inline-editable missing" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(dhDisplay)}">${escHtml(dhDisplay)} ${badgeHtml('auto')}</span>`;
-    } else if (p._isMultiDst && p._multiDstSubnets?.length) {
-      if (p._useDstGroup) {
-        const dstGrpDisplay = p._dstAddrName || `GRP_${(p.policyIds||[])[0] || idx}_DST`;
-        dstAddrCell = p._dstAddrGrpFound
-          ? `<span class="inline-editable found" data-idx="${idx}" data-field="_dstAddrName">${escHtml(p._dstAddrName)}</span>`
-          : `<span class="inline-editable missing" data-idx="${idx}" data-field="_dstAddrName">${escHtml(dstGrpDisplay)} ${badgeHtml('auto')}</span>`;
-      } else {
-        const subs = p._multiDstSubnets;
-        const dstFoundSet = new Set(p._dstHostsFound || []);
-        const allDone = subs.every(s => {
-          if (s.useSubnet !== false) return s.addrFound || !!s.addrName;
-          return (s.hosts || []).every(h => dstFoundSet.has(h) || !!(cleanHostName(h, p._dstHostNames?.[h])));
-        });
-        const names = subs.map(s => {
-          if (s.useSubnet !== false) return s.addrName || s.subnet;
-          const dstFoundSet2 = new Set(p._dstHostsFound || []);
-          return (s.hosts || []).map(h => {
-            return cleanHostName(h, p._dstHostNames?.[h]) || (dstFoundSet2.has(h) ? h : h);
-          }).join(', ');
-        }).join(', ');
-        dstAddrCell = allDone
-          ? `<span class="inline-editable found" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(names)}">${escHtml(names)}</span>`
-          : `<span class="inline-editable missing" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(names)}">${escHtml(names)} ${badgeHtml('auto')}</span>`;
-      }
-    } else {
-      dstAddrCell = addrCell(p.analysis?.dstAddr, p._dstAddrName, idx, '_dstAddrName');
-    }
+    const srcAddrCell = _buildSrcAddrCell(p, idx);
+    const dstAddrCell = _buildDstAddrCell(p, idx);
 
     // Services — compact
-    const svcList = p.analysis?.services || [];
-    const stripPredef = n => (n || '').replace(/PREDEFINED$/i, '');
-    const svcCells = svcList.map(svc => {
-      if (svc.found) {
-        const dispName = stripPredef(svc.name);
-        return `<span class="match-ok" style="font-size:10px" title="${escHtml(svc.portHint || stripPredef(svc.label) || dispName)}">&#10003; ${escHtml(dispName)}${badgeHtml('config')}</span>`;
-      }
-      const customName = svc.suggestedName && svc.suggestedName !== (svc.isNamed ? svc.label : `FF_SVC_${svc.port}_${svc.proto}`) ? svc.suggestedName : '';
-      const displayName = customName || svc.label || (svc.port ? `${svc.port}/${svc.proto}` : '');
-      const svcColor = customName ? 'var(--text)' : 'var(--warn)';
-      return `<span class="match-ok" style="font-size:10px;color:${svcColor}" title="${escHtml(svc.portHint || displayName)}">${displayName ? escHtml(displayName) + ' ' : ''}${badgeHtml('auto')}</span>`;
-    }).join(' ');
+    const svcCells = _buildSvcCellHtml(p);
 
     // Interfaces — read-only text, editable in drawer
     let srcIntf, dstIntf;
@@ -5699,7 +5736,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
         <td>${dstTargetCell(p, idx)}</td>
         <td>${dstAddrCell}</td>
         ${allDstAutoFlag ? '' : `<td>${dstIntf}</td>`}
-        <td>${svcCells || '<span style="color:var(--text2)">–</span>'}</td>
+        <td class="svc-cell" data-svc-idx="${idx}">${svcCells}</td>
       </tr>`;
   }
 
