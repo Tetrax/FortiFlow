@@ -1443,3 +1443,90 @@ td:has([data-tip]) { overflow: visible; }
 .preflight-item.pf-error { color: var(--danger); }
 .preflight-item.pf-ok    { color: var(--success); }
 .preflight-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px; }
+
+/* ── Workspace history ─────────────────────────────────────────────────────── */
+.ws-history-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s;
+  font-size: 11px;
+  color: var(--text2);
+}
+.ws-history-item:hover { background: var(--bg3); color: var(--text); }
+.ws-history-item .ws-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+.ws-history-item .ws-date { font-size: 10px; color: var(--text3); flex-shrink: 0; }
+.ws-history-item .ws-del {
+  flex-shrink: 0;
+  opacity: 0;
+  font-size: 12px;
+  color: var(--text3);
+  padding: 0 2px;
+  line-height: 1;
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: opacity 0.15s, color 0.15s;
+}
+.ws-history-item:hover .ws-del { opacity: 1; }
+.ws-history-item .ws-del:hover { color: var(--danger); }
+
+/* ── Workspace name modal ──────────────────────────────────────────────────── */
+.ws-name-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(2px);
+}
+.ws-name-modal {
+  background: var(--bg2);
+  border: 1px solid var(--border2);
+  border-radius: 8px;
+  padding: 28px 32px;
+  width: 420px;
+  max-width: 90vw;
+  box-shadow: 0 8px 40px rgba(0,0,0,0.4);
+}
+.ws-name-modal h3 {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0 0 6px;
+  color: var(--text);
+}
+.ws-name-modal p {
+  font-size: 12px;
+  color: var(--text2);
+  margin: 0 0 18px;
+}
+.ws-name-modal input {
+  width: 100%;
+  background: var(--bg3);
+  border: 1px solid var(--border2);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 13px;
+  padding: 9px 12px;
+  box-sizing: border-box;
+  margin-bottom: 18px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.ws-name-modal input:focus { border-color: var(--brand); }
+.ws-name-modal .ws-modal-btns {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}

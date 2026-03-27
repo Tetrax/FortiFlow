@@ -47,6 +47,17 @@ function fmtBytes(n) {
   return `${(n / 1024 ** 3).toFixed(2)} GB`;
 }
 
+function fmtRelDate(iso) {
+  const diff = Date.now() - new Date(iso).getTime();
+  const m = Math.floor(diff / 60000);
+  if (m < 1)   return 'à l\'instant';
+  if (m < 60)  return `il y a ${m}min`;
+  const h = Math.floor(m / 60);
+  if (h < 24)  return `il y a ${h}h`;
+  const d = Math.floor(h / 24);
+  return `il y a ${d}j`;
+}
+
 function actionTag(a) {
   const cls = { accept: 'tag-accept', deny: 'tag-deny', drop: 'tag-drop' }[a] || 'tag-deny';
   return `<span class="tag ${cls}">${a || '–'}</span>`;
@@ -150,10 +161,107 @@ async function handleUpload(file) {
   showProgress(false);
   updateSidebar();
   navigateTo('dashboard');
+
+  // Proposer de nommer et sauvegarder le workspace dans l'historique
+  const defaultName = (state.meta?.filename || 'workspace').replace(/\.[^.]+$/, '');
+  const wsName = await promptWorkspaceName(defaultName);
+  if (wsName) {
+    try {
+      await fetch(`/api/workspaces?session=${state.session}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: wsName }),
+      });
+      await loadWsHistory();
+    } catch {}
+  }
 }
 
 function showError(msg) {
   el(_renderTarget || 'content').innerHTML = `<div class="alert alert-error">⚠ ${escHtml(msg)}</div>`;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Workspace history
+// ═══════════════════════════════════════════════════════════════
+
+async function loadWsHistory() {
+  try {
+    const r = await fetch('/api/workspaces');
+    if (!r.ok) return;
+    const list = await r.json();
+    const section = el('sidebar-history');
+    const container = el('ws-history-list');
+    if (!section || !container) return;
+    if (!list.length) { section.style.display = 'none'; return; }
+    section.style.display = '';
+    container.innerHTML = list.map(ws => `
+      <div class="ws-history-item" data-wsid="${escHtml(ws.id)}" title="${escHtml(ws.name)}">
+        <span class="ws-name">${escHtml(ws.name)}</span>
+        <span class="ws-date">${fmtRelDate(ws.createdAt)}</span>
+        <button class="ws-del" data-del="${escHtml(ws.id)}" title="Supprimer">×</button>
+      </div>
+    `).join('');
+
+    // Clic sur un workspace → charger
+    container.querySelectorAll('.ws-history-item').forEach(item => {
+      item.addEventListener('click', async (e) => {
+        if (e.target.dataset.del) {
+          e.stopPropagation();
+          await deleteWsHistory(e.target.dataset.del);
+          return;
+        }
+        loadWsFromHistory(item.dataset.wsid);
+      });
+    });
+  } catch {}
+}
+
+async function deleteWsHistory(id) {
+  try {
+    await fetch(`/api/workspaces/${id}`, { method: 'DELETE' });
+    await loadWsHistory();
+  } catch {}
+}
+
+async function loadWsFromHistory(id) {
+  try {
+    const r = await fetch(`/api/workspaces/${id}`);
+    if (!r.ok) { const e = await r.json().catch(() => ({})); alert(e.error || 'Erreur chargement'); return; }
+    const { sessionId } = await r.json();
+    state.session = sessionId;
+    try {
+      const sr = await fetch(`/api/stats?session=${sessionId}`);
+      if (sr.ok) { const d = await sr.json(); state.stats = d.stats; state.meta = d.meta; }
+    } catch {}
+    updateSidebar();
+    navigateTo('dashboard');
+  } catch (err) { alert('Erreur: ' + err.message); }
+}
+
+function promptWorkspaceName(defaultName) {
+  return new Promise(resolve => {
+    const modal = document.createElement('div');
+    modal.className = 'ws-name-modal-overlay';
+    modal.innerHTML = `
+      <div class="ws-name-modal">
+        <h3>💾 Nommer ce workspace</h3>
+        <p>Donnez un nom à cette analyse pour la retrouver facilement dans l'historique.</p>
+        <input id="ws-name-input" type="text" maxlength="80" placeholder="Ex: Client XYZ — Audit VPN" value="${escHtml(defaultName)}">
+        <div class="ws-modal-btns">
+          <button class="btn-sm" id="ws-skip">Passer</button>
+          <button class="btn-accent" id="ws-save-name">Sauvegarder</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    const input = modal.querySelector('#ws-name-input');
+    input.select();
+    const doSave = () => { modal.remove(); resolve(input.value.trim() || defaultName); };
+    const doSkip = () => { modal.remove(); resolve(null); };
+    modal.querySelector('#ws-save-name').addEventListener('click', doSave);
+    modal.querySelector('#ws-skip').addEventListener('click', doSkip);
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') doSave(); if (e.key === 'Escape') doSkip(); });
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -5735,3 +5843,4 @@ document.addEventListener('click', () => {
 
 // Start
 navigateTo('dashboard');
+loadWsHistory();

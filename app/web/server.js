@@ -24,6 +24,17 @@ const PORT = process.env.PORT || 3737;
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
+const WS_HISTORY_DIR = path.join(__dirname, 'workspaces');
+fs.mkdirSync(WS_HISTORY_DIR, { recursive: true });
+
+function loadWsIndex() {
+  try { return JSON.parse(fs.readFileSync(path.join(WS_HISTORY_DIR, 'index.json'), 'utf8')); }
+  catch { return []; }
+}
+function saveWsIndex(entries) {
+  fs.writeFileSync(path.join(WS_HISTORY_DIR, 'index.json'), JSON.stringify(entries));
+}
+
 // ─── Cleanup orphan uploads on startup + every 30 min ─────────────────────────
 function cleanUploads(maxAgeMs = 60 * 60 * 1000) {
   try {
@@ -646,6 +657,80 @@ app.post('/api/import/workspace', express.raw({ type: ['application/octet-stream
   } catch (err) {
     res.status(400).json({ error: 'Fichier corrompu ou illisible : ' + err.message });
   }
+});
+
+// GET /api/workspaces — liste les 10 derniers workspaces sauvegardés
+app.get('/api/workspaces', (req, res) => {
+  res.json(loadWsIndex().slice(0, 10));
+});
+
+// POST /api/workspaces — sauvegarde le workspace courant avec un nom
+app.post('/api/workspaces', express.json({ limit: '10kb' }), async (req, res) => {
+  const s = requireSession(req, res);
+  if (!s) return;
+  const zlib = require('zlib');
+  const name = (req.body?.name || '').trim().slice(0, 80) || 'Sans nom';
+
+  // Récupère les flows depuis le cache disque si libérés en mémoire
+  let exportData = s.data;
+  if (!exportData?.flows) {
+    try {
+      const cachePath = path.join(__dirname, 'sessions-cache', `${s.id}.json`);
+      const cached = JSON.parse(fs.promises ? await require('fs').promises.readFile(cachePath, 'utf8') : require('fs').readFileSync(cachePath, 'utf8'));
+      if (cached?.data?.flows) exportData = { ...s.data, flows: cached.data.flows };
+    } catch {}
+  }
+
+  const payload = JSON.stringify({
+    _ffws: 2,
+    exportedAt: new Date().toISOString(),
+    data: exportData,
+    fortiConfig: s.fortiConfig || null,
+  });
+
+  const id = require('crypto').randomBytes(8).toString('hex');
+  const filename = `${id}.ffws`;
+
+  const compressed = await new Promise((resolve, reject) =>
+    zlib.gzip(Buffer.from(payload, 'utf8'), (err, buf) => err ? reject(err) : resolve(buf))
+  );
+  require('fs').writeFileSync(path.join(WS_HISTORY_DIR, filename), compressed);
+
+  const entry = { id, name, filename, createdAt: new Date().toISOString(), size: compressed.length };
+  const entries = [entry, ...loadWsIndex()].slice(0, 10);
+  saveWsIndex(entries);
+  res.json({ ok: true, id, name });
+});
+
+// GET /api/workspaces/:id — charge un workspace dans une nouvelle session
+app.get('/api/workspaces/:id', async (req, res) => {
+  const entry = loadWsIndex().find(e => e.id === req.params.id);
+  if (!entry) return res.status(404).json({ error: 'Workspace introuvable' });
+  try {
+    const zlib = require('zlib');
+    const compressed = require('fs').readFileSync(path.join(WS_HISTORY_DIR, entry.filename));
+    const json = await new Promise((resolve, reject) =>
+      zlib.gunzip(compressed, (err, buf) => err ? reject(err) : resolve(buf.toString('utf8')))
+    );
+    const body = JSON.parse(json);
+    if (!body._ffws || !body.data) return res.status(400).json({ error: 'Workspace invalide' });
+    const newId = createSession();
+    setSessionData(newId, body.data);
+    if (body.fortiConfig) setFortiConfig(newId, body.fortiConfig);
+    res.json({ sessionId: newId, name: entry.name, hasFortiConfig: !!body.fortiConfig });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/workspaces/:id — supprime un workspace de l'historique
+app.delete('/api/workspaces/:id', (req, res) => {
+  const entries = loadWsIndex();
+  const entry = entries.find(e => e.id === req.params.id);
+  if (!entry) return res.status(404).json({ error: 'Workspace introuvable' });
+  try { require('fs').unlinkSync(path.join(WS_HISTORY_DIR, entry.filename)); } catch {}
+  saveWsIndex(entries.filter(e => e.id !== req.params.id));
+  res.json({ ok: true });
 });
 
 // DELETE /api/session/:session — free memory
