@@ -810,20 +810,20 @@ app.post('/api/export/policies-xlsx', express.json({ limit: '50mb' }), async (re
       const srcDisplay = isSrcHosts
         ? p.srcHosts.join(', ')
         : (p.srcSubnet || '');
+      // N'exporter que les valeurs explicitement saisies par l'utilisateur (pas de fallback analysis)
       const srcAddrVal = isSrcHosts
-        ? p.srcHosts.map(h => (p._srcHostNames?.[h]) || h).join(', ')
-        : (p._srcAddrName || p.analysis?.srcAddr?.name || '');
+        ? p.srcHosts.map(h => (p._srcHostNames?.[h]) || '').join(', ')
+        : (p._srcAddrName || '');
       const dstAddrVal = isDstHosts
-        ? p.dstHosts.map(h => (p._dstHostNames?.[h]) || h).join(', ')
-        : (p._dstAddrName || p.analysis?.dstAddr?.name || '');
+        ? p.dstHosts.map(h => (p._dstHostNames?.[h]) || '').join(', ')
+        : (p._dstAddrName || '');
 
-      // Noms services éditables (seulement ceux non trouvés en config) : format PORT/PROTO=Nom
+      // Noms services éditables (seulement ceux non trouvés avec un nom custom) : format PORT/PROTO=Nom ou label:SVC=Nom
       const svcNamesVal = (p.analysis?.services || [])
-        .filter(s => !s.found)
+        .filter(s => !s.found && s.suggestedName)
         .map(s => {
-          const key = s.isNamed ? s.label : `${s.port}/${s.proto}`;
-          const name = s.suggestedName || '';
-          return `${key}=${name}`;
+          const key = s.isNamed ? `label:${s.label}` : `${s.port}/${s.proto}`;
+          return `${key}=${s.suggestedName}`;
         }).join(' | ');
 
       const rowData = [

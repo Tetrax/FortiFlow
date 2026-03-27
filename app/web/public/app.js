@@ -1765,21 +1765,20 @@ async function importPoliciesExcel(file) {
       let changed = false;
       // Nom policy
       if (patch.policyName !== null && patch.policyName !== (p._policyName || '')) { p._policyName = patch.policyName; changed = true; }
-      // Addr source
+      // Addr source — on compare uniquement contre la valeur user (_srcAddrName), pas les fallbacks analysis
       if (patch.srcAddr !== null) {
         const isSrcHosts = (p._srcMode === 'hosts' || p._use32Src) && p.srcHosts?.length;
         if (isSrcHosts) {
           const names = patch.srcAddr.split(',').map(s => s.trim());
           p.srcHosts.forEach((h, i) => {
             const n = names[i] || names[0];
-            if (n && n !== h && n !== (p._srcHostNames?.[h] || '')) { // skip si IP as-is ou inchangé
+            if (n && n !== (p._srcHostNames?.[h] || '')) {
               if (!p._srcHostNames) p._srcHostNames = {};
               p._srcHostNames[h] = n; changed = true;
             }
           });
         } else {
-          const current = p._srcAddrName || p.analysis?.srcAddr?.name || '';
-          if (patch.srcAddr !== current) { p._srcAddrName = patch.srcAddr; changed = true; }
+          if (patch.srcAddr !== (p._srcAddrName || '')) { p._srcAddrName = patch.srcAddr; changed = true; }
         }
       }
       // Addr dest
@@ -1789,14 +1788,13 @@ async function importPoliciesExcel(file) {
           const names = patch.dstAddr.split(',').map(s => s.trim());
           p.dstHosts.forEach((h, i) => {
             const n = names[i] || names[0];
-            if (n && n !== h && n !== (p._dstHostNames?.[h] || '')) {
+            if (n && n !== (p._dstHostNames?.[h] || '')) {
               if (!p._dstHostNames) p._dstHostNames = {};
               p._dstHostNames[h] = n; changed = true;
             }
           });
         } else {
-          const current = p._dstAddrName || p.analysis?.dstAddr?.name || '';
-          if (patch.dstAddr !== current) { p._dstAddrName = patch.dstAddr; changed = true; }
+          if (patch.dstAddr !== (p._dstAddrName || '')) { p._dstAddrName = patch.dstAddr; changed = true; }
         }
       }
       // Interfaces, action, nat, log — skip si inchangé
@@ -1805,7 +1803,7 @@ async function importPoliciesExcel(file) {
       if (patch.action  !== null && patch.action  !== (p._action  || 'accept')) { p._action = patch.action; changed = true; }
       if (patch.nat     !== null && patch.nat     !== p._nat)  { p._nat = patch.nat; changed = true; }
       if (patch.log     !== null && patch.log     !== (p._log   || 'all')) { p._log = patch.log; changed = true; }
-      // Noms services : format "PORT/PROTO=Nom | PORT/PROTO=Nom"
+      // Noms services : format "PORT/PROTO=Nom | label:SVC=Nom"
       if (patch.svcNames) {
         for (const entry of patch.svcNames.split('|')) {
           const eq = entry.indexOf('=');
@@ -1814,7 +1812,7 @@ async function importPoliciesExcel(file) {
           const name = entry.slice(eq + 1).trim();
           if (!name) continue;
           const svc = (p.analysis?.services || []).find(s => {
-            const k = s.isNamed ? s.label : `${s.port}/${s.proto}`;
+            const k = s.isNamed ? `label:${s.label}` : `${s.port}/${s.proto}`;
             return k === key;
           });
           if (svc && !svc.found && name !== (svc.suggestedName || '')) { svc.suggestedName = name; changed = true; }
