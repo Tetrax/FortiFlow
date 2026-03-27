@@ -229,6 +229,17 @@ function navigateTo(view) {
 function renderUpload() {
   el(_renderTarget || 'content').innerHTML = `
     <div id="upload-zone">
+      <div style="text-align:center;margin-bottom:18px">
+        <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;
+          padding:9px 20px;border-radius:6px;border:1px solid var(--border2);
+          background:var(--bg2);color:var(--text2);font-size:13px;
+          transition:border-color .2s,color .2s"
+          onmouseover="this.style.borderColor='var(--brand)';this.style.color='var(--text)'"
+          onmouseout="this.style.borderColor='var(--border2)';this.style.color='var(--text2)'">
+          💾 Reprendre un workspace <em style="font-size:11px;opacity:.7">(.ffws)</em>
+          <input type="file" id="btn-import-workspace-upload" accept=".ffws,.json" style="display:none">
+        </label>
+      </div>
       <div class="drop-area" id="drop-area">
         <div class="drop-icon">📂</div>
         <div class="drop-title">Déposez votre fichier de log</div>
@@ -243,6 +254,10 @@ function renderUpload() {
     </div>`;
 
   el('btn-pick').addEventListener('click', () => el('file-input').click());
+  el('btn-import-workspace-upload').addEventListener('change', e => {
+    const f = e.target.files[0];
+    if (f) importSession(f);
+  });
 
   const drop = el('drop-area');
   drop.addEventListener('dragover',  e => { e.preventDefault(); drop.classList.add('dragover'); });
@@ -250,7 +265,13 @@ function renderUpload() {
   drop.addEventListener('drop', e => {
     e.preventDefault();
     drop.classList.remove('dragover');
-    handleUpload(e.dataTransfer.files[0]);
+    const f = e.dataTransfer.files[0];
+    // Si c'est un workspace, on le redirige vers importSession
+    if (f && (f.name.endsWith('.ffws') || f.name.endsWith('.json'))) {
+      importSession(f);
+    } else {
+      handleUpload(f);
+    }
   });
 }
 
