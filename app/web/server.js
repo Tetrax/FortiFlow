@@ -817,12 +817,33 @@ app.post('/api/export/policies-xlsx', express.json({ limit: '50mb' }), async (re
       // Format /32 : "IP=Nom" pour les hôtes nommés uniquement (évite les ,,,, pour hôtes sans nom)
       // Sanitize : strip "IP=Nom" si le nom a été stocké corrompu par un ancien import positionnel
       const cleanHost = (h, name) => { if (!name) return ''; const pfx = h + '='; return name.startsWith(pfx) ? name.slice(pfx.length) : name; };
-      const srcAddrVal = isSrcHosts
-        ? p.srcHosts.map(h => { const n = cleanHost(h, p._srcHostNames?.[h]); return n ? `${h}=${n}` : null; }).filter(Boolean).join(', ')
-        : (p._srcAddrName || '');
-      const dstAddrVal = isDstHosts
-        ? p.dstHosts.map(h => { const n = cleanHost(h, p._dstHostNames?.[h]); return n ? `${h}=${n}` : null; }).filter(Boolean).join(', ')
-        : (p._dstAddrName || '');
+      // Format mixte multi-subnet : "CIDR=AddrName" pour les /24, "IP=HostName" pour les /32
+      const buildAddrVal = (multiSubs, hosts, hostNames, addrName) => {
+        if (multiSubs?.length) {
+          const parts = [];
+          for (const s of multiSubs) {
+            if (s.useSubnet !== false) {
+              if (s.addrName) parts.push(`${s.subnet}=${s.addrName}`);
+            } else {
+              for (const h of (s.hosts || [])) {
+                const n = cleanHost(h, hostNames?.[h]);
+                if (n) parts.push(`${h}=${n}`);
+              }
+            }
+          }
+          return parts.join(', ');
+        }
+        if (hosts?.length) {
+          return hosts.map(h => { const n = cleanHost(h, hostNames?.[h]); return n ? `${h}=${n}` : null; }).filter(Boolean).join(', ');
+        }
+        return addrName || '';
+      };
+      const srcAddrVal = buildAddrVal(
+        p._multiSrcSubnets, isSrcHosts ? p.srcHosts : null, p._srcHostNames, p._srcAddrName
+      );
+      const dstAddrVal = buildAddrVal(
+        p._multiDstSubnets, isDstHosts ? p.dstHosts : null, p._dstHostNames, p._dstAddrName
+      );
 
       // Noms services éditables (seulement ceux non trouvés avec un nom custom) : format PORT/PROTO=Nom ou label:SVC=Nom
       const svcNamesVal = (p.analysis?.services || [])

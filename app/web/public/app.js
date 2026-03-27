@@ -1765,46 +1765,39 @@ async function importPoliciesExcel(file) {
       let changed = false;
       // Nom policy — export: p._policyName || ''
       if (patch.policyName !== null && patch.policyName !== (p._policyName || '')) { p._policyName = patch.policyName; changed = true; }
-      // Addr source — format /32 : "IP=Nom, IP=Nom" ; format /24 : nom simple
-      if (patch.srcAddr !== null) {
-        const isSrcHosts = (p._srcMode === 'hosts' || p._use32Src) && p.srcHosts?.length;
-        // Détecte aussi le format IP=Nom même si le mode n'est pas explicitement /32
-        const looksLikeSrcHosts = /\d+\.\d+\.\d+\.\d+=/.test(patch.srcAddr);
-        if (isSrcHosts || looksLikeSrcHosts) {
-          for (const entry of patch.srcAddr.split(',')) {
+      // Addr source/dest — format mixte :
+      //   "CIDR/Mask=AddrName" → nom du subnet /24 (dans _multiSrcSubnets[i].addrName)
+      //   "IP=HostName"        → nom de l'hôte /32 (dans _srcHostNames[ip])
+      //   "PlainName"          → nom simple /24 mono-subnet (_srcAddrName)
+      const applyAddrPatch = (val, hostNamesKey, multiSubsKey, addrNameKey) => {
+        if (!val) return;
+        const hasEq = val.includes('=');
+        const looksLikeStructured = hasEq && /\d+\.\d+/.test(val);
+        if (looksLikeStructured) {
+          for (const entry of val.split(',')) {
             const eq = entry.indexOf('=');
             if (eq < 0) continue;
-            const ip = entry.slice(0, eq).trim();
-            const n  = entry.slice(eq + 1).trim();
-            // Compare avec la valeur nettoyée pour éviter les faux positifs (corruption IP=Nom)
-            if (ip && n && n !== (cleanHostName(ip, p._srcHostNames?.[ip]) || '')) {
-              if (!p._srcHostNames) p._srcHostNames = {};
-              p._srcHostNames[ip] = n; changed = true;
+            const lhs = entry.slice(0, eq).trim();
+            const n   = entry.slice(eq + 1).trim();
+            if (!lhs || !n) continue;
+            if (lhs.includes('/')) {
+              // Format CIDR=AddrName → met à jour le subnet dans _multiXxxSubnets
+              const sub = p[multiSubsKey]?.find(s => s.subnet === lhs);
+              if (sub && n !== (sub.addrName || '')) { sub.addrName = n; changed = true; }
+            } else {
+              // Format IP=HostName → met à jour _xxxHostNames
+              if (n !== (cleanHostName(lhs, p[hostNamesKey]?.[lhs]) || '')) {
+                if (!p[hostNamesKey]) p[hostNamesKey] = {};
+                p[hostNamesKey][lhs] = n; changed = true;
+              }
             }
           }
         } else {
-          if (patch.srcAddr !== (p._srcAddrName || '')) { p._srcAddrName = patch.srcAddr; changed = true; }
+          if (val !== (p[addrNameKey] || '')) { p[addrNameKey] = val; changed = true; }
         }
-      }
-      // Addr dest
-      if (patch.dstAddr !== null) {
-        const isDstHosts = (p._dstMode === 'hosts' || p._use32Dst) && p.dstHosts?.length;
-        const looksLikeDstHosts = /\d+\.\d+\.\d+\.\d+=/.test(patch.dstAddr);
-        if (isDstHosts || looksLikeDstHosts) {
-          for (const entry of patch.dstAddr.split(',')) {
-            const eq = entry.indexOf('=');
-            if (eq < 0) continue;
-            const ip = entry.slice(0, eq).trim();
-            const n  = entry.slice(eq + 1).trim();
-            if (ip && n && n !== (cleanHostName(ip, p._dstHostNames?.[ip]) || '')) {
-              if (!p._dstHostNames) p._dstHostNames = {};
-              p._dstHostNames[ip] = n; changed = true;
-            }
-          }
-        } else {
-          if (patch.dstAddr !== (p._dstAddrName || '')) { p._dstAddrName = patch.dstAddr; changed = true; }
-        }
-      }
+      };
+      if (patch.srcAddr !== null) applyAddrPatch(patch.srcAddr, '_srcHostNames', '_multiSrcSubnets', '_srcAddrName');
+      if (patch.dstAddr !== null) applyAddrPatch(patch.dstAddr, '_dstHostNames', '_multiDstSubnets', '_dstAddrName');
       // Interfaces, action, nat, log — skip si inchangé (utiliser le même fallback que l'export)
       if (patch.srcIntf !== null && patch.srcIntf !== (p._srcintf || '')) { p._srcintf = patch.srcIntf || undefined; changed = true; }
       if (patch.dstIntf !== null && patch.dstIntf !== (p._dstintf || '')) { p._dstintf = patch.dstIntf || undefined; changed = true; }
