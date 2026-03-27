@@ -2793,6 +2793,7 @@ function populateDrawer(idx) {
           : `<input class="drawer-input drawer-src-grp-name" value="${escHtml(p._srcAddrName || '')}" placeholder="${escHtml(suggestedSrcGrp)}" style="width:160px">`)
           : ''}
       </div>
+      ${_addrBanner('src')}
       <div class="drawer-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-srcintf">${ifOpts}</select></div>
     </div>`;
   } else {
@@ -2837,6 +2838,7 @@ function populateDrawer(idx) {
           : `<input class="drawer-input drawer-src-name" value="${escHtml(inputVal(srcAddrName, a.srcAddr?.suggestedName || suggestAddrNameFE(p.srcSubnet)))}" placeholder="${escHtml(srcAddrName || 'FF_...')}">${badgeHtml('auto')}`}
       </div>` : ''}
       ${srcHostsHtml}
+      ${_addrBanner('src')}
       <div class="drawer-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-srcintf">${ifOpts}</select></div>
     </div>`;
   }
@@ -2883,6 +2885,7 @@ function populateDrawer(idx) {
           : `<input class="drawer-input drawer-grp-name" value="${escHtml(p._dstAddrName || '')}" placeholder="${escHtml(suggestedDstGrp)}" style="width:160px">`)
           : ''}
       </div>
+      ${_addrBanner('dst')}
     </div>`;
   } else {
     const dstAddrName = p._dstAddrName || a.dstAddr?.name || '';
@@ -2920,17 +2923,21 @@ function populateDrawer(idx) {
           : `<input class="drawer-input drawer-dst-name" value="${escHtml(inputVal(dstAddrName, a.dstAddr?.suggestedName || suggestAddrNameFE(p.dstTarget)))}" placeholder="${escHtml(dstAddrName || 'FF_...')}">${badgeHtml('auto')}`}
       </div>` : ''}
       ${dstHostsHtml}
+      ${_addrBanner('dst')}
     </div>`;
   }
 
   // Addr propagation banner
   const ap = p._propagateAddrPending;
-  const addrPropLabel = ap ? (ap.isHost ? ap.hostIp : ap.cidr) : '';
-  const addrPropagateBanner = ap ? `<div class="svc-propagate-banner">
-    <span>${ap.count} autre${ap.count>1?'s':''} policy${ap.count>1?'s':''} ${ap.count>1?'ont':'a'} <code style="font-family:var(--mono)">${escHtml(addrPropLabel)}</code> en ${ap.addrType === 'src' ? 'source' : 'destination'} — Appliquer <strong>${escHtml(ap.newName)}</strong> à toutes ?</span>
-    <button class="btn-sm btn-accent addr-prop-yes">Oui</button>
-    <button class="btn-sm addr-prop-no">Non</button>
-  </div>` : '';
+  const _addrBanner = (forType) => {
+    if (!ap || ap.addrType !== forType) return '';
+    const label = ap.isHost ? ap.hostIp : ap.cidr;
+    return `<div class="svc-propagate-banner">
+      <span>${ap.count} autre${ap.count>1?'s':''} policy${ap.count>1?'s':''} ${ap.count>1?'ont':'a'} <code style="font-family:var(--mono)">${escHtml(label)}</code> en ${forType === 'src' ? 'source' : 'destination'} — Appliquer <strong>${escHtml(ap.newName)}</strong> à toutes ?</span>
+      <button class="btn-sm btn-accent addr-prop-yes">Oui</button>
+      <button class="btn-sm addr-prop-no">Non</button>
+    </div>`;
+  };
 
   // Services
   const svcList = a.services || [];
@@ -3021,7 +3028,6 @@ function populateDrawer(idx) {
     </div>
     ${srcSection}
     ${dstSection}
-    ${addrPropagateBanner}
     <div class="drawer-section">
       <div class="drawer-section-title">Interfaces destination</div>
       <div class="drawer-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-dstintf">${ifOptsDst}</select></div>
