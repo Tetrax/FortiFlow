@@ -535,9 +535,15 @@ async function matrix() {
         <div class="section-title">Heatmap LAN → LAN</div>
         <div class="section-sub">Intensité = nombre de sessions entre subnets /24 privés</div>
       </div>
-      <div class="matrix-toggle">
-        <button class="toggle-btn ${state.matrix.action === 'accept' ? 'active accept' : ''}" data-action="accept">✔ Acceptés</button>
-        <button class="toggle-btn ${state.matrix.action === 'deny'   ? 'active deny'   : ''}" data-action="deny">✖ Refusés</button>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <div class="matrix-toggle">
+          <button class="toggle-btn ${state.matrix.action === 'accept' ? 'active accept' : ''}" data-action="accept">✔ Acceptés</button>
+          <button class="toggle-btn ${state.matrix.action === 'deny'   ? 'active deny'   : ''}" data-action="deny">✖ Refusés</button>
+        </div>
+        <div style="display:flex;gap:6px">
+          <button id="btn-matrix-export-img"  class="btn-sm" title="Exporter en image PNG">⬇ PNG</button>
+          <button id="btn-matrix-export-xlsx" class="btn-sm" title="Exporter en Excel">⬇ Excel</button>
+        </div>
       </div>
     </div>
     <div id="matrix-wrap"><canvas id="matrix-canvas"></canvas></div>
@@ -566,11 +572,30 @@ async function matrix() {
     }, { signal });
   });
 
+  // ── Export PNG ──
+  el('btn-matrix-export-img')?.addEventListener('click', () => {
+    const canvas = el('matrix-canvas');
+    if (!canvas) return;
+    canvas.toBlob(blob => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `fortiflow_matrix_${state.matrix.action}.png`;
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+  }, { signal });
+
+  // ── Export Excel ──
+  el('btn-matrix-export-xlsx')?.addEventListener('click', () => {
+    window.location = `/api/export/matrix?action=${state.matrix.action}&session=${state.session}`;
+  }, { signal });
+
   try {
     const data = await api(`/api/matrix?action=${state.matrix.action}`);
     renderMatrix(data, state.matrix.action, signal);
   } catch (e) {
-    el('matrix-wrap').innerHTML = `<div class="alert alert-error">${escHtml(e.message)}</div>`;
+    el('matrix-wrap').innerHTML = `<div class="alert alert-error">${escHtml(e.message)}</div>`; // eslint-disable-line
   }
 }
 

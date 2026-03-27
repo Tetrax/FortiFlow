@@ -392,6 +392,53 @@ app.get('/api/export/policies', (req, res) => {
   sendCsv(res, 'fortiflow_policies.csv', policies, COLS);
 });
 
+// GET /api/export/matrix — XLSX download de la heatmap (?action=accept|deny)
+app.get('/api/export/matrix', (req, res) => {
+  const s = requireSession(req, res);
+  if (!s) return;
+  const action  = req.query.action || 'accept';
+  const matData = action === 'deny' ? s.data.denyMatrix : s.data.matrix;
+  if (!matData) return res.status(404).json({ error: 'Matrice non disponible' });
+
+  let XLSX;
+  try { XLSX = require('xlsx'); } catch (e) { return res.status(500).json({ error: 'Module xlsx non disponible' }); }
+
+  const { srcSubnets, dstSubnets, cells } = matData;
+
+  // Sheet 1 : pivot heatmap  (lignes = src, colonnes = dst, valeurs = sessions)
+  const countMap = new Map();
+  cells.forEach(c => countMap.set(`${c.si},${c.di}`, c.count));
+
+  const heatRows = [['Source \\ Destination', ...dstSubnets]];
+  for (let si = 0; si < srcSubnets.length; si++) {
+    const row = [srcSubnets[si]];
+    for (let di = 0; di < dstSubnets.length; di++) {
+      row.push(countMap.get(`${si},${di}`) || 0);
+    }
+    heatRows.push(row);
+  }
+  const ws1 = XLSX.utils.aoa_to_sheet(heatRows);
+  XLSX.utils.book_append_sheet(XLSX.utils.book_new(), ws1, 'Heatmap');
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws1, 'Heatmap');
+
+  // Sheet 2 : détails flat  (src, dst, sessions, services, ports)
+  const detailRows = [['Source', 'Destination', 'Sessions', 'Services', 'Ports']];
+  cells.forEach(c => detailRows.push([
+    c.src, c.dst, c.count,
+    (c.services || []).join(', '),
+    (c.ports    || []).join(', '),
+  ]));
+  const ws2 = XLSX.utils.aoa_to_sheet(detailRows);
+  XLSX.utils.book_append_sheet(wb, ws2, 'Détails');
+
+  const buf   = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+  const label = action === 'deny' ? 'deny' : 'accept';
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="fortiflow_matrix_${label}.xlsx"`);
+  res.send(buf);
+});
+
 // DELETE /api/session/:session — free memory
 app.delete('/api/session/:session', (req, res) => {
   deleteSession(req.params.session);
