@@ -59,8 +59,8 @@ function _loadAll() {
 }
 
 // ─── Limits ──────────────────────────────────────────────────────────────────
-const MAX_SESSIONS   = 10;
-const SESSION_TTL_MS = 2 * 60 * 60 * 1000;  // 2 hours
+const MAX_SESSIONS   = 50;
+const SESSION_TTL_MS = 4 * 60 * 60 * 1000;  // 4 hours
 const PURGE_INTERVAL = 10 * 60 * 1000;
 
 function evictOldest() {
