@@ -401,7 +401,7 @@ app.get('/api/export/matrix', async (req, res) => {
   if (!matData) return res.status(404).json({ error: 'Matrice non disponible' });
 
   const ExcelJS  = require('exceljs');
-  const { srcSubnets, dstSubnets, cells, maxCount } = matData;
+  const { srcSubnets, dstSubnets, cells, maxCount, subnetIntfMap = {} } = matData;
   const isDeny   = action === 'deny';
 
   // ── helpers couleur (échelle log, identique au canvas) ──────────────────────
@@ -450,44 +450,61 @@ app.get('/api/export/matrix', async (req, res) => {
   // ═══════════════════════════════════════════════════════════════════════════
   const ws1 = wb.addWorksheet('Heatmap', { views: [{ state: 'frozen', xSplit: 1, ySplit: 1 }] });
 
-  // En-tête colonnes
-  const colHeader = ['From \\ To', ...dstSubnets.map(s => s.replace('.0/24', '.x'))];
-  ws1.addRow(colHeader);
+  // ── helpers label subnet + interface ──────────────────────────────────────
+  const SNS_INTF = 'FF7870A0'; // couleur muted SNS pour le nom d'interface
+  function subnetShort(s) { return s.replace('.0/24', '.x').replace('/24',''); }
+  function intfNames(subnet)  { return (subnetIntfMap[subnet] || []).join(' / '); }
+  function richLabel(subnet, boldColor) {
+    const name = subnetShort(subnet);
+    const intf = intfNames(subnet);
+    if (!intf) return { richText: [{ text: name, font: { bold: true, color: { argb: boldColor }, size: 9, name: 'Calibri' } }] };
+    return { richText: [
+      { text: name + '\n', font: { bold: true,  color: { argb: boldColor }, size: 9, name: 'Calibri' } },
+      { text: intf,        font: { bold: false, color: { argb: SNS_INTF },  size: 7, name: 'Calibri', italic: true } },
+    ]};
+  }
+
+  // En-tête colonnes (row 1)
+  ws1.addRow(['From \\ To', ...dstSubnets.map(() => null)]); // placeholder
   const hRow = ws1.getRow(1);
-  hRow.height = 80;
-  hRow.eachCell((cell, col) => {
-    cell.fill   = { type: 'pattern', pattern: 'solid', fgColor: { argb: SNS_HDR } };
-    cell.font   = { bold: true, color: { argb: col === 1 ? SNS_BRAND : 'FFFFFFFF' }, size: 9, name: 'Calibri' };
-    cell.border = hdrBorder;
-    cell.alignment = col === 1
-      ? { horizontal: 'center', vertical: 'middle' }
-      : { horizontal: 'center', vertical: 'bottom', textRotation: 45, wrapText: false };
+  hRow.height = 90;
+
+  // Cellule coin top-left
+  const cornerCell = hRow.getCell(1);
+  cornerCell.value     = { richText: [{ text: 'From \\ To', font: { bold: true, color: { argb: SNS_BRAND }, size: 9, name: 'Calibri' } }] };
+  cornerCell.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: SNS_HDR } };
+  cornerCell.border    = hdrBorder;
+  cornerCell.alignment = { horizontal: 'center', vertical: 'middle' };
+
+  // En-têtes colonnes (destinations)
+  dstSubnets.forEach((dst, di) => {
+    const cell = hRow.getCell(di + 2);
+    cell.value     = richLabel(dst, 'FFFFFFFF');
+    cell.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: SNS_HDR } };
+    cell.border    = hdrBorder;
+    cell.alignment = { horizontal: 'center', vertical: 'bottom', textRotation: 45, wrapText: true };
   });
 
   // Lignes de données
   for (let si = 0; si < srcSubnets.length; si++) {
-    const rowVals = [srcSubnets[si].replace('.0/24', '.x')];
-    for (let di = 0; di < dstSubnets.length; di++) {
-      const c = countMap.get(`${si},${di}`);
-      rowVals.push(c ? c.count : null);
-    }
+    const rowVals = [null, ...Array(dstSubnets.length).fill(null)]; // placeholder col A
     ws1.addRow(rowVals);
     const row = ws1.getRow(si + 2);
-    row.height = 22;
+    // Hauteur adaptée selon présence d'interface
+    row.height = intfNames(srcSubnets[si]) ? 30 : 22;
 
-    // En-tête ligne (col A)
+    // En-tête ligne (col A) avec subnet + interface
     const rh = row.getCell(1);
+    rh.value     = richLabel(srcSubnets[si], SNS_BRAND);
     rh.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: SNS_ROWHDR } };
-    rh.font      = { bold: true, color: { argb: SNS_BRAND }, size: 9, name: 'Calibri' };
-    rh.alignment = { horizontal: 'left', vertical: 'middle' };
+    rh.alignment = { horizontal: 'left', vertical: 'middle', wrapText: true };
     rh.border    = hdrBorder;
 
-    // Cellules de données
+    // Cellules de données : couleur heatmap + valeur
     for (let di = 0; di < dstSubnets.length; di++) {
       const cell  = row.getCell(di + 2);
       const c     = countMap.get(`${si},${di}`);
       const count = c ? c.count : 0;
-
       if (si === di) {
         cell.fill  = { type: 'pattern', pattern: 'solid', fgColor: { argb: SNS_DIAG } };
         cell.value = null;
@@ -502,7 +519,7 @@ app.get('/api/export/matrix', async (req, res) => {
   }
 
   // Largeurs colonnes
-  ws1.getColumn(1).width = 20;
+  ws1.getColumn(1).width = 24; // plus large pour subnet + interface
   for (let di = 0; di < dstSubnets.length; di++) ws1.getColumn(di + 2).width = 9;
 
   // Légende

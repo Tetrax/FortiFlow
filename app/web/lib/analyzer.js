@@ -265,9 +265,26 @@ function buildAnalysis(flowMap) {
   // ── Policy suggestions (flux acceptés seulement) ──
   const policies = buildPolicies(allowedByIntfGroups);
 
+  // ── Subnet → interfaces map (built from allowedByIntfGroups keys "subnet|intf") ──
+  const subnetIntfMap = {};
+  for (const key of Object.keys(allowedByIntfGroups)) {
+    const pipe = key.indexOf('|');
+    if (pipe !== -1) {
+      const subnet = key.slice(0, pipe);
+      const intf   = key.slice(pipe + 1);
+      if (!subnetIntfMap[subnet]) subnetIntfMap[subnet] = new Set();
+      subnetIntfMap[subnet].add(intf);
+    }
+  }
+  for (const k of Object.keys(subnetIntfMap)) {
+    subnetIntfMap[k] = [...subnetIntfMap[k]].sort();
+  }
+
   // ── Matrices accept vs deny (private→private heatmap) ──
   const matrix     = buildMatrix(acceptSubnetGroups);
   const denyMatrix = buildMatrix(denySubnetGroups);
+  matrix.subnetIntfMap     = subnetIntfMap;
+  denyMatrix.subnetIntfMap = subnetIntfMap;
 
   return {
     stats: {
