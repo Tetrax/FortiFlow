@@ -392,51 +392,161 @@ app.get('/api/export/policies', (req, res) => {
   sendCsv(res, 'fortiflow_policies.csv', policies, COLS);
 });
 
-// GET /api/export/matrix — XLSX download de la heatmap (?action=accept|deny)
-app.get('/api/export/matrix', (req, res) => {
+// GET /api/export/matrix — XLSX heatmap colorisée (?action=accept|deny)
+app.get('/api/export/matrix', async (req, res) => {
   const s = requireSession(req, res);
   if (!s) return;
   const action  = req.query.action || 'accept';
   const matData = action === 'deny' ? s.data.denyMatrix : s.data.matrix;
   if (!matData) return res.status(404).json({ error: 'Matrice non disponible' });
 
-  let XLSX;
-  try { XLSX = require('xlsx'); } catch (e) { return res.status(500).json({ error: 'Module xlsx non disponible' }); }
+  const ExcelJS  = require('exceljs');
+  const { srcSubnets, dstSubnets, cells, maxCount } = matData;
+  const isDeny   = action === 'deny';
 
-  const { srcSubnets, dstSubnets, cells } = matData;
-
-  // Sheet 1 : pivot heatmap  (lignes = src, colonnes = dst, valeurs = sessions)
+  // ── helpers couleur (échelle log, identique au canvas) ──────────────────────
   const countMap = new Map();
-  cells.forEach(c => countMap.set(`${c.si},${c.di}`, c.count));
+  cells.forEach(c => countMap.set(`${c.si},${c.di}`, c));
 
-  const heatRows = [['Source \\ Destination', ...dstSubnets]];
-  for (let si = 0; si < srcSubnets.length; si++) {
-    const row = [srcSubnets[si]];
-    for (let di = 0; di < dstSubnets.length; di++) {
-      row.push(countMap.get(`${si},${di}`) || 0);
-    }
-    heatRows.push(row);
+  function heatArgb(count) {
+    if (!count) return 'FFFFFFFF'; // blanc = pas de trafic
+    const t = maxCount > 0 ? Math.log1p(count) / Math.log1p(maxCount) : 0;
+    let r, g, b;
+    if (isDeny) { r = 255; g = Math.round(255 - t * 200); b = Math.round(255 - t * 210); }
+    else        { r = Math.round(255 - t * 229); g = Math.round(230 - t * 114); b = Math.round(255 - t * 183); }
+    return 'FF' + [r, g, b].map(v => Math.max(0, Math.min(255, v)).toString(16).padStart(2, '0')).join('').toUpperCase();
   }
-  const ws1 = XLSX.utils.aoa_to_sheet(heatRows);
-  XLSX.utils.book_append_sheet(XLSX.utils.book_new(), ws1, 'Heatmap');
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws1, 'Heatmap');
+  function fontArgb(count) {
+    if (!count) return 'FFAAAAAA';
+    const t = maxCount > 0 ? Math.log1p(count) / Math.log1p(maxCount) : 0;
+    return t > 0.55 ? 'FF000000' : (isDeny ? 'FFCC0000' : 'FF006600');
+  }
+  const thin = { style: 'thin', color: { argb: 'FFD0D0D0' } };
+  const hdrBorder = { top: thin, bottom: thin, left: thin, right: thin };
 
-  // Sheet 2 : détails flat  (src, dst, sessions, services, ports)
-  const detailRows = [['Source', 'Destination', 'Sessions', 'Services', 'Ports']];
-  cells.forEach(c => detailRows.push([
-    c.src, c.dst, c.count,
-    (c.services || []).join(', '),
-    (c.ports    || []).join(', '),
-  ]));
-  const ws2 = XLSX.utils.aoa_to_sheet(detailRows);
-  XLSX.utils.book_append_sheet(wb, ws2, 'Détails');
+  const wb  = new ExcelJS.Workbook();
 
-  const buf   = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
-  const label = action === 'deny' ? 'deny' : 'accept';
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Sheet 1 : Heatmap
+  // ═══════════════════════════════════════════════════════════════════════════
+  const ws1 = wb.addWorksheet('Heatmap', { views: [{ state: 'frozen', xSplit: 1, ySplit: 1 }] });
+
+  // En-tête colonnes
+  const colHeader = ['From \\ To', ...dstSubnets.map(s => s.replace('.0/24', '.x'))];
+  ws1.addRow(colHeader);
+  const hRow = ws1.getRow(1);
+  hRow.height = 80;
+  hRow.eachCell((cell, col) => {
+    cell.fill   = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF263238' } };
+    cell.font   = { bold: true, color: { argb: 'FFFFFFFF' }, size: 9, name: 'Calibri' };
+    cell.border = hdrBorder;
+    cell.alignment = col === 1
+      ? { horizontal: 'center', vertical: 'middle' }
+      : { horizontal: 'center', vertical: 'bottom', textRotation: 45, wrapText: false };
+  });
+
+  // Lignes de données
+  for (let si = 0; si < srcSubnets.length; si++) {
+    const rowVals = [srcSubnets[si].replace('.0/24', '.x')];
+    for (let di = 0; di < dstSubnets.length; di++) {
+      const c = countMap.get(`${si},${di}`);
+      rowVals.push(c ? c.count : null);
+    }
+    ws1.addRow(rowVals);
+    const row = ws1.getRow(si + 2);
+    row.height = 22;
+
+    // En-tête ligne (col A)
+    const rh = row.getCell(1);
+    rh.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF37474F' } };
+    rh.font      = { bold: true, color: { argb: 'FFFFFFFF' }, size: 9, name: 'Calibri' };
+    rh.alignment = { horizontal: 'left', vertical: 'middle' };
+    rh.border    = hdrBorder;
+
+    // Cellules de données
+    for (let di = 0; di < dstSubnets.length; di++) {
+      const cell  = row.getCell(di + 2);
+      const c     = countMap.get(`${si},${di}`);
+      const count = c ? c.count : 0;
+
+      if (si === di) {
+        cell.fill  = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFB0BEC5' } };
+        cell.value = null;
+      } else {
+        cell.fill  = { type: 'pattern', pattern: 'solid', fgColor: { argb: heatArgb(count) } };
+        cell.value = count || null;
+        if (count) cell.font = { color: { argb: fontArgb(count) }, size: 8, name: 'Calibri' };
+      }
+      cell.alignment = { horizontal: 'center', vertical: 'middle' };
+      cell.border    = { top: thin, bottom: thin, left: thin, right: thin };
+    }
+  }
+
+  // Largeurs colonnes
+  ws1.getColumn(1).width = 20;
+  for (let di = 0; di < dstSubnets.length; di++) ws1.getColumn(di + 2).width = 9;
+
+  // Légende
+  const legRow = srcSubnets.length + 3;
+  const legend = isDeny
+    ? [['■ Fort trafic refusé', 'FFFF0000'], ['■ Faible trafic refusé', 'FFFFC7CE'], ['■ Aucun trafic', 'FFFFFFFF'], ['■ Diagonal (même subnet)', 'FFB0BEC5']]
+    : [['■ Fort trafic accepté', 'FF1B5E20'], ['■ Faible trafic accepté', 'FFC6EFCE'], ['■ Aucun trafic', 'FFFFFFFF'], ['■ Diagonal (même subnet)', 'FFB0BEC5']];
+  legend.forEach(([label, argb], i) => {
+    const lr = ws1.getRow(legRow + i);
+    const lc = lr.getCell(1);
+    lc.value = label;
+    lc.fill  = { type: 'pattern', pattern: 'solid', fgColor: { argb } };
+    lc.font  = { size: 9, name: 'Calibri', color: { argb: argb === 'FFFFFFFF' ? 'FF888888' : 'FF000000' } };
+    lc.border = hdrBorder;
+    lc.alignment = { vertical: 'middle' };
+    lr.height = 16;
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Sheet 2 : Détails
+  // ═══════════════════════════════════════════════════════════════════════════
+  const ws2 = wb.addWorksheet('Détails');
+  ws2.addRow(['Source', 'Destination', 'Sessions', 'Services', 'Ports']);
+  const dHdr = ws2.getRow(1);
+  dHdr.height = 20;
+  dHdr.eachCell(cell => {
+    cell.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF263238' } };
+    cell.font      = { bold: true, color: { argb: 'FFFFFFFF' }, size: 10, name: 'Calibri' };
+    cell.alignment = { horizontal: 'center', vertical: 'middle' };
+    cell.border    = hdrBorder;
+  });
+
+  const rowBg = isDeny ? 'FFFFF5F5' : 'FFF5FFF5';
+  const altBg = isDeny ? 'FFFFECEC' : 'FFECFFEC';
+  cells.forEach((c, i) => {
+    ws2.addRow([c.src, c.dst, c.count, (c.services || []).join(', '), (c.ports || []).join(', ')]);
+    const row = ws2.getRow(i + 2);
+    row.height = 16;
+    row.eachCell(cell => {
+      cell.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: i % 2 === 0 ? rowBg : altBg } };
+      cell.font      = { size: 9, name: 'Calibri' };
+      cell.alignment = { vertical: 'middle' };
+      cell.border    = { bottom: { style: 'thin', color: { argb: 'FFE0E0E0' } } };
+    });
+    ws2.getRow(i + 2).getCell(3).alignment = { horizontal: 'center', vertical: 'middle' };
+  });
+
+  ws2.getColumn(1).width = 18;
+  ws2.getColumn(2).width = 18;
+  ws2.getColumn(3).width = 12;
+  ws2.getColumn(4).width = 35;
+  ws2.getColumn(5).width = 30;
+
+  // ── Envoi ────────────────────────────────────────────────────────────────
+  const label = isDeny ? 'deny' : 'accept';
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', `attachment; filename="fortiflow_matrix_${label}.xlsx"`);
-  res.send(buf);
+  try {
+    await wb.xlsx.write(res);
+    res.end();
+  } catch (err) {
+    if (!res.headersSent) res.status(500).json({ error: err.message });
+  }
 });
 
 // DELETE /api/session/:session — free memory
