@@ -408,21 +408,40 @@ app.get('/api/export/matrix', async (req, res) => {
   const countMap = new Map();
   cells.forEach(c => countMap.set(`${c.si},${c.di}`, c));
 
+  // ── Charte SNS Security ──────────────────────────────────────────────────────
+  // Accept : blanc rosé SNS → vert clair (#4a9e72) → vert foncé (#1a5e3a)
+  // Deny   : blanc rosé SNS → rouge clair (#c95252) → rouge foncé (#7a1a1a)
+  // Headers: fond #15151e (bg1 SNS dark), texte brand rose #f0b4e4
+  const SNS_HDR    = 'FF15151E'; // bg1 dark SNS
+  const SNS_ROWHDR = 'FF1C1C28'; // bg3 dark SNS
+  const SNS_BRAND  = 'FFF0B4E4'; // rose brand SNS
+  const SNS_DIAG   = 'FF232333'; // bg4 dark SNS, cellule diagonale
+  const SNS_EMPTY  = 'FFF8F4FC'; // blanc très légèrement rosé pour les cellules vides
+  const thin = { style: 'thin', color: { argb: 'FF28283A' } };
+  const hdrBorder = { top: thin, bottom: thin, left: thin, right: thin };
+
   function heatArgb(count) {
-    if (!count) return 'FFFFFFFF'; // blanc = pas de trafic
+    if (!count) return SNS_EMPTY;
     const t = maxCount > 0 ? Math.log1p(count) / Math.log1p(maxCount) : 0;
     let r, g, b;
-    if (isDeny) { r = 255; g = Math.round(255 - t * 200); b = Math.round(255 - t * 210); }
-    else        { r = Math.round(255 - t * 229); g = Math.round(230 - t * 114); b = Math.round(255 - t * 183); }
+    if (isDeny) {
+      // blanc → rose → rouge SNS #c95252 → foncé #7a1a1a
+      r = Math.round(255 - t * 133);  // 255 → 122
+      g = Math.round(248 - t * 166);  // 248 → 82 → 26
+      b = Math.round(248 - t * 166);  // 248 → 82 → 26
+    } else {
+      // blanc → vert clair → vert SNS #4a9e72 → foncé #1a5e3a
+      r = Math.round(248 - t * 222);  // 248 → 26
+      g = Math.round(248 - t * 90);   // 248 → 158 → 94
+      b = Math.round(248 - t * 134);  // 248 → 114 → 58
+    }
     return 'FF' + [r, g, b].map(v => Math.max(0, Math.min(255, v)).toString(16).padStart(2, '0')).join('').toUpperCase();
   }
   function fontArgb(count) {
     if (!count) return 'FFAAAAAA';
     const t = maxCount > 0 ? Math.log1p(count) / Math.log1p(maxCount) : 0;
-    return t > 0.55 ? 'FF000000' : (isDeny ? 'FFCC0000' : 'FF006600');
+    return t > 0.5 ? 'FFFFFFFF' : (isDeny ? 'FF7A1A1A' : 'FF1A5E3A');
   }
-  const thin = { style: 'thin', color: { argb: 'FFD0D0D0' } };
-  const hdrBorder = { top: thin, bottom: thin, left: thin, right: thin };
 
   const wb  = new ExcelJS.Workbook();
 
@@ -437,8 +456,8 @@ app.get('/api/export/matrix', async (req, res) => {
   const hRow = ws1.getRow(1);
   hRow.height = 80;
   hRow.eachCell((cell, col) => {
-    cell.fill   = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF263238' } };
-    cell.font   = { bold: true, color: { argb: 'FFFFFFFF' }, size: 9, name: 'Calibri' };
+    cell.fill   = { type: 'pattern', pattern: 'solid', fgColor: { argb: SNS_HDR } };
+    cell.font   = { bold: true, color: { argb: col === 1 ? SNS_BRAND : 'FFFFFFFF' }, size: 9, name: 'Calibri' };
     cell.border = hdrBorder;
     cell.alignment = col === 1
       ? { horizontal: 'center', vertical: 'middle' }
@@ -458,8 +477,8 @@ app.get('/api/export/matrix', async (req, res) => {
 
     // En-tête ligne (col A)
     const rh = row.getCell(1);
-    rh.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF37474F' } };
-    rh.font      = { bold: true, color: { argb: 'FFFFFFFF' }, size: 9, name: 'Calibri' };
+    rh.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: SNS_ROWHDR } };
+    rh.font      = { bold: true, color: { argb: SNS_BRAND }, size: 9, name: 'Calibri' };
     rh.alignment = { horizontal: 'left', vertical: 'middle' };
     rh.border    = hdrBorder;
 
@@ -470,7 +489,7 @@ app.get('/api/export/matrix', async (req, res) => {
       const count = c ? c.count : 0;
 
       if (si === di) {
-        cell.fill  = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFB0BEC5' } };
+        cell.fill  = { type: 'pattern', pattern: 'solid', fgColor: { argb: SNS_DIAG } };
         cell.value = null;
       } else {
         cell.fill  = { type: 'pattern', pattern: 'solid', fgColor: { argb: heatArgb(count) } };
@@ -489,17 +508,23 @@ app.get('/api/export/matrix', async (req, res) => {
   // Légende
   const legRow = srcSubnets.length + 3;
   const legend = isDeny
-    ? [['■ Fort trafic refusé', 'FFFF0000'], ['■ Faible trafic refusé', 'FFFFC7CE'], ['■ Aucun trafic', 'FFFFFFFF'], ['■ Diagonal (même subnet)', 'FFB0BEC5']]
-    : [['■ Fort trafic accepté', 'FF1B5E20'], ['■ Faible trafic accepté', 'FFC6EFCE'], ['■ Aucun trafic', 'FFFFFFFF'], ['■ Diagonal (même subnet)', 'FFB0BEC5']];
-  legend.forEach(([label, argb], i) => {
+    ? [['■ Fort trafic refusé',   'FF7A1A1A', 'FFFFFFFF'],
+       ['■ Faible trafic refusé', 'FFC95252', 'FFFFFFFF'],
+       ['■ Aucun trafic',         SNS_EMPTY,  'FFAAAAAA'],
+       ['■ Diagonal (même subnet)', SNS_DIAG, SNS_BRAND]]
+    : [['■ Fort trafic accepté',   'FF1A5E3A', 'FFFFFFFF'],
+       ['■ Faible trafic accepté', 'FF4A9E72', 'FFFFFFFF'],
+       ['■ Aucun trafic',          SNS_EMPTY,  'FFAAAAAA'],
+       ['■ Diagonal (même subnet)', SNS_DIAG,  SNS_BRAND]];
+  legend.forEach(([label, bgArgb, txtArgb], i) => {
     const lr = ws1.getRow(legRow + i);
     const lc = lr.getCell(1);
     lc.value = label;
-    lc.fill  = { type: 'pattern', pattern: 'solid', fgColor: { argb } };
-    lc.font  = { size: 9, name: 'Calibri', color: { argb: argb === 'FFFFFFFF' ? 'FF888888' : 'FF000000' } };
-    lc.border = hdrBorder;
+    lc.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: bgArgb } };
+    lc.font      = { size: 9, name: 'Calibri', color: { argb: txtArgb } };
+    lc.border    = hdrBorder;
     lc.alignment = { vertical: 'middle' };
-    lr.height = 16;
+    lr.height    = 16;
   });
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -510,14 +535,15 @@ app.get('/api/export/matrix', async (req, res) => {
   const dHdr = ws2.getRow(1);
   dHdr.height = 20;
   dHdr.eachCell(cell => {
-    cell.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF263238' } };
-    cell.font      = { bold: true, color: { argb: 'FFFFFFFF' }, size: 10, name: 'Calibri' };
+    cell.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: SNS_HDR } };
+    cell.font      = { bold: true, color: { argb: SNS_BRAND }, size: 10, name: 'Calibri' };
     cell.alignment = { horizontal: 'center', vertical: 'middle' };
     cell.border    = hdrBorder;
   });
 
-  const rowBg = isDeny ? 'FFFFF5F5' : 'FFF5FFF5';
-  const altBg = isDeny ? 'FFFFECEC' : 'FFECFFEC';
+  // Lignes alternées : fond légèrement rosé (SNS) + teinte action
+  const rowBg = isDeny ? 'FFFFF0F5' : 'FFF0FFF5';
+  const altBg = isDeny ? 'FFFFF8FC' : 'FFF8FFFC';
   cells.forEach((c, i) => {
     ws2.addRow([c.src, c.dst, c.count, (c.services || []).join(', '), (c.ports || []).join(', ')]);
     const row = ws2.getRow(i + 2);
