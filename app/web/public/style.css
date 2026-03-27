@@ -38,6 +38,10 @@
   /* Layout */
   --radius:  4px;
   --sidebar: 256px;
+
+  --overlay-bg:    rgba(9, 9, 14, 0.72);
+  --card-bg:       rgba(15, 15, 22, 0.72);
+  --card-bg-hover: rgba(15, 15, 22, 0.85);
 }
 
 /* ── Light theme ─────────────────────────────────────────────────────────── */
@@ -59,6 +63,9 @@
   --text:    #1a1a2e;
   --text2:   #4a4a70;
   --text3:   #8a8ab0;
+  --overlay-bg:    rgba(240, 235, 255, 0.78);
+  --card-bg:       rgba(255, 255, 255, 0.88);
+  --card-bg-hover: rgba(255, 255, 255, 0.96);
 }
 
 html, body {
@@ -229,7 +236,7 @@ html, body {
   content: '';
   position: absolute;
   inset: 0;
-  background: rgba(9, 9, 14, 0.72);
+  background: var(--overlay-bg);
 }
 #upload-zone > * { position: relative; z-index: 1; }
 
@@ -242,12 +249,12 @@ html, body {
   text-align: center;
   cursor: pointer;
   transition: border-color 0.2s, background 0.2s;
-  background: rgba(15, 15, 22, 0.72);
+  background: var(--card-bg);
   backdrop-filter: blur(8px);
 }
 .drop-area:hover, .drop-area.dragover {
   border-color: var(--brand);
-  background: rgba(15, 15, 22, 0.85);
+  background: var(--card-bg-hover);
 }
 .drop-icon  { font-size: 40px; margin-bottom: 16px; opacity: 0.3; }
 .drop-title { font-size: 17px; font-weight: 600; margin-bottom: 10px; letter-spacing: -0.2px; }
