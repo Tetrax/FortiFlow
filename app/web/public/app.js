@@ -3342,8 +3342,6 @@ async function deploy() {
             <span style="margin-left:auto;display:flex;gap:6px">
               <button class="btn-sm" id="btn-export-policies-xlsx" title="Exporter les policies en Excel">📊 Export Excel</button>
               <label class="btn-sm" style="cursor:pointer" title="Importer les modifications depuis un fichier Excel">📥 Import Excel<input type="file" id="btn-import-policies-xlsx" accept=".xlsx,.xls" style="display:none"></label>
-              <button class="btn-sm" id="btn-export-session" title="Sauvegarder la session de travail">💾 Sauvegarder</button>
-              <label class="btn-sm" style="cursor:pointer" title="Charger une session sauvegardée">📂 Charger<input type="file" id="btn-import-session" accept=".json,.ffws" style="display:none"></label>
             </span>
           </div>
           <div id="deploy-cli-wrap" style="display:none;margin-top:12px">
@@ -3611,12 +3609,6 @@ async function deploy() {
   });
 
   // Export/Import session
-  el('btn-export-session')?.addEventListener('click', exportSession);
-  el('btn-import-session')?.addEventListener('change', e => {
-    const f = e.target.files[0];
-    if (f) importSession(f);
-  });
-
   // (missing objects bar is now info-only — no modal, edit via drawer)
 
   // Global /32 toggle (wired once — button persists in DOM)

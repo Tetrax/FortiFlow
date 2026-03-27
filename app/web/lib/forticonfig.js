@@ -1416,6 +1416,7 @@ function generateConfig(selectedPolicies, opts = {}) {
       dstTarget:   p.dstTarget,
       serviceDesc: p.serviceDesc, sessions: p.sessions,
       tags: p.tags || [],
+      disabled:    p._disabled || false,
     });
   }
 
