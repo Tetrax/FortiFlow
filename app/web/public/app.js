@@ -1763,7 +1763,7 @@ async function importPoliciesExcel(file) {
       const p = deployState.analyzed[patch.index];
       if (!p) continue;
       let changed = false;
-      // Nom policy
+      // Nom policy — export: p._policyName || ''
       if (patch.policyName !== null && patch.policyName !== (p._policyName || '')) { p._policyName = patch.policyName; changed = true; }
       // Addr source — on compare uniquement contre la valeur user (_srcAddrName), pas les fallbacks analysis
       if (patch.srcAddr !== null) {
@@ -1797,11 +1797,11 @@ async function importPoliciesExcel(file) {
           if (patch.dstAddr !== (p._dstAddrName || '')) { p._dstAddrName = patch.dstAddr; changed = true; }
         }
       }
-      // Interfaces, action, nat, log — skip si inchangé
+      // Interfaces, action, nat, log — skip si inchangé (utiliser le même fallback que l'export)
       if (patch.srcIntf !== null && patch.srcIntf !== (p._srcintf || '')) { p._srcintf = patch.srcIntf || undefined; changed = true; }
       if (patch.dstIntf !== null && patch.dstIntf !== (p._dstintf || '')) { p._dstintf = patch.dstIntf || undefined; changed = true; }
-      if (patch.action  !== null && patch.action  !== (p._action  || 'accept')) { p._action = patch.action; changed = true; }
-      if (patch.nat     !== null && patch.nat     !== p._nat)  { p._nat = patch.nat; changed = true; }
+      if (patch.action  !== null && patch.action  !== (p._action || p.action || 'accept')) { p._action = patch.action; changed = true; }
+      if (patch.nat     !== null && patch.nat     !== (p._nat ?? false)) { p._nat = patch.nat; changed = true; }
       if (patch.log     !== null && patch.log     !== (p._log   || 'all')) { p._log = patch.log; changed = true; }
       // Noms services : format "PORT/PROTO=Nom | label:SVC=Nom"
       if (patch.svcNames) {
