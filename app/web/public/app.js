@@ -2476,13 +2476,25 @@ function mountDrawer() {
     if (e.target.closest('.addr-prop-yes')) {
       const ap = p._propagateAddrPending;
       if (ap) {
-        const field = ap.addrType === 'src' ? '_srcAddrName' : '_dstAddrName';
         for (let i = 0; i < (deployState.analyzed || []).length; i++) {
           if (i === _drawerIdx) continue;
           const op = deployState.analyzed[i];
-          const opCidr  = ap.addrType === 'src' ? op.analysis?.srcAddr?.cidr  : op.analysis?.dstAddr?.cidr;
-          const opFound = ap.addrType === 'src' ? op.analysis?.srcAddr?.found : op.analysis?.dstAddr?.found;
-          if (opCidr === ap.cidr && !opFound) { op[field] = ap.newName; syncInlineCell(i, field, ap.newName); }
+          if (ap.isHost) {
+            // Mode /32 : propagate host name
+            const opHosts = ap.addrType === 'src' ? (op.srcHosts || []) : (op.dstHosts || []);
+            const opFound = ap.addrType === 'src' ? new Set(op._srcHostsFound || []) : new Set(op._dstHostsFound || []);
+            if (opHosts.includes(ap.hostIp) && !opFound.has(ap.hostIp)) {
+              if (ap.addrType === 'src') { if (!op._srcHostNames) op._srcHostNames = {}; op._srcHostNames[ap.hostIp] = ap.newName; }
+              else { if (!op._dstHostNames) op._dstHostNames = {}; op._dstHostNames[ap.hostIp] = ap.newName; }
+              syncHostCell(i, ap.addrType);
+            }
+          } else {
+            // Mode /24 : propagate addr object name
+            const field   = ap.addrType === 'src' ? '_srcAddrName' : '_dstAddrName';
+            const opCidr  = ap.addrType === 'src' ? op.analysis?.srcAddr?.cidr  : op.analysis?.dstAddr?.cidr;
+            const opFound = ap.addrType === 'src' ? op.analysis?.srcAddr?.found : op.analysis?.dstAddr?.found;
+            if (opCidr === ap.cidr && !opFound) { op[field] = ap.newName; syncInlineCell(i, field, ap.newName); }
+          }
         }
         delete p._propagateAddrPending;
         populateDrawer(_drawerIdx);
@@ -2590,25 +2602,53 @@ function mountDrawer() {
   drawer.addEventListener('focusout', e => {
     const p = _drawerIdx !== null ? deployState.analyzed[_drawerIdx] : null;
     if (!p) return;
+
+    // Mode /24 subnet
     let addrType = null;
     if (e.target.matches('.drawer-src-name')) addrType = 'src';
     else if (e.target.matches('.drawer-dst-name')) addrType = 'dst';
-    if (!addrType) return;
-    const newName = e.target.value.trim();
-    if (!newName) return;
-    const cidr = addrType === 'src' ? p.analysis?.srcAddr?.cidr : p.analysis?.dstAddr?.cidr;
-    if (!cidr) return;
-    let count = 0;
-    for (let i = 0; i < (deployState.analyzed || []).length; i++) {
-      if (i === _drawerIdx) continue;
-      const op = deployState.analyzed[i];
-      const opCidr  = addrType === 'src' ? op.analysis?.srcAddr?.cidr  : op.analysis?.dstAddr?.cidr;
-      const opFound = addrType === 'src' ? op.analysis?.srcAddr?.found : op.analysis?.dstAddr?.found;
-      if (opCidr === cidr && !opFound) count++;
+    if (addrType) {
+      const newName = e.target.value.trim();
+      if (!newName) return;
+      const cidr = addrType === 'src' ? p.analysis?.srcAddr?.cidr : p.analysis?.dstAddr?.cidr;
+      if (!cidr) return;
+      let count = 0;
+      for (let i = 0; i < (deployState.analyzed || []).length; i++) {
+        if (i === _drawerIdx) continue;
+        const op = deployState.analyzed[i];
+        const opCidr  = addrType === 'src' ? op.analysis?.srcAddr?.cidr  : op.analysis?.dstAddr?.cidr;
+        const opFound = addrType === 'src' ? op.analysis?.srcAddr?.found : op.analysis?.dstAddr?.found;
+        if (opCidr === cidr && !opFound) count++;
+      }
+      if (count > 0) {
+        p._propagateAddrPending = { addrType, cidr, newName, count };
+        populateDrawer(_drawerIdx);
+      }
+      return;
     }
-    if (count > 0) {
-      p._propagateAddrPending = { addrType, cidr, newName, count };
-      populateDrawer(_drawerIdx);
+
+    // Mode /32 hosts
+    if (e.target.matches('.drawer-host-input')) {
+      const hostIp  = e.target.dataset.host;
+      const hostAddrType = e.target.dataset.type; // 'src' or 'dst'
+      const newName = e.target.value.trim();
+      if (!newName || !hostIp) return;
+      const hostFoundSet = hostAddrType === 'src'
+        ? new Set(p._srcHostsFound || [])
+        : new Set(p._dstHostsFound || []);
+      if (hostFoundSet.has(hostIp)) return; // déjà en config, pas de propagation
+      let count = 0;
+      for (let i = 0; i < (deployState.analyzed || []).length; i++) {
+        if (i === _drawerIdx) continue;
+        const op = deployState.analyzed[i];
+        const opHosts  = hostAddrType === 'src' ? (op.srcHosts || []) : (op.dstHosts || []);
+        const opFound  = hostAddrType === 'src' ? new Set(op._srcHostsFound || []) : new Set(op._dstHostsFound || []);
+        if (opHosts.includes(hostIp) && !opFound.has(hostIp)) count++;
+      }
+      if (count > 0) {
+        p._propagateAddrPending = { addrType: hostAddrType, hostIp, newName, count, isHost: true };
+        populateDrawer(_drawerIdx);
+      }
     }
   });
 }
@@ -2885,8 +2925,9 @@ function populateDrawer(idx) {
 
   // Addr propagation banner
   const ap = p._propagateAddrPending;
+  const addrPropLabel = ap ? (ap.isHost ? ap.hostIp : ap.cidr) : '';
   const addrPropagateBanner = ap ? `<div class="svc-propagate-banner">
-    <span>${ap.count} autre${ap.count>1?'s':''} policy${ap.count>1?'s':''} ${ap.count>1?'ont':'a'} <code style="font-family:var(--mono)">${escHtml(ap.cidr)}</code> en ${ap.addrType === 'src' ? 'source' : 'destination'} — Appliquer <strong>${escHtml(ap.newName)}</strong> à toutes ?</span>
+    <span>${ap.count} autre${ap.count>1?'s':''} policy${ap.count>1?'s':''} ${ap.count>1?'ont':'a'} <code style="font-family:var(--mono)">${escHtml(addrPropLabel)}</code> en ${ap.addrType === 'src' ? 'source' : 'destination'} — Appliquer <strong>${escHtml(ap.newName)}</strong> à toutes ?</span>
     <button class="btn-sm btn-accent addr-prop-yes">Oui</button>
     <button class="btn-sm addr-prop-no">Non</button>
   </div>` : '';
