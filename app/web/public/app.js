@@ -313,6 +313,7 @@ async function dashboard() {
       <div style="display:flex;gap:8px;">
         <button class="export-btn primary" onclick="navigateTo('policies')">◎ Voir les policies</button>
         <button class="upload-btn" style="font-size:12px;padding:7px 14px;" onclick="el('file-input').click()">+ Nouveau fichier</button>
+        <button class="btn-sm" onclick="exportSession()" title="Sauvegarder tout le workspace (logs + conf + policies) pour reprendre plus tard">💾 Sauvegarder workspace</button>
       </div>
     </div>
 
@@ -1578,49 +1579,104 @@ const deployState = {
 const ifaceGroupCollapsed = { lan: false, wan: false, vpn: false };
 
 // ── F6: Export/Import session ──
-function exportSession() {
-  const data = {
-    version: 1, timestamp: new Date().toISOString(),
-    deployState: {
-      fortiConfig:   deployState.fortiConfig,
-      analyzed:      deployState.analyzed,
-      selected:      [...deployState.selected],
-      searchFilter:  deployState.searchFilter,
-      interfaces:    deployState.interfaces,
-      selectedSdwan: deployState.selectedSdwan,
-      generatedCli:  deployState.generatedCli,
-      addrGroups:    deployState.addrGroups,
-      warnings:      deployState.warnings,
-      viewMode:      deployState.viewMode,
-    },
-  };
-  const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `fortiflow_session_${Date.now()}.json`;
-  a.click();
-  URL.revokeObjectURL(a.href);
+async function exportSession() {
+  try {
+    const r = await fetch(`/api/export/workspace?session=${state.session}`);
+    if (!r.ok) { const e = await r.json().catch(()=>({})); alert(e.error || 'Erreur export'); return; }
+    const serverData = await r.json();
+    const payload = {
+      ...serverData,
+      deployState: {
+        fortiConfig:   deployState.fortiConfig,
+        analyzed:      deployState.analyzed,
+        selected:      [...deployState.selected],
+        searchFilter:  deployState.searchFilter,
+        interfaces:    deployState.interfaces,
+        selectedSdwan: deployState.selectedSdwan,
+        generatedCli:  deployState.generatedCli,
+        addrGroups:    deployState.addrGroups,
+        warnings:      deployState.warnings,
+        viewMode:      deployState.viewMode,
+      },
+    };
+    const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `fortiflow_${new Date().toISOString().slice(0,10)}.ffws`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } catch (err) {
+    alert('Erreur export: ' + err.message);
+  }
 }
 
 function importSession(file) {
   const reader = new FileReader();
-  reader.onload = (e) => {
+  reader.onload = async (e) => {
     try {
       const data = JSON.parse(e.target.result);
-      if (data.version !== 1 || !data.deployState) { alert('Fichier de session invalide'); return; }
-      const ds = data.deployState;
-      deployState.fortiConfig   = ds.fortiConfig;
-      deployState.analyzed      = ds.analyzed;
-      deployState.selected      = new Set(ds.selected || []);
-      deployState.searchFilter  = ds.searchFilter || '';
-      deployState.interfaces    = ds.interfaces;
-      deployState.selectedSdwan = ds.selectedSdwan;
-      deployState.generatedCli  = ds.generatedCli;
-      deployState.addrGroups    = ds.addrGroups;
-      deployState.warnings      = ds.warnings || [];
-      deployState.viewMode      = ds.viewMode || 'flat';
-      deploy();
-    } catch { alert('Erreur de lecture du fichier'); }
+
+      if (data._ffws === 2) {
+        // ── Nouveau format v2 : restore session serveur + deployState ──
+        const r = await fetch('/api/import/workspace', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: e.target.result,
+        });
+        if (!r.ok) { const err = await r.json().catch(()=>({})); alert(err.error || 'Erreur import'); return; }
+        const { sessionId } = await r.json();
+        state.session = sessionId;
+
+        // Récupérer les stats depuis la session restaurée
+        try {
+          const sr = await fetch(`/api/stats?session=${sessionId}`);
+          if (sr.ok) { const d = await sr.json(); state.stats = d.stats; state.meta = d.meta; }
+        } catch {}
+
+        // Restaurer le deployState si présent
+        if (data.deployState) {
+          const ds = data.deployState;
+          deployState.fortiConfig   = ds.fortiConfig   || null;
+          deployState.analyzed      = ds.analyzed      || null;
+          deployState.selected      = new Set(ds.selected || []);
+          deployState.searchFilter  = ds.searchFilter  || '';
+          deployState.interfaces    = ds.interfaces    || null;
+          deployState.selectedSdwan = ds.selectedSdwan || null;
+          deployState.generatedCli  = ds.generatedCli  || null;
+          deployState.addrGroups    = ds.addrGroups    || null;
+          deployState.warnings      = ds.warnings      || [];
+          deployState.viewMode      = ds.viewMode      || 'flat';
+        }
+
+        // Navigation : deploy si dispo, sinon dashboard
+        if (data.deployState?.analyzed) {
+          deployState.wizardStep = 4;
+          navigateTo('deploy');
+        } else if (data.fortiConfig) {
+          deployState.wizardStep = 3;
+          navigateTo('deploy');
+        } else {
+          navigateTo('dashboard');
+        }
+
+      } else if (data.version === 1 && data.deployState) {
+        // ── Ancien format v1 (backward compat) ──
+        const ds = data.deployState;
+        deployState.fortiConfig   = ds.fortiConfig;
+        deployState.analyzed      = ds.analyzed;
+        deployState.selected      = new Set(ds.selected || []);
+        deployState.searchFilter  = ds.searchFilter || '';
+        deployState.interfaces    = ds.interfaces;
+        deployState.selectedSdwan = ds.selectedSdwan;
+        deployState.generatedCli  = ds.generatedCli;
+        deployState.addrGroups    = ds.addrGroups;
+        deployState.warnings      = ds.warnings || [];
+        deployState.viewMode      = ds.viewMode  || 'flat';
+        deploy();
+      } else {
+        alert('Fichier de session invalide');
+      }
+    } catch (err) { alert('Erreur lecture: ' + err.message); }
   };
   reader.readAsText(file);
 }
@@ -2844,7 +2900,7 @@ async function deploy() {
             <span id="deploy-gen-info" style="font-size:11px;color:var(--text2)"></span>
             <span style="margin-left:auto;display:flex;gap:6px">
               <button class="btn-sm" id="btn-export-session" title="Sauvegarder la session de travail">💾 Sauvegarder</button>
-              <label class="btn-sm" style="cursor:pointer" title="Charger une session sauvegardée">📂 Charger<input type="file" id="btn-import-session" accept=".json" style="display:none"></label>
+              <label class="btn-sm" style="cursor:pointer" title="Charger une session sauvegardée">📂 Charger<input type="file" id="btn-import-session" accept=".json,.ffws" style="display:none"></label>
             </span>
           </div>
           <div id="deploy-cli-wrap" style="display:none;margin-top:12px">

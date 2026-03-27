@@ -592,6 +592,33 @@ app.get('/api/export/matrix', async (req, res) => {
   }
 });
 
+// GET /api/export/workspace — exporte s.data + s.fortiConfig en JSON (.ffws)
+app.get('/api/export/workspace', (req, res) => {
+  const s = requireSession(req, res);
+  if (!s) return;
+  if (!s.data || s.status !== 'ready') return res.status(409).json({ error: 'Session non prête' });
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Content-Disposition', `attachment; filename="fortiflow_workspace_${Date.now()}.ffws"`);
+  res.json({
+    _ffws:       2,
+    exportedAt:  new Date().toISOString(),
+    data:        s.data,
+    fortiConfig: s.fortiConfig || null,
+  });
+});
+
+// POST /api/import/workspace — recrée une session depuis un .ffws
+app.post('/api/import/workspace', express.json({ limit: '200mb' }), (req, res) => {
+  const body = req.body;
+  if (!body || body._ffws !== 2 || !body.data) {
+    return res.status(400).json({ error: 'Fichier workspace invalide ou version incompatible' });
+  }
+  const id = createSession();
+  setSessionData(id, body.data);
+  if (body.fortiConfig) setFortiConfig(id, body.fortiConfig);
+  res.json({ sessionId: id });
+});
+
 // DELETE /api/session/:session — free memory
 app.delete('/api/session/:session', (req, res) => {
   deleteSession(req.params.session);
