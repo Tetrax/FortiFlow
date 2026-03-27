@@ -2751,6 +2751,18 @@ function populateDrawer(idx) {
   const inputVal = (stored, auto) => (stored && stored !== auto) ? stored : '';
 
   // Source section — depends on multi-src or single
+  // Addr propagation banner helper — doit être défini AVANT srcSection/dstSection
+  const ap = p._propagateAddrPending;
+  const _addrBanner = (forType) => {
+    if (!ap || ap.addrType !== forType) return '';
+    const label = ap.isHost ? ap.hostIp : ap.cidr;
+    return `<div class="svc-propagate-banner">
+      <span>${ap.count} autre${ap.count>1?'s':''} policy${ap.count>1?'s':''} ${ap.count>1?'ont':'a'} <code style="font-family:var(--mono)">${escHtml(label)}</code> en ${forType === 'src' ? 'source' : 'destination'} — Appliquer <strong>${escHtml(ap.newName)}</strong> à toutes ?</span>
+      <button class="btn-sm btn-accent addr-prop-yes">Oui</button>
+      <button class="btn-sm addr-prop-no">Non</button>
+    </div>`;
+  };
+
   let srcSection = '';
   if (p._multiSrcSubnets?.length) {
     // ── Multi-src : several source subnets ──
@@ -2927,17 +2939,6 @@ function populateDrawer(idx) {
     </div>`;
   }
 
-  // Addr propagation banner
-  const ap = p._propagateAddrPending;
-  const _addrBanner = (forType) => {
-    if (!ap || ap.addrType !== forType) return '';
-    const label = ap.isHost ? ap.hostIp : ap.cidr;
-    return `<div class="svc-propagate-banner">
-      <span>${ap.count} autre${ap.count>1?'s':''} policy${ap.count>1?'s':''} ${ap.count>1?'ont':'a'} <code style="font-family:var(--mono)">${escHtml(label)}</code> en ${forType === 'src' ? 'source' : 'destination'} — Appliquer <strong>${escHtml(ap.newName)}</strong> à toutes ?</span>
-      <button class="btn-sm btn-accent addr-prop-yes">Oui</button>
-      <button class="btn-sm addr-prop-no">Non</button>
-    </div>`;
-  };
 
   // Services
   const svcList = a.services || [];
