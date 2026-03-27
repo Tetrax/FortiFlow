@@ -1518,6 +1518,7 @@ function generateConfig(selectedPolicies, opts = {}) {
       L.push(`        set service ${svcStr}`);
       L.push(`        set action ${pol.action || actionVerb}`);
       L.push(`        set schedule "always"`);
+      if (pol.disabled) L.push(`        set status disable`);
       if (pol.nat) L.push(`        set nat enable`);
       L.push(`        set logtraffic ${pol.log || logTraffic}`);
       // Security profiles (UTM) — per-policy overrides global

@@ -4664,6 +4664,24 @@ function wireDeployTable() {
     renderDeployPolicies(filterDeployPolicies(), false);
   });
 
+  // ── click: .btn-toggle-policy (enable/disable) ──
+  container.addEventListener('click', e => {
+    const btn = e.target.closest('.btn-toggle-policy');
+    if (!btn) return;
+    e.stopPropagation();
+    const idx = +btn.dataset.idx;
+    const p = deployState.analyzed[idx];
+    if (!p) return;
+    p._disabled = !p._disabled;
+    const badge = btn.querySelector('.policy-status-badge');
+    if (badge) {
+      badge.textContent = p._disabled ? 'DIS' : 'ENA';
+      badge.className = `policy-status-badge ${p._disabled ? 'badge-disabled' : 'badge-enabled'}`;
+    }
+    btn.title = p._disabled ? 'Policy désactivée — cliquer pour activer' : 'Policy activée — cliquer pour désactiver';
+    btn.closest('.deploy-policy-row')?.classList.toggle('policy-disabled-row', !!p._disabled);
+  });
+
   // ── change: .deploy-nat-chk ──
   container.addEventListener('change', e => {
     if (!e.target.matches('.deploy-nat-chk')) return;
@@ -5166,10 +5184,11 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     const rowStatus = isPolicyComplete(p) ? 'ok' : (p.analysis?.status || 'warn');
     const statusTitle = (p.analysis?.missingFields || []).join(', ') || '';
     return `
-      <tr class="deploy-policy-row ${isAgg ? 'seq-row' : ''} ${p._action === 'deny' ? 'policy-deny-row' : ''}" data-idx="${idx}" ${isAgg ? `data-seq-members="${p._sequenceMembers.join(',')}"` : ''}>
+      <tr class="deploy-policy-row ${isAgg ? 'seq-row' : ''} ${p._action === 'deny' ? 'policy-deny-row' : ''} ${p._disabled ? 'policy-disabled-row' : ''}" data-idx="${idx}" ${isAgg ? `data-seq-members="${p._sequenceMembers.join(',')}"` : ''}>
         <td><button class="btn-del-item deploy-del-policy" data-idx="${idx}" ${isAgg ? `data-seq-members="${p._sequenceMembers.join(',')}"` : ''} title="Supprimer cette policy">✕</button></td>
         <td><input type="checkbox" ${chkAttr}></td>
         <td class="status-cell" title="${escHtml(statusTitle)}"><div class="status-bar status-${rowStatus}"></div></td>
+        <td><button class="btn-toggle-policy" data-idx="${idx}" title="${p._disabled ? 'Policy désactivée — cliquer pour activer' : 'Policy activée — cliquer pour désactiver'}"><span class="policy-status-badge ${p._disabled ? 'badge-disabled' : 'badge-enabled'}">${p._disabled ? 'DIS' : 'ENA'}</span></button></td>
         <td class="impact-cell"><div class="impact-bar" style="width:${barW}%"></div><span class="impact-val">${fmtNum(p.sessions || 0)}</span></td>
         <td>${actionBadge}${dirBadge}</td>
         <td>${warnBadge}${seqBadge}${srcSubnetText}${srcModeBadge}</td>
@@ -5235,6 +5254,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
           <th></th>
           <th><input type="checkbox" id="chk-all-deploy"></th>
           <th></th>
+          <th title="Activer / désactiver la policy dans le CLI généré"></th>
           ${thSort('Sessions', 'sessions')}
           ${thSort('Dir.', 'dir')}
           ${thSort('Source', 'source')}${thSort('Src addr', 'srcAddr')}${allSrcAutoFlag ? '' : thSort('Src intf', 'srcIntf')}
@@ -5338,6 +5358,7 @@ async function generateDeployConf() {
       securityProfiles: p._secProfiles || null,
       action:       p._action || null,
       log:          p._log    || null,
+      disabled:     p._disabled || false,
     }));
   } else {
     selectedPolicies = deployState.analyzed
@@ -5356,6 +5377,7 @@ async function generateDeployConf() {
         srcHosts:     (p.srcHosts || []).filter(h => !p._excludedSrcHosts?.has(h)),
         dstHosts:     (p.dstHosts || []).filter(h => !p._excludedDstHosts?.has(h)),
         tags:         p._tags || [],
+        disabled:     p._disabled || false,
       }));
   }
 
