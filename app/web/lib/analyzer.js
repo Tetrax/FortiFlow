@@ -265,15 +265,22 @@ function buildAnalysis(flowMap) {
   // ── Policy suggestions (flux acceptés seulement) ──
   const policies = buildPolicies(allowedByIntfGroups);
 
-  // ── Subnet → interfaces map (built from allowedByIntfGroups keys "subnet|intf") ──
+  // ── Subnet → interfaces map (src + dst, tous les flows) ───────────────────
   const subnetIntfMap = {};
-  for (const key of Object.keys(allowedByIntfGroups)) {
-    const pipe = key.indexOf('|');
-    if (pipe !== -1) {
-      const subnet = key.slice(0, pipe);
-      const intf   = key.slice(pipe + 1);
-      if (!subnetIntfMap[subnet]) subnetIntfMap[subnet] = new Set();
-      subnetIntfMap[subnet].add(intf);
+  for (const f of flows) {
+    if (f.srcintf && isPrivate(f.srcip)) {
+      const sub = getSubnet24(f.srcip);
+      if (sub) {
+        if (!subnetIntfMap[sub]) subnetIntfMap[sub] = new Set();
+        subnetIntfMap[sub].add(f.srcintf);
+      }
+    }
+    if (f.dstintf && isPrivate(f.dstip)) {
+      const sub = getSubnet24(f.dstip);
+      if (sub) {
+        if (!subnetIntfMap[sub]) subnetIntfMap[sub] = new Set();
+        subnetIntfMap[sub].add(f.dstintf);
+      }
     }
   }
   for (const k of Object.keys(subnetIntfMap)) {

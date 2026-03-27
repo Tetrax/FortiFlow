@@ -451,7 +451,7 @@ app.get('/api/export/matrix', async (req, res) => {
   const ws1 = wb.addWorksheet('Heatmap', { views: [{ state: 'frozen', xSplit: 1, ySplit: 1 }] });
 
   // ── helpers label subnet + interface ──────────────────────────────────────
-  const SNS_INTF = 'FF7870A0'; // couleur muted SNS pour le nom d'interface
+  const SNS_INTF = 'FFBBAADD'; // violet clair lisible sur fond sombre SNS
   function subnetShort(s) { return s.replace('.0/24', '.x').replace('/24',''); }
   function intfNames(subnet)  { return (subnetIntfMap[subnet] || []).join(' / '); }
   function richLabel(subnet, boldColor) {
@@ -460,7 +460,7 @@ app.get('/api/export/matrix', async (req, res) => {
     if (!intf) return { richText: [{ text: name, font: { bold: true, color: { argb: boldColor }, size: 9, name: 'Calibri' } }] };
     return { richText: [
       { text: name + '\n', font: { bold: true,  color: { argb: boldColor }, size: 9, name: 'Calibri' } },
-      { text: intf,        font: { bold: false, color: { argb: SNS_INTF },  size: 7, name: 'Calibri', italic: true } },
+      { text: intf,        font: { bold: false, color: { argb: SNS_INTF },  size: 8, name: 'Calibri' } },
     ]};
   }
 
