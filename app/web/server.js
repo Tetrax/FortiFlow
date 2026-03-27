@@ -597,12 +597,26 @@ app.get('/api/export/workspace', (req, res) => {
   const s = requireSession(req, res);
   if (!s) return;
   if (!s.data || s.status !== 'ready') return res.status(409).json({ error: 'Session non prête' });
+
+  // Si les flows ont été libérés en mémoire (après chargement conf FortiGate),
+  // on les récupère depuis le cache disque qui a été écrit avant le free.
+  let exportData = s.data;
+  if (!exportData.flows) {
+    try {
+      const cachePath = require('path').join(__dirname, 'sessions-cache', `${s.id}.json`);
+      const cached    = JSON.parse(require('fs').readFileSync(cachePath, 'utf8'));
+      if (cached?.data?.flows) {
+        exportData = { ...s.data, flows: cached.data.flows };
+      }
+    } catch { /* cache absent ou illisible, on exporte sans les flows */ }
+  }
+
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Content-Disposition', `attachment; filename="fortiflow_workspace_${Date.now()}.ffws"`);
   res.json({
     _ffws:       2,
     exportedAt:  new Date().toISOString(),
-    data:        s.data,
+    data:        exportData,
     fortiConfig: s.fortiConfig || null,
   });
 });

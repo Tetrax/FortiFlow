@@ -1608,16 +1608,17 @@ async function exportSession() {
     const payload = {
       ...serverData,
       deployState: {
-        fortiConfig:   deployState.fortiConfig,
-        analyzed:      deployState.analyzed,
-        selected:      [...deployState.selected],
-        searchFilter:  deployState.searchFilter,
-        interfaces:    deployState.interfaces,
-        selectedSdwan: deployState.selectedSdwan,
-        generatedCli:  deployState.generatedCli,
-        addrGroups:    deployState.addrGroups,
-        warnings:      deployState.warnings,
-        viewMode:      deployState.viewMode,
+        fortiConfig:          deployState.fortiConfig,
+        analyzed:             deployState.analyzed,
+        baseAnalyzedPolicies: deployState.baseAnalyzedPolicies,
+        selected:             [...deployState.selected],
+        searchFilter:         deployState.searchFilter,
+        interfaces:           deployState.interfaces,
+        selectedSdwan:        deployState.selectedSdwan,
+        generatedCli:         deployState.generatedCli,
+        addrGroups:           deployState.addrGroups,
+        warnings:             deployState.warnings,
+        viewMode:             deployState.viewMode,
       },
     };
     // Compression gzip via l'API native (zéro dépendance)
@@ -1674,16 +1675,17 @@ function importSession(file) {
         // Restaurer le deployState si présent
         if (data.deployState) {
           const ds = data.deployState;
-          deployState.fortiConfig   = ds.fortiConfig   || null;
-          deployState.analyzed      = ds.analyzed      || null;
-          deployState.selected      = new Set(ds.selected || []);
-          deployState.searchFilter  = ds.searchFilter  || '';
-          deployState.interfaces    = ds.interfaces    || null;
-          deployState.selectedSdwan = ds.selectedSdwan || null;
-          deployState.generatedCli  = ds.generatedCli  || null;
-          deployState.addrGroups    = ds.addrGroups    || null;
-          deployState.warnings      = ds.warnings      || [];
-          deployState.viewMode      = ds.viewMode      || 'flat';
+          deployState.fortiConfig          = ds.fortiConfig          || null;
+          deployState.analyzed             = ds.analyzed             || null;
+          deployState.baseAnalyzedPolicies = ds.baseAnalyzedPolicies || ds.analyzed || null;
+          deployState.selected             = new Set(ds.selected || []);
+          deployState.searchFilter         = ds.searchFilter  || '';
+          deployState.interfaces           = ds.interfaces    || null;
+          deployState.selectedSdwan        = ds.selectedSdwan || null;
+          deployState.generatedCli         = ds.generatedCli  || null;
+          deployState.addrGroups           = ds.addrGroups    || null;
+          deployState.warnings             = ds.warnings      || [];
+          deployState.viewMode             = ds.viewMode      || 'flat';
         }
 
         // Navigation : deploy si dispo, sinon dashboard
@@ -4199,6 +4201,11 @@ function mergeByService(policies) {
 function applyMerge(mode) {
   if (!deployState.analyzed) return;
   if (mode === 'reset') {
+    // Source de vérité pour le reset : _analyzedOriginal (avant dernière fusion)
+    // ou baseAnalyzedPolicies (snapshot de l'analyse initiale, survit aux workspaces)
+    const resetSource = deployState._analyzedOriginal || deployState.baseAnalyzedPolicies;
+    if (!resetSource) return; // rien à réinitialiser
+
     // Preserve manual edits (addr names, intfs, NAT) through the reset
     const edits = new Map();
     for (const p of deployState.analyzed) {
@@ -4217,12 +4224,10 @@ function applyMerge(mode) {
         _useDstGroup: p._useDstGroup,
       });
     }
-    deployState.analyzed = deployState._analyzedOriginal
-      ? deployState._analyzedOriginal.map(p => {
-          const edit = edits.get(`${p.srcSubnet}|${p.dstTarget}`);
-          return edit ? { ...p, ...edit } : { ...p };
-        })
-      : deployState.analyzed;
+    deployState.analyzed = resetSource.map(p => {
+      const edit = edits.get(`${p.srcSubnet}|${p.dstTarget}`);
+      return edit ? { ...p, ...edit } : { ...p };
+    });
     deployState._analyzedOriginal = null;
   } else {
     // Save original on first merge
