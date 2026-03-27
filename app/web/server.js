@@ -769,9 +769,10 @@ app.post('/api/export/policies-xlsx', express.json({ limit: '50mb' }), async (re
       { header: 'Addr Dest',    key: 'dstAddr',  width: 20, editable: true  },
       { header: 'Intf Source',  key: 'srcIntf',  width: 14, editable: true  },
       { header: 'Intf Dest',    key: 'dstIntf',  width: 14, editable: true  },
-      { header: 'Action',       key: 'action',   width: 10, editable: true  },
-      { header: 'NAT',          key: 'nat',      width: 8,  editable: true  },
-      { header: 'Log',          key: 'log',      width: 10, editable: true  },
+      { header: 'Action',        key: 'action',   width: 10, editable: true  },
+      { header: 'NAT',           key: 'nat',      width: 8,  editable: true  },
+      { header: 'Log',           key: 'log',      width: 10, editable: true  },
+      { header: 'Noms Services', key: 'svcNames', width: 36, editable: true  },
     ];
 
     ws.columns = cols.map(c => ({ header: c.header, key: c.key, width: c.width }));
@@ -816,6 +817,15 @@ app.post('/api/export/policies-xlsx', express.json({ limit: '50mb' }), async (re
         ? p.dstHosts.map(h => (p._dstHostNames?.[h]) || h).join(', ')
         : (p._dstAddrName || p.analysis?.dstAddr?.name || '');
 
+      // Noms services éditables (seulement ceux non trouvés en config) : format PORT/PROTO=Nom
+      const svcNamesVal = (p.analysis?.services || [])
+        .filter(s => !s.found)
+        .map(s => {
+          const key = s.isNamed ? s.label : `${s.port}/${s.proto}`;
+          const name = s.suggestedName || '';
+          return `${key}=${name}`;
+        }).join(' | ');
+
       const rowData = [
         idx,
         srcDisplay,
@@ -831,6 +841,7 @@ app.post('/api/export/policies-xlsx', express.json({ limit: '50mb' }), async (re
         p._action || p.action || 'accept',
         p._nat ? 'OUI' : 'NON',
         p._log || 'all',
+        svcNamesVal,
       ];
       const dataRow = ws.getRow(idx + 3);
       rowData.forEach((val, i) => {
@@ -903,6 +914,7 @@ app.post('/api/import/policies-xlsx', upload.single('policies'), async (req, res
         action,
         nat,
         log:        getVal(14),
+        svcNames:   getVal(15),
       });
     });
 

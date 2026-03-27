@@ -1762,33 +1762,65 @@ async function importPoliciesExcel(file) {
     for (const patch of patches) {
       const p = deployState.analyzed[patch.index];
       if (!p) continue;
-      if (patch.policyName !== null) p._policyName = patch.policyName;
+      let changed = false;
+      // Nom policy
+      if (patch.policyName !== null && patch.policyName !== (p._policyName || '')) { p._policyName = patch.policyName; changed = true; }
+      // Addr source
       if (patch.srcAddr !== null) {
         const isSrcHosts = (p._srcMode === 'hosts' || p._use32Src) && p.srcHosts?.length;
         if (isSrcHosts) {
           const names = patch.srcAddr.split(',').map(s => s.trim());
-          if (!p._srcHostNames) p._srcHostNames = {};
-          p.srcHosts.forEach((h, i) => { const n = names[i] || names[0]; if (n) p._srcHostNames[h] = n; });
+          p.srcHosts.forEach((h, i) => {
+            const n = names[i] || names[0];
+            if (n && n !== h && n !== (p._srcHostNames?.[h] || '')) { // skip si IP as-is ou inchangé
+              if (!p._srcHostNames) p._srcHostNames = {};
+              p._srcHostNames[h] = n; changed = true;
+            }
+          });
         } else {
-          p._srcAddrName = patch.srcAddr;
+          const current = p._srcAddrName || p.analysis?.srcAddr?.name || '';
+          if (patch.srcAddr !== current) { p._srcAddrName = patch.srcAddr; changed = true; }
         }
       }
+      // Addr dest
       if (patch.dstAddr !== null) {
         const isDstHosts = (p._dstMode === 'hosts' || p._use32Dst) && p.dstHosts?.length;
         if (isDstHosts) {
           const names = patch.dstAddr.split(',').map(s => s.trim());
-          if (!p._dstHostNames) p._dstHostNames = {};
-          p.dstHosts.forEach((h, i) => { const n = names[i] || names[0]; if (n) p._dstHostNames[h] = n; });
+          p.dstHosts.forEach((h, i) => {
+            const n = names[i] || names[0];
+            if (n && n !== h && n !== (p._dstHostNames?.[h] || '')) {
+              if (!p._dstHostNames) p._dstHostNames = {};
+              p._dstHostNames[h] = n; changed = true;
+            }
+          });
         } else {
-          p._dstAddrName = patch.dstAddr;
+          const current = p._dstAddrName || p.analysis?.dstAddr?.name || '';
+          if (patch.dstAddr !== current) { p._dstAddrName = patch.dstAddr; changed = true; }
         }
       }
-      if (patch.srcIntf !== null) p._srcintf = patch.srcIntf  || undefined;
-      if (patch.dstIntf !== null) p._dstintf = patch.dstIntf  || undefined;
-      if (patch.action  !== null) p._action  = patch.action;
-      if (patch.nat     !== null) p._nat     = patch.nat;
-      if (patch.log     !== null) p._log     = patch.log;
-      applied++;
+      // Interfaces, action, nat, log — skip si inchangé
+      if (patch.srcIntf !== null && patch.srcIntf !== (p._srcintf || '')) { p._srcintf = patch.srcIntf || undefined; changed = true; }
+      if (patch.dstIntf !== null && patch.dstIntf !== (p._dstintf || '')) { p._dstintf = patch.dstIntf || undefined; changed = true; }
+      if (patch.action  !== null && patch.action  !== (p._action  || 'accept')) { p._action = patch.action; changed = true; }
+      if (patch.nat     !== null && patch.nat     !== p._nat)  { p._nat = patch.nat; changed = true; }
+      if (patch.log     !== null && patch.log     !== (p._log   || 'all')) { p._log = patch.log; changed = true; }
+      // Noms services : format "PORT/PROTO=Nom | PORT/PROTO=Nom"
+      if (patch.svcNames) {
+        for (const entry of patch.svcNames.split('|')) {
+          const eq = entry.indexOf('=');
+          if (eq < 0) continue;
+          const key  = entry.slice(0, eq).trim();
+          const name = entry.slice(eq + 1).trim();
+          if (!name) continue;
+          const svc = (p.analysis?.services || []).find(s => {
+            const k = s.isNamed ? s.label : `${s.port}/${s.proto}`;
+            return k === key;
+          });
+          if (svc && !svc.found && name !== (svc.suggestedName || '')) { svc.suggestedName = name; changed = true; }
+        }
+      }
+      if (changed) applied++;
     }
 
     renderDeployPolicies(filterDeployPolicies());
