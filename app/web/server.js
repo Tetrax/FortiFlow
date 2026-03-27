@@ -813,12 +813,13 @@ app.post('/api/export/policies-xlsx', express.json({ limit: '50mb' }), async (re
       const dstDisplay = isDstHosts
         ? p.dstHosts.join(', ')
         : (p.dstTarget || '');
-      // N'exporter que les valeurs explicitement saisies par l'utilisateur (pas de fallback analysis)
+      // N'exporter que les valeurs explicitement saisies par l'utilisateur
+      // Format /32 : "IP=Nom" pour les hôtes nommés uniquement (évite les ,,,, pour hôtes sans nom)
       const srcAddrVal = isSrcHosts
-        ? p.srcHosts.map(h => (p._srcHostNames?.[h]) || '').join(', ')
+        ? p.srcHosts.filter(h => p._srcHostNames?.[h]).map(h => `${h}=${p._srcHostNames[h]}`).join(', ')
         : (p._srcAddrName || '');
       const dstAddrVal = isDstHosts
-        ? p.dstHosts.map(h => (p._dstHostNames?.[h]) || '').join(', ')
+        ? p.dstHosts.filter(h => p._dstHostNames?.[h]).map(h => `${h}=${p._dstHostNames[h]}`).join(', ')
         : (p._dstAddrName || '');
 
       // Noms services éditables (seulement ceux non trouvés avec un nom custom) : format PORT/PROTO=Nom ou label:SVC=Nom

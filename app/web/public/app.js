@@ -1765,18 +1765,20 @@ async function importPoliciesExcel(file) {
       let changed = false;
       // Nom policy — export: p._policyName || ''
       if (patch.policyName !== null && patch.policyName !== (p._policyName || '')) { p._policyName = patch.policyName; changed = true; }
-      // Addr source — on compare uniquement contre la valeur user (_srcAddrName), pas les fallbacks analysis
+      // Addr source — format /32 : "IP=Nom, IP=Nom" ; format /24 : nom simple
       if (patch.srcAddr !== null) {
         const isSrcHosts = (p._srcMode === 'hosts' || p._use32Src) && p.srcHosts?.length;
         if (isSrcHosts) {
-          const names = patch.srcAddr.split(',').map(s => s.trim());
-          p.srcHosts.forEach((h, i) => {
-            const n = names[i] || names[0];
-            if (n && n !== (p._srcHostNames?.[h] || '')) {
+          for (const entry of patch.srcAddr.split(',')) {
+            const eq = entry.indexOf('=');
+            if (eq < 0) continue;
+            const ip = entry.slice(0, eq).trim();
+            const n  = entry.slice(eq + 1).trim();
+            if (ip && n && n !== (p._srcHostNames?.[ip] || '')) {
               if (!p._srcHostNames) p._srcHostNames = {};
-              p._srcHostNames[h] = n; changed = true;
+              p._srcHostNames[ip] = n; changed = true;
             }
-          });
+          }
         } else {
           if (patch.srcAddr !== (p._srcAddrName || '')) { p._srcAddrName = patch.srcAddr; changed = true; }
         }
@@ -1785,14 +1787,16 @@ async function importPoliciesExcel(file) {
       if (patch.dstAddr !== null) {
         const isDstHosts = (p._dstMode === 'hosts' || p._use32Dst) && p.dstHosts?.length;
         if (isDstHosts) {
-          const names = patch.dstAddr.split(',').map(s => s.trim());
-          p.dstHosts.forEach((h, i) => {
-            const n = names[i] || names[0];
-            if (n && n !== (p._dstHostNames?.[h] || '')) {
+          for (const entry of patch.dstAddr.split(',')) {
+            const eq = entry.indexOf('=');
+            if (eq < 0) continue;
+            const ip = entry.slice(0, eq).trim();
+            const n  = entry.slice(eq + 1).trim();
+            if (ip && n && n !== (p._dstHostNames?.[ip] || '')) {
               if (!p._dstHostNames) p._dstHostNames = {};
-              p._dstHostNames[h] = n; changed = true;
+              p._dstHostNames[ip] = n; changed = true;
             }
-          });
+          }
         } else {
           if (patch.dstAddr !== (p._dstAddrName || '')) { p._dstAddrName = patch.dstAddr; changed = true; }
         }
