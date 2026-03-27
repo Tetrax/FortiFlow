@@ -1302,7 +1302,7 @@ function generateConfig(selectedPolicies, opts = {}) {
     } else if (p._isMultiDst && p._multiDstSubnets?.length > 0) {
       const dstNames = [];
       for (const s of p._multiDstSubnets) {
-        if (s.useSubnet) {
+        if (s.useSubnet !== false) {
           // /24 mode: use subnet address
           if (s.addrFound) {
             dstNames.push(s.addrName);

@@ -1180,8 +1180,20 @@ app.post('/api/deploy/generate', (req, res) => {
     }
 
     // Inject frontend-merged services (multi-port / range) into each policy's analysis
+    // Also re-inject user-set suggestedName for standard services (lost during re-analysis)
     for (let i = 0; i < analyzed.length; i++) {
-      const merged = selectedPolicies[i]?._mergedServices;
+      const src = selectedPolicies[i] || {};
+
+      // Re-inject suggestedName from frontend analysis (user renamed via modal or Excel)
+      const srcServices = src.analysis?.services || [];
+      for (const reAnalyzed of analyzed[i].analysis.services) {
+        const orig = srcServices.find(s => s.label === reAnalyzed.label);
+        if (orig?.suggestedName && !reAnalyzed.found) {
+          reAnalyzed.suggestedName = orig.suggestedName;
+        }
+      }
+
+      const merged = src._mergedServices;
       if (Array.isArray(merged) && merged.length > 0) {
         for (const ms of merged) {
           analyzed[i].analysis.services.push({
