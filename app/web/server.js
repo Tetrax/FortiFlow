@@ -815,11 +815,13 @@ app.post('/api/export/policies-xlsx', express.json({ limit: '50mb' }), async (re
         : (p.dstTarget || '');
       // N'exporter que les valeurs explicitement saisies par l'utilisateur
       // Format /32 : "IP=Nom" pour les hôtes nommés uniquement (évite les ,,,, pour hôtes sans nom)
+      // Sanitize : strip "IP=Nom" si le nom a été stocké corrompu par un ancien import positionnel
+      const cleanHost = (h, name) => { if (!name) return ''; const pfx = h + '='; return name.startsWith(pfx) ? name.slice(pfx.length) : name; };
       const srcAddrVal = isSrcHosts
-        ? p.srcHosts.filter(h => p._srcHostNames?.[h]).map(h => `${h}=${p._srcHostNames[h]}`).join(', ')
+        ? p.srcHosts.map(h => { const n = cleanHost(h, p._srcHostNames?.[h]); return n ? `${h}=${n}` : null; }).filter(Boolean).join(', ')
         : (p._srcAddrName || '');
       const dstAddrVal = isDstHosts
-        ? p.dstHosts.filter(h => p._dstHostNames?.[h]).map(h => `${h}=${p._dstHostNames[h]}`).join(', ')
+        ? p.dstHosts.map(h => { const n = cleanHost(h, p._dstHostNames?.[h]); return n ? `${h}=${n}` : null; }).filter(Boolean).join(', ')
         : (p._dstAddrName || '');
 
       // Noms services éditables (seulement ceux non trouvés avec un nom custom) : format PORT/PROTO=Nom ou label:SVC=Nom

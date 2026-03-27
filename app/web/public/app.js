@@ -2729,6 +2729,13 @@ function syncInlineCell(idx, field, value) {
   syncRowStatus(idx);
 }
 
+// Nettoie un nom d'hôte stocké avec l'ancien format "IP=Nom" (corruption de l'import positionnel)
+function cleanHostName(h, name) {
+  if (!name) return name;
+  const prefix = h + '=';
+  return name.startsWith(prefix) ? name.slice(prefix.length) : name;
+}
+
 function syncHostCell(idx, type) {
   const p = deployState.analyzed[idx];
   if (!p) return;
@@ -2737,8 +2744,8 @@ function syncHostCell(idx, type) {
   if (!cell) return;
   if (type === 'src') {
     const hFoundSet = new Set(p._srcHostsFound || []);
-    const hNames = (p.srcHosts || []).map(h => (p._srcHostNames?.[h]) || (hFoundSet.has(h) ? h : h));
-    const allNamed = (p.srcHosts || []).every(h => hFoundSet.has(h) || !!(p._srcHostNames?.[h]));
+    const hNames = (p.srcHosts || []).map(h => cleanHostName(h, p._srcHostNames?.[h]) || (hFoundSet.has(h) ? h : h));
+    const allNamed = (p.srcHosts || []).every(h => hFoundSet.has(h) || !!(cleanHostName(h, p._srcHostNames?.[h])));
     const hDisplay = hNames.join(', ');
     cell.title = hDisplay;
     cell.innerHTML = escHtml(hDisplay) + (allNamed ? '' : ' ' + badgeHtml('auto'));
@@ -2746,8 +2753,8 @@ function syncHostCell(idx, type) {
   } else {
     const dhFoundSet = new Set(p._dstHostsFound || []);
     const _autoHostName = h => `FF_HOST_${h.replace(/\./g, '_')}`;
-    const _hostNameOk = (h, nm) => { const n = nm?.[h]; return n && n !== _autoHostName(h); };
-    const dhNames = (p.dstHosts || []).map(h => (p._dstHostNames?.[h]) || (dhFoundSet.has(h) ? h : h));
+    const _hostNameOk = (h, nm) => { const n = cleanHostName(h, nm?.[h]); return n && n !== _autoHostName(h); };
+    const dhNames = (p.dstHosts || []).map(h => cleanHostName(h, p._dstHostNames?.[h]) || (dhFoundSet.has(h) ? h : h));
     const dhAllNamed = (p.dstHosts || []).every(h => dhFoundSet.has(h) || _hostNameOk(h, p._dstHostNames));
     const dhDisplay = dhNames.join(', ');
     cell.title = dhDisplay;
@@ -5570,8 +5577,8 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     } else if ((p._srcMode === 'hosts' || p._use32Src) && p.srcHosts?.length) {
       // /32 hosts mode (single src): show host names
       const hFoundSet = new Set(p._srcHostsFound || []);
-      const hNames = p.srcHosts.map(h => (p._srcHostNames?.[h]) || (hFoundSet.has(h) ? h : h));
-      const allNamed = p.srcHosts.every(h => hFoundSet.has(h) || !!(p._srcHostNames?.[h]));
+      const hNames = p.srcHosts.map(h => cleanHostName(h, p._srcHostNames?.[h]) || (hFoundSet.has(h) ? h : h));
+      const allNamed = p.srcHosts.every(h => hFoundSet.has(h) || !!(cleanHostName(h, p._srcHostNames?.[h])));
       const hDisplay = hNames.join(', ');
       srcAddrCell = allNamed
         ? `<span class="inline-editable found" data-idx="${idx}" data-field="_srcAddrName" title="${escHtml(hDisplay)}">${escHtml(hDisplay)}</span>`
@@ -5586,8 +5593,8 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     if (_dstModeResolved === 'hosts' && (p.dstHosts || []).length > 0) {
       const dhFoundSet = new Set(p._dstHostsFound || []);
       const _autoHostName = h => `FF_HOST_${h.replace(/\./g, '_')}`;
-      const _hostNameOk = (h, nm) => { const n = nm?.[h]; return n && n !== _autoHostName(h); };
-      const dhNames = p.dstHosts.map(h => (p._dstHostNames?.[h]) || (dhFoundSet.has(h) ? h : h));
+      const _hostNameOk = (h, nm) => { const n = cleanHostName(h, nm?.[h]); return n && n !== _autoHostName(h); };
+      const dhNames = p.dstHosts.map(h => cleanHostName(h, p._dstHostNames?.[h]) || (dhFoundSet.has(h) ? h : h));
       const dhAllNamed = p.dstHosts.every(h => dhFoundSet.has(h) || _hostNameOk(h, p._dstHostNames));
       const dhDisplay = dhNames.join(', ');
       dstAddrCell = dhAllNamed
@@ -5604,13 +5611,13 @@ function renderDeployPolicies(analyzed, resetPage = true) {
         const dstFoundSet = new Set(p._dstHostsFound || []);
         const allDone = subs.every(s => {
           if (s.useSubnet !== false) return s.addrFound || !!s.addrName;
-          return (s.hosts || []).every(h => dstFoundSet.has(h) || !!(p._dstHostNames?.[h]));
+          return (s.hosts || []).every(h => dstFoundSet.has(h) || !!(cleanHostName(h, p._dstHostNames?.[h])));
         });
         const names = subs.map(s => {
           if (s.useSubnet !== false) return s.addrName || s.subnet;
           const dstFoundSet2 = new Set(p._dstHostsFound || []);
           return (s.hosts || []).map(h => {
-            return (p._dstHostNames?.[h]) || (dstFoundSet2.has(h) ? h : h);
+            return cleanHostName(h, p._dstHostNames?.[h]) || (dstFoundSet2.has(h) ? h : h);
           }).join(', ');
         }).join(', ');
         dstAddrCell = allDone
