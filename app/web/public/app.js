@@ -1768,13 +1768,16 @@ async function importPoliciesExcel(file) {
       // Addr source — format /32 : "IP=Nom, IP=Nom" ; format /24 : nom simple
       if (patch.srcAddr !== null) {
         const isSrcHosts = (p._srcMode === 'hosts' || p._use32Src) && p.srcHosts?.length;
-        if (isSrcHosts) {
+        // Détecte aussi le format IP=Nom même si le mode n'est pas explicitement /32
+        const looksLikeSrcHosts = /\d+\.\d+\.\d+\.\d+=/.test(patch.srcAddr);
+        if (isSrcHosts || looksLikeSrcHosts) {
           for (const entry of patch.srcAddr.split(',')) {
             const eq = entry.indexOf('=');
             if (eq < 0) continue;
             const ip = entry.slice(0, eq).trim();
             const n  = entry.slice(eq + 1).trim();
-            if (ip && n && n !== (p._srcHostNames?.[ip] || '')) {
+            // Compare avec la valeur nettoyée pour éviter les faux positifs (corruption IP=Nom)
+            if (ip && n && n !== (cleanHostName(ip, p._srcHostNames?.[ip]) || '')) {
               if (!p._srcHostNames) p._srcHostNames = {};
               p._srcHostNames[ip] = n; changed = true;
             }
@@ -1786,13 +1789,14 @@ async function importPoliciesExcel(file) {
       // Addr dest
       if (patch.dstAddr !== null) {
         const isDstHosts = (p._dstMode === 'hosts' || p._use32Dst) && p.dstHosts?.length;
-        if (isDstHosts) {
+        const looksLikeDstHosts = /\d+\.\d+\.\d+\.\d+=/.test(patch.dstAddr);
+        if (isDstHosts || looksLikeDstHosts) {
           for (const entry of patch.dstAddr.split(',')) {
             const eq = entry.indexOf('=');
             if (eq < 0) continue;
             const ip = entry.slice(0, eq).trim();
             const n  = entry.slice(eq + 1).trim();
-            if (ip && n && n !== (p._dstHostNames?.[ip] || '')) {
+            if (ip && n && n !== (cleanHostName(ip, p._dstHostNames?.[ip]) || '')) {
               if (!p._dstHostNames) p._dstHostNames = {};
               p._dstHostNames[ip] = n; changed = true;
             }
@@ -2077,7 +2081,7 @@ function collectMissingObjects() {
       for (const h of p.srcHosts) {
         if (srcFoundHosts.has(h)) continue; // existe dans la config — ne pas lister
         if (!hosts.has(h)) {
-          const suggested = (p._srcHostNames?.[h]) || `FF_HOST_${h.replace(/\./g, '_')}`;
+          const suggested = cleanHostName(h, p._srcHostNames?.[h]) || `FF_HOST_${h.replace(/\./g, '_')}`;
           hosts.set(h, { ip: h, name: suggested, policyCount: 0 });
         }
         hosts.get(h).policyCount++;
@@ -2088,7 +2092,7 @@ function collectMissingObjects() {
       for (const h of p.dstHosts) {
         if (dstFoundHosts.has(h)) continue; // existe dans la config
         if (!hosts.has(h)) {
-          const suggested = (p._dstHostNames?.[h]) || `FF_HOST_${h.replace(/\./g, '_')}`;
+          const suggested = cleanHostName(h, p._dstHostNames?.[h]) || `FF_HOST_${h.replace(/\./g, '_')}`;
           hosts.set(h, { ip: h, name: suggested, policyCount: 0 });
         }
         hosts.get(h).policyCount++;
@@ -2817,13 +2821,13 @@ function populateDrawer(idx) {
         const visibleSrcHosts = s.hosts.filter(h => !p._excludedSrcHosts?.has(h));
         hostsHtml = `<div style="padding-left:16px;margin-top:2px;margin-bottom:6px">${visibleSrcHosts.slice(0, 50).map(h => {
           const foundSet = new Set(p._srcHostsFound || []);
-          const hostName = (p._srcHostNames || {})[h] || `FF_HOST_${h.replace(/\./g,'_')}`;
+          const hostName = cleanHostName(h, (p._srcHostNames || {})[h]) || `FF_HOST_${h.replace(/\./g,'_')}`;
           const hostFound = foundSet.has(h);
           return `<div class="drawer-host-row">
             <span class="drawer-host-ip">${escHtml(h)}</span>
             ${hostFound
               ? `<span style="color:var(--success);font-size:10px" title="${escHtml(h)}/32">&#10003; ${escHtml(hostName)}${badgeHtml('config')}</span>`
-              : `<input class="drawer-host-input" data-type="src" data-host="${escHtml(h)}" value="${escHtml(inputVal(p._srcHostNames?.[h], `FF_HOST_${h.replace(/\./g,'_')}`))}" placeholder="${escHtml(hostName)}">`}
+              : `<input class="drawer-host-input" data-type="src" data-host="${escHtml(h)}" value="${escHtml(inputVal(cleanHostName(h, p._srcHostNames?.[h]), `FF_HOST_${h.replace(/\./g,'_')}`))}" placeholder="${escHtml(hostName)}">`}
             <button class="btn-del-item" data-del-type="src-host" data-host="${escHtml(h)}" title="Retirer cet hôte">✕</button>
           </div>`;
         }).join('')}${visibleSrcHosts.length > 50 ? `<div style="font-size:10px;color:var(--text2)">+${visibleSrcHosts.length - 50} autres…</div>` : ''}</div>`;
@@ -2857,12 +2861,12 @@ function populateDrawer(idx) {
       srcHostsHtml = `<div class="drawer-host-list">${visibleSrcHostsSingle.slice(0, 80).map(h => {
         const foundSet = new Set(p._srcHostsFound || []);
         const hostFound = foundSet.has(h);
-        const name = (p._srcHostNames || {})[h] || `FF_HOST_${h.replace(/\./g,'_')}`;
+        const name = cleanHostName(h, (p._srcHostNames || {})[h]) || `FF_HOST_${h.replace(/\./g,'_')}`;
         return `<div class="drawer-host-row">
           <span class="drawer-host-ip">${escHtml(h)}</span>
           ${hostFound
             ? `<span style="color:var(--success);font-size:10px" title="${escHtml(h)}/32">&#10003; ${escHtml(name)}${badgeHtml('config')}</span>`
-            : `<input class="drawer-host-input" data-type="src" data-host="${escHtml(h)}" value="${escHtml(inputVal(p._srcHostNames?.[h], `FF_HOST_${h.replace(/\./g,'_')}`))}" placeholder="${escHtml(name)}">`}
+            : `<input class="drawer-host-input" data-type="src" data-host="${escHtml(h)}" value="${escHtml(inputVal(cleanHostName(h, p._srcHostNames?.[h]), `FF_HOST_${h.replace(/\./g,'_')}`))}" placeholder="${escHtml(name)}">`}
           <button class="btn-del-item" data-del-type="src-host" data-host="${escHtml(h)}" title="Retirer cet hôte">✕</button>
         </div>`;
       }).join('')}</div>`;
@@ -2909,13 +2913,13 @@ function populateDrawer(idx) {
         const visibleDstHosts = s.hosts.filter(h => !p._excludedDstHosts?.has(h));
         hostsHtml = `<div style="padding-left:16px;margin-top:2px;margin-bottom:6px">${visibleDstHosts.slice(0, 50).map(h => {
           const foundSet = new Set(p._dstHostsFound || []);
-          const hostName = (p._dstHostNames || {})[h] || `FF_HOST_${h.replace(/\./g,'_')}`;
+          const hostName = cleanHostName(h, (p._dstHostNames || {})[h]) || `FF_HOST_${h.replace(/\./g,'_')}`;
           const hostFound = foundSet.has(h);
           return `<div class="drawer-host-row">
             <span class="drawer-host-ip">${escHtml(h)}</span>
             ${hostFound
               ? `<span style="color:var(--success);font-size:10px" title="${escHtml(h)}/32">&#10003; ${escHtml(hostName)}${badgeHtml('config')}</span>`
-              : `<input class="drawer-host-input" data-type="dst" data-host="${escHtml(h)}" value="${escHtml(inputVal(p._dstHostNames?.[h], `FF_HOST_${h.replace(/\./g,'_')}`))}" placeholder="${escHtml(hostName)}">`}
+              : `<input class="drawer-host-input" data-type="dst" data-host="${escHtml(h)}" value="${escHtml(inputVal(cleanHostName(h, p._dstHostNames?.[h]), `FF_HOST_${h.replace(/\./g,'_')}`))}" placeholder="${escHtml(hostName)}">`}
             <button class="btn-del-item" data-del-type="dst-host" data-host="${escHtml(h)}" title="Retirer cet hôte">✕</button>
           </div>`;
         }).join('')}${visibleDstHosts.length > 50 ? `<div style="font-size:10px;color:var(--text2)">+${visibleDstHosts.length - 50} autres…</div>` : ''}</div>`;
@@ -2948,13 +2952,13 @@ function populateDrawer(idx) {
       const dstFoundSet = new Set(p._dstHostsFound || []);
       const visibleDstHostsSingle = dstHosts.filter(h => !p._excludedDstHosts?.has(h));
       dstHostsHtml = `<div class="drawer-host-list">${visibleDstHostsSingle.slice(0, 80).map(h => {
-        const name = (p._dstHostNames || {})[h] || `FF_HOST_${h.replace(/\./g,'_')}`;
+        const name = cleanHostName(h, (p._dstHostNames || {})[h]) || `FF_HOST_${h.replace(/\./g,'_')}`;
         const hostFound = dstFoundSet.has(h);
         return `<div class="drawer-host-row">
           <span class="drawer-host-ip">${escHtml(h)}</span>
           ${hostFound
             ? `<span style="color:var(--success);font-size:10px" title="${escHtml(h)}/32">&#10003; ${escHtml(name)}${badgeHtml('config')}</span>`
-            : `<input class="drawer-host-input" data-type="dst" data-host="${escHtml(h)}" value="${escHtml(inputVal(p._dstHostNames?.[h], `FF_HOST_${h.replace(/\./g,'_')}`))}" placeholder="${escHtml(name)}">`}
+            : `<input class="drawer-host-input" data-type="dst" data-host="${escHtml(h)}" value="${escHtml(inputVal(cleanHostName(h, p._dstHostNames?.[h]), `FF_HOST_${h.replace(/\./g,'_')}`))}" placeholder="${escHtml(name)}">`}
           <button class="btn-del-item" data-del-type="dst-host" data-host="${escHtml(h)}" title="Retirer cet hôte">✕</button>
         </div>`;
       }).join('')}</div>`;
@@ -5560,14 +5564,13 @@ function renderDeployPolicies(analyzed, resetPage = true) {
         const srcFoundSet = new Set(p._srcHostsFound || []);
         const allDone = subs.every(s => {
           if (s.useSubnet !== false) return s.addrFound || !!s.addrName;
-          return (s.hosts || []).every(h => srcFoundSet.has(h) || !!(p._srcHostNames?.[h]));
+          return (s.hosts || []).every(h => srcFoundSet.has(h) || !!(cleanHostName(h, p._srcHostNames?.[h])));
         });
         const names = subs.map(s => {
           if (s.useSubnet !== false) return s.addrName || s.subnet;
           const srcFoundSet2 = new Set(p._srcHostsFound || []);
           return (s.hosts || []).map(h => {
-            if (srcFoundSet2.has(h)) return (p._srcHostNames?.[h]) || h;
-            return (p._srcHostNames?.[h]) || h;
+            return cleanHostName(h, p._srcHostNames?.[h]) || h;
           }).join(', ');
         }).join(', ');
         srcAddrCell = allDone
