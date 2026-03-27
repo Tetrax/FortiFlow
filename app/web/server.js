@@ -607,16 +607,31 @@ app.get('/api/export/workspace', (req, res) => {
   });
 });
 
-// POST /api/import/workspace — recrée une session depuis un .ffws
-app.post('/api/import/workspace', express.json({ limit: '200mb' }), (req, res) => {
-  const body = req.body;
-  if (!body || body._ffws !== 2 || !body.data) {
-    return res.status(400).json({ error: 'Fichier workspace invalide ou version incompatible' });
+// POST /api/import/workspace — recrée une session depuis un .ffws (gzip) ou JSON brut
+app.post('/api/import/workspace', express.raw({ type: ['application/octet-stream', 'application/json'], limit: '300mb' }), async (req, res) => {
+  const zlib = require('zlib');
+  try {
+    // Détecte gzip par magic bytes (1f 8b) ou Content-Type
+    const buf = req.body;
+    let jsonText;
+    if (buf[0] === 0x1f && buf[1] === 0x8b) {
+      jsonText = await new Promise((resolve, reject) =>
+        zlib.gunzip(buf, (err, out) => err ? reject(err) : resolve(out.toString('utf8')))
+      );
+    } else {
+      jsonText = buf.toString('utf8');
+    }
+    const body = JSON.parse(jsonText);
+    if (!body || body._ffws !== 2 || !body.data) {
+      return res.status(400).json({ error: 'Fichier workspace invalide ou version incompatible' });
+    }
+    const id = createSession();
+    setSessionData(id, body.data);
+    if (body.fortiConfig) setFortiConfig(id, body.fortiConfig);
+    res.json({ sessionId: id });
+  } catch (err) {
+    res.status(400).json({ error: 'Fichier corrompu ou illisible : ' + err.message });
   }
-  const id = createSession();
-  setSessionData(id, body.data);
-  if (body.fortiConfig) setFortiConfig(id, body.fortiConfig);
-  res.json({ sessionId: id });
 });
 
 // DELETE /api/session/:session — free memory

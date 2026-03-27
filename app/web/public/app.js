@@ -1599,9 +1599,13 @@ async function exportSession() {
         viewMode:      deployState.viewMode,
       },
     };
-    const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+    // Compression gzip via l'API native (zéro dépendance)
+    const jsonBytes  = new TextEncoder().encode(JSON.stringify(payload));
+    const compressed = await new Response(
+      new Blob([jsonBytes]).stream().pipeThrough(new CompressionStream('gzip'))
+    ).blob();
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
+    a.href = URL.createObjectURL(compressed);
     a.download = `fortiflow_${new Date().toISOString().slice(0,10)}.ffws`;
     a.click();
     URL.revokeObjectURL(a.href);
@@ -1611,17 +1615,30 @@ async function exportSession() {
 }
 
 function importSession(file) {
+  const isFfws = file.name.endsWith('.ffws');
   const reader = new FileReader();
   reader.onload = async (e) => {
     try {
-      const data = JSON.parse(e.target.result);
+      let jsonText;
+      if (isFfws) {
+        // Décompression gzip via l'API native avant parsing
+        jsonText = await new Response(
+          new Blob([e.target.result]).stream().pipeThrough(new DecompressionStream('gzip'))
+        ).text();
+      } else {
+        jsonText = e.target.result;
+      }
+      const data = JSON.parse(jsonText);
 
       if (data._ffws === 2) {
         // ── Nouveau format v2 : restore session serveur + deployState ──
+        // Envoie les bytes gzip bruts si .ffws, sinon JSON texte
+        const body   = isFfws ? e.target.result : jsonText;
+        const ctype  = isFfws ? 'application/octet-stream' : 'application/json';
         const r = await fetch('/api/import/workspace', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: e.target.result,
+          headers: { 'Content-Type': ctype },
+          body,
         });
         if (!r.ok) { const err = await r.json().catch(()=>({})); alert(err.error || 'Erreur import'); return; }
         const { sessionId } = await r.json();
@@ -1678,7 +1695,8 @@ function importSession(file) {
       }
     } catch (err) { alert('Erreur lecture: ' + err.message); }
   };
-  reader.readAsText(file);
+  if (isFfws) reader.readAsArrayBuffer(file);
+  else         reader.readAsText(file);
 }
 
 // ── F9: Merge diff modal ──
