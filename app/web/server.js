@@ -810,6 +810,9 @@ app.post('/api/export/policies-xlsx', express.json({ limit: '50mb' }), async (re
       const srcDisplay = isSrcHosts
         ? p.srcHosts.join(', ')
         : (p.srcSubnet || '');
+      const dstDisplay = isDstHosts
+        ? p.dstHosts.join(', ')
+        : (p.dstTarget || '');
       // N'exporter que les valeurs explicitement saisies par l'utilisateur (pas de fallback analysis)
       const srcAddrVal = isSrcHosts
         ? p.srcHosts.map(h => (p._srcHostNames?.[h]) || '').join(', ')
@@ -829,7 +832,7 @@ app.post('/api/export/policies-xlsx', express.json({ limit: '50mb' }), async (re
       const rowData = [
         idx,
         srcDisplay,
-        p.dstTarget || '',
+        dstDisplay,
         p.dstType === 'internet' ? 'WAN' : 'LAN',
         ((p.analysis?.services || []).map(s => s.label || s.name)).join(', '),
         (p.ports || []).join(', '),
