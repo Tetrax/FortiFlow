@@ -733,6 +733,174 @@ app.delete('/api/workspaces/:id', (req, res) => {
   res.json({ ok: true });
 });
 
+// ─── Export/Import policies Excel ────────────────────────────────────────────
+
+// POST /api/export/policies-xlsx — reçoit { policies: [...] }, retourne un fichier Excel
+app.post('/api/export/policies-xlsx', express.json({ limit: '50mb' }), async (req, res) => {
+  try {
+    const ExcelJS = require('exceljs');
+    const policies = req.body.policies || [];
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Policies');
+
+    // Couleurs SNS Security
+    const SNS_HDR    = 'FF15151E';
+    const SNS_BRAND  = 'FFF0B4E4';
+    const SNS_EDIT_H = 'FF4A2060';
+    const NOTE_BG    = 'FF1A1A28';
+    const RO_BG_ODD  = 'FF17172A';
+    const RO_BG_EVEN = 'FF1C1C32';
+    const RO_TXT     = 'FF8888AA';
+    const ED_BG_ODD  = 'FFF8F4FC';
+    const ED_BG_EVEN = 'FFEFE8F8';
+    const ED_TXT     = 'FF1A1A2E';
+
+    // Définition des colonnes
+    const cols = [
+      { header: '#',            key: 'idx',      width: 5,  editable: false },
+      { header: 'Source',       key: 'src',      width: 18, editable: false },
+      { header: 'Destination',  key: 'dst',      width: 18, editable: false },
+      { header: 'Type',         key: 'type',     width: 8,  editable: false },
+      { header: 'Services',     key: 'services', width: 28, editable: false },
+      { header: 'Ports',        key: 'ports',    width: 22, editable: false },
+      { header: 'Nom Policy',   key: 'polName',  width: 22, editable: true  },
+      { header: 'Addr Source',  key: 'srcAddr',  width: 20, editable: true  },
+      { header: 'Addr Dest',    key: 'dstAddr',  width: 20, editable: true  },
+      { header: 'Intf Source',  key: 'srcIntf',  width: 14, editable: true  },
+      { header: 'Intf Dest',    key: 'dstIntf',  width: 14, editable: true  },
+      { header: 'Action',       key: 'action',   width: 10, editable: true  },
+      { header: 'NAT',          key: 'nat',      width: 8,  editable: true  },
+      { header: 'Log',          key: 'log',      width: 10, editable: true  },
+    ];
+
+    ws.columns = cols.map(c => ({ header: c.header, key: c.key, width: c.width }));
+
+    // Ligne 1 : en-têtes
+    const hdrRow = ws.getRow(1);
+    cols.forEach((c, i) => {
+      const cell = hdrRow.getCell(i + 1);
+      cell.value = c.header;
+      cell.font = { bold: true, color: { argb: c.editable ? 'FFFFFFFF' : SNS_BRAND } };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: c.editable ? SNS_EDIT_H : SNS_HDR } };
+      cell.alignment = { vertical: 'middle', horizontal: 'center' };
+    });
+    hdrRow.height = 20;
+
+    // Ligne 2 : note
+    const noteRow = ws.getRow(2);
+    cols.forEach((c, i) => {
+      const cell = noteRow.getCell(i + 1);
+      cell.value = c.editable ? '✎ Modifiable' : '';
+      cell.font  = { italic: true, color: { argb: 'FF9977BB' } };
+      cell.fill  = { type: 'pattern', pattern: 'solid', fgColor: { argb: NOTE_BG } };
+      cell.alignment = { vertical: 'middle', horizontal: 'center' };
+    });
+    noteRow.height = 16;
+
+    // Lignes données
+    policies.forEach((p, idx) => {
+      const isOdd = idx % 2 === 0;
+      const roBg  = isOdd ? RO_BG_ODD : RO_BG_EVEN;
+      const edBg  = isOdd ? ED_BG_ODD : ED_BG_EVEN;
+      const rowData = [
+        idx,
+        p.srcSubnet || '',
+        p.dstTarget || '',
+        p.dstType === 'internet' ? 'WAN' : 'LAN',
+        ((p.analysis?.services || []).map(s => s.label || s.name)).join(', '),
+        (p.ports || []).join(', '),
+        p._policyName    || '',
+        p._srcAddrName   || '',
+        p._dstAddrName   || '',
+        p._srcintf       || '',
+        p._dstintf       || '',
+        p._action || p.action || 'accept',
+        p._nat ? 'OUI' : 'NON',
+        p._log || 'disable',
+      ];
+      const dataRow = ws.getRow(idx + 3);
+      rowData.forEach((val, i) => {
+        const cell = dataRow.getCell(i + 1);
+        cell.value = val;
+        const isEd = cols[i].editable;
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: isEd ? edBg : roBg } };
+        cell.font = { color: { argb: isEd ? ED_TXT : RO_TXT } };
+        cell.alignment = { vertical: 'middle' };
+      });
+      dataRow.commit();
+    });
+
+    // Volet figé sur 2 premières lignes
+    ws.views = [{ state: 'frozen', xSplit: 0, ySplit: 2, topLeftCell: 'A3', activeCell: 'A3' }];
+
+    const timestamp = Date.now();
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="fortiflow_policies_${timestamp}.xlsx"`);
+    await wb.xlsx.write(res);
+    res.end();
+  } catch (err) {
+    console.error('[export/policies-xlsx]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/import/policies-xlsx — parse un fichier Excel et retourne les patches
+app.post('/api/import/policies-xlsx', upload.single('policies'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'Aucun fichier reçu' });
+  try {
+    const ExcelJS = require('exceljs');
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.readFile(req.file.path);
+    fs.unlink(req.file.path, () => {});
+
+    const ws = wb.worksheets[0];
+    if (!ws) return res.status(400).json({ error: 'Fichier Excel invalide (aucune feuille)' });
+
+    const patches = [];
+    ws.eachRow((row, rowNum) => {
+      if (rowNum <= 2) return; // skip header + note
+
+      const getVal = (col) => {
+        const v = row.getCell(col).value;
+        if (v === null || v === undefined || v === '') return null;
+        return String(v).trim() || null;
+      };
+
+      const idxRaw = getVal(1);
+      if (idxRaw === null) return;
+      const index = parseInt(idxRaw, 10);
+      if (isNaN(index)) return;
+
+      const actionRaw = getVal(12);
+      let action = null;
+      if (actionRaw === 'accept' || actionRaw === 'deny') action = actionRaw;
+
+      const natRaw = getVal(13);
+      let nat = null;
+      if (natRaw === 'OUI') nat = true;
+      else if (natRaw === 'NON') nat = false;
+
+      patches.push({
+        index,
+        policyName: getVal(7),
+        srcAddr:    getVal(8),
+        dstAddr:    getVal(9),
+        srcIntf:    getVal(10),
+        dstIntf:    getVal(11),
+        action,
+        nat,
+        log:        getVal(14),
+      });
+    });
+
+    res.json({ patches });
+  } catch (err) {
+    try { fs.unlink(req.file.path, () => {}); } catch {}
+    console.error('[import/policies-xlsx]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // DELETE /api/session/:session — free memory
 app.delete('/api/session/:session', (req, res) => {
   deleteSession(req.params.session);

@@ -1729,6 +1729,54 @@ function deserializeAnalyzed(analyzed) {
   });
 }
 
+// ── F6b: Export/Import policies Excel ──
+async function exportPoliciesExcel() {
+  if (!deployState.analyzed?.length) { alert('Aucune policy à exporter'); return; }
+  try {
+    const r = await fetch('/api/export/policies-xlsx', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ policies: serializeAnalyzed(deployState.analyzed) }),
+    });
+    if (!r.ok) { const e = await r.json().catch(() => ({})); alert(e.error || 'Erreur export'); return; }
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `fortiflow_policies_${new Date().toISOString().slice(0, 10)}.xlsx`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } catch (err) { alert('Erreur: ' + err.message); }
+}
+
+async function importPoliciesExcel(file) {
+  try {
+    const form = new FormData();
+    form.append('policies', file);
+    const r = await fetch('/api/import/policies-xlsx', { method: 'POST', body: form });
+    if (!r.ok) { const e = await r.json().catch(() => ({})); alert(e.error || 'Erreur import'); return; }
+    const { patches } = await r.json();
+    if (!patches?.length) { alert('Aucune modification trouvée'); return; }
+
+    let applied = 0;
+    for (const patch of patches) {
+      const p = deployState.analyzed[patch.index];
+      if (!p) continue;
+      if (patch.policyName !== null) p._policyName  = patch.policyName;
+      if (patch.srcAddr    !== null) p._srcAddrName = patch.srcAddr;
+      if (patch.dstAddr    !== null) p._dstAddrName = patch.dstAddr;
+      if (patch.srcIntf    !== null) p._srcintf     = patch.srcIntf  || undefined;
+      if (patch.dstIntf    !== null) p._dstintf     = patch.dstIntf  || undefined;
+      if (patch.action     !== null) p._action      = patch.action;
+      if (patch.nat        !== null) p._nat         = patch.nat;
+      if (patch.log        !== null) p._log         = patch.log;
+      applied++;
+    }
+
+    renderDeployPolicies(filterDeployPolicies());
+    alert(`✓ ${applied} policies mises à jour depuis l'Excel`);
+  } catch (err) { alert('Erreur: ' + err.message); }
+}
+
 // ── F6: Export/Import session ──
 async function exportSession() {
   try {
@@ -3070,6 +3118,8 @@ async function deploy() {
             <button class="btn-accent" id="btn-generate">⬇ Générer config FortiGate</button>
             <span id="deploy-gen-info" style="font-size:11px;color:var(--text2)"></span>
             <span style="margin-left:auto;display:flex;gap:6px">
+              <button class="btn-sm" id="btn-export-policies-xlsx" title="Exporter les policies en Excel">📊 Export Excel</button>
+              <label class="btn-sm" style="cursor:pointer" title="Importer les modifications depuis un fichier Excel">📥 Import Excel<input type="file" id="btn-import-policies-xlsx" accept=".xlsx,.xls" style="display:none"></label>
               <button class="btn-sm" id="btn-export-session" title="Sauvegarder la session de travail">💾 Sauvegarder</button>
               <label class="btn-sm" style="cursor:pointer" title="Charger une session sauvegardée">📂 Charger<input type="file" id="btn-import-session" accept=".json,.ffws" style="display:none"></label>
             </span>
@@ -3330,6 +3380,13 @@ async function deploy() {
 
   // Generate
   el('btn-generate')?.addEventListener('click', generateDeployConf);
+
+  // Export/Import policies Excel
+  el('btn-export-policies-xlsx')?.addEventListener('click', exportPoliciesExcel);
+  el('btn-import-policies-xlsx')?.addEventListener('change', e => {
+    const f = e.target.files[0];
+    if (f) { importPoliciesExcel(f); e.target.value = ''; }
+  });
 
   // Export/Import session
   el('btn-export-session')?.addEventListener('click', exportSession);
