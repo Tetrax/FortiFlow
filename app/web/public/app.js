@@ -38,6 +38,7 @@ function escHtml(s) {
 }
 
 const fmtNum = n => (n ?? 0).toLocaleString('fr-FR');
+const tsNow  = () => new Date().toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '-');
 
 function fmtBytes(n) {
   n = n || 0;
@@ -710,7 +711,7 @@ async function matrix() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `fortiflow_matrix_${state.matrix.action}.png`;
+      a.download = `fortiflow_matrix_${state.matrix.action}_${tsNow()}.png`;
       a.click();
       URL.revokeObjectURL(url);
     });
@@ -1742,7 +1743,7 @@ async function exportPoliciesExcel() {
     const blob = await r.blob();
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `fortiflow_policies_${new Date().toISOString().slice(0, 10)}.xlsx`;
+    a.download = `fortiflow_policies_${tsNow()}.xlsx`;
     a.click();
     URL.revokeObjectURL(a.href);
   } catch (err) { alert('Erreur: ' + err.message); }
@@ -1761,14 +1762,32 @@ async function importPoliciesExcel(file) {
     for (const patch of patches) {
       const p = deployState.analyzed[patch.index];
       if (!p) continue;
-      if (patch.policyName !== null) p._policyName  = patch.policyName;
-      if (patch.srcAddr    !== null) p._srcAddrName = patch.srcAddr;
-      if (patch.dstAddr    !== null) p._dstAddrName = patch.dstAddr;
-      if (patch.srcIntf    !== null) p._srcintf     = patch.srcIntf  || undefined;
-      if (patch.dstIntf    !== null) p._dstintf     = patch.dstIntf  || undefined;
-      if (patch.action     !== null) p._action      = patch.action;
-      if (patch.nat        !== null) p._nat         = patch.nat;
-      if (patch.log        !== null) p._log         = patch.log;
+      if (patch.policyName !== null) p._policyName = patch.policyName;
+      if (patch.srcAddr !== null) {
+        const isSrcHosts = (p._srcMode === 'hosts' || p._use32Src) && p.srcHosts?.length;
+        if (isSrcHosts) {
+          const names = patch.srcAddr.split(',').map(s => s.trim());
+          if (!p._srcHostNames) p._srcHostNames = {};
+          p.srcHosts.forEach((h, i) => { const n = names[i] || names[0]; if (n) p._srcHostNames[h] = n; });
+        } else {
+          p._srcAddrName = patch.srcAddr;
+        }
+      }
+      if (patch.dstAddr !== null) {
+        const isDstHosts = (p._dstMode === 'hosts' || p._use32Dst) && p.dstHosts?.length;
+        if (isDstHosts) {
+          const names = patch.dstAddr.split(',').map(s => s.trim());
+          if (!p._dstHostNames) p._dstHostNames = {};
+          p.dstHosts.forEach((h, i) => { const n = names[i] || names[0]; if (n) p._dstHostNames[h] = n; });
+        } else {
+          p._dstAddrName = patch.dstAddr;
+        }
+      }
+      if (patch.srcIntf !== null) p._srcintf = patch.srcIntf  || undefined;
+      if (patch.dstIntf !== null) p._dstintf = patch.dstIntf  || undefined;
+      if (patch.action  !== null) p._action  = patch.action;
+      if (patch.nat     !== null) p._nat     = patch.nat;
+      if (patch.log     !== null) p._log     = patch.log;
       applied++;
     }
 
@@ -1806,7 +1825,7 @@ async function exportSession() {
     ).blob();
     const a = document.createElement('a');
     a.href = URL.createObjectURL(compressed);
-    a.download = `fortiflow_${new Date().toISOString().slice(0,10)}.ffws`;
+    a.download = `fortiflow_${tsNow()}.ffws`;
     a.click();
     URL.revokeObjectURL(a.href);
   } catch (err) {
@@ -2255,6 +2274,7 @@ function mountDrawer() {
       const type = e.target.dataset.type;
       if (type === 'src') { if (!p._srcHostNames) p._srcHostNames = {}; p._srcHostNames[host] = e.target.value; }
       else { if (!p._dstHostNames) p._dstHostNames = {}; p._dstHostNames[host] = e.target.value; }
+      syncHostCell(_drawerIdx, type);
     }
     if (e.target.matches('.svc-merge-name')) { p._mergedSvcName = e.target.value; return; }
     if (e.target.matches('.svc-merge-range')) { p._mergeRange = e.target.value; return; }
@@ -2452,6 +2472,28 @@ function mountDrawer() {
       renderDeployPolicies(filterDeployPolicies(), false);
       return;
     }
+    // Addr propagation banner buttons
+    if (e.target.closest('.addr-prop-yes')) {
+      const ap = p._propagateAddrPending;
+      if (ap) {
+        const field = ap.addrType === 'src' ? '_srcAddrName' : '_dstAddrName';
+        for (let i = 0; i < (deployState.analyzed || []).length; i++) {
+          if (i === _drawerIdx) continue;
+          const op = deployState.analyzed[i];
+          const opCidr  = ap.addrType === 'src' ? op.analysis?.srcAddr?.cidr  : op.analysis?.dstAddr?.cidr;
+          const opFound = ap.addrType === 'src' ? op.analysis?.srcAddr?.found : op.analysis?.dstAddr?.found;
+          if (opCidr === ap.cidr && !opFound) { op[field] = ap.newName; syncInlineCell(i, field, ap.newName); }
+        }
+        delete p._propagateAddrPending;
+        populateDrawer(_drawerIdx);
+      }
+      return;
+    }
+    if (e.target.closest('.addr-prop-no')) {
+      delete p._propagateAddrPending;
+      populateDrawer(_drawerIdx);
+      return;
+    }
     // Propagation banner buttons
     if (e.target.closest('.svc-prop-yes')) {
       const pp = p._propagatePending;
@@ -2543,6 +2585,32 @@ function mountDrawer() {
       populateDrawer(_drawerIdx);
     }
   });
+
+  // Propagation check on addr name blur
+  drawer.addEventListener('focusout', e => {
+    const p = _drawerIdx !== null ? deployState.analyzed[_drawerIdx] : null;
+    if (!p) return;
+    let addrType = null;
+    if (e.target.matches('.drawer-src-name')) addrType = 'src';
+    else if (e.target.matches('.drawer-dst-name')) addrType = 'dst';
+    if (!addrType) return;
+    const newName = e.target.value.trim();
+    if (!newName) return;
+    const cidr = addrType === 'src' ? p.analysis?.srcAddr?.cidr : p.analysis?.dstAddr?.cidr;
+    if (!cidr) return;
+    let count = 0;
+    for (let i = 0; i < (deployState.analyzed || []).length; i++) {
+      if (i === _drawerIdx) continue;
+      const op = deployState.analyzed[i];
+      const opCidr  = addrType === 'src' ? op.analysis?.srcAddr?.cidr  : op.analysis?.dstAddr?.cidr;
+      const opFound = addrType === 'src' ? op.analysis?.srcAddr?.found : op.analysis?.dstAddr?.found;
+      if (opCidr === cidr && !opFound) count++;
+    }
+    if (count > 0) {
+      p._propagateAddrPending = { addrType, cidr, newName, count };
+      populateDrawer(_drawerIdx);
+    }
+  });
 }
 
 function buildDrawerSecProfiles(p, idx) {
@@ -2584,6 +2652,34 @@ function closeDrawer() {
 function syncInlineCell(idx, field, value) {
   const cell = document.querySelector(`.inline-editable[data-idx="${idx}"][data-field="${field}"]`);
   if (cell) cell.textContent = value || '—';
+  syncRowStatus(idx);
+}
+
+function syncHostCell(idx, type) {
+  const p = deployState.analyzed[idx];
+  if (!p) return;
+  const field = type === 'src' ? '_srcAddrName' : '_dstAddrName';
+  const cell = document.querySelector(`.inline-editable[data-idx="${idx}"][data-field="${field}"]`);
+  if (!cell) return;
+  if (type === 'src') {
+    const hFoundSet = new Set(p._srcHostsFound || []);
+    const hNames = (p.srcHosts || []).map(h => (p._srcHostNames?.[h]) || (hFoundSet.has(h) ? h : h));
+    const allNamed = (p.srcHosts || []).every(h => hFoundSet.has(h) || !!(p._srcHostNames?.[h]));
+    const hDisplay = hNames.join(', ');
+    cell.title = hDisplay;
+    cell.innerHTML = escHtml(hDisplay) + (allNamed ? '' : ' ' + badgeHtml('auto'));
+    cell.className = `inline-editable ${allNamed ? 'found' : 'missing'}`;
+  } else {
+    const dhFoundSet = new Set(p._dstHostsFound || []);
+    const _autoHostName = h => `FF_HOST_${h.replace(/\./g, '_')}`;
+    const _hostNameOk = (h, nm) => { const n = nm?.[h]; return n && n !== _autoHostName(h); };
+    const dhNames = (p.dstHosts || []).map(h => (p._dstHostNames?.[h]) || (dhFoundSet.has(h) ? h : h));
+    const dhAllNamed = (p.dstHosts || []).every(h => dhFoundSet.has(h) || _hostNameOk(h, p._dstHostNames));
+    const dhDisplay = dhNames.join(', ');
+    cell.title = dhDisplay;
+    cell.innerHTML = escHtml(dhDisplay) + (dhAllNamed ? '' : ' ' + badgeHtml('auto'));
+    cell.className = `inline-editable ${dhAllNamed ? 'found' : 'missing'}`;
+  }
   syncRowStatus(idx);
 }
 
@@ -2787,6 +2883,14 @@ function populateDrawer(idx) {
     </div>`;
   }
 
+  // Addr propagation banner
+  const ap = p._propagateAddrPending;
+  const addrPropagateBanner = ap ? `<div class="svc-propagate-banner">
+    <span>${ap.count} autre${ap.count>1?'s':''} policy${ap.count>1?'s':''} ${ap.count>1?'ont':'a'} <code style="font-family:var(--mono)">${escHtml(ap.cidr)}</code> en ${ap.addrType === 'src' ? 'source' : 'destination'} — Appliquer <strong>${escHtml(ap.newName)}</strong> à toutes ?</span>
+    <button class="btn-sm btn-accent addr-prop-yes">Oui</button>
+    <button class="btn-sm addr-prop-no">Non</button>
+  </div>` : '';
+
   // Services
   const svcList = a.services || [];
   if (!p._selectedSvcKeys) p._selectedSvcKeys = new Set();
@@ -2876,6 +2980,7 @@ function populateDrawer(idx) {
     </div>
     ${srcSection}
     ${dstSection}
+    ${addrPropagateBanner}
     <div class="drawer-section">
       <div class="drawer-section-title">Interfaces destination</div>
       <div class="drawer-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-dstintf">${ifOptsDst}</select></div>
@@ -5782,7 +5887,7 @@ async function generateDeployConf() {
       const blob = new Blob([text], { type: 'text/plain' });
       const url  = URL.createObjectURL(blob);
       const a    = document.createElement('a');
-      a.href = url; a.download = 'fortiflow_deploy.conf'; a.click();
+      a.href = url; a.download = `fortiflow_deploy_${tsNow()}.conf`; a.click();
       URL.revokeObjectURL(url);
     };
     const btnToggle = el('btn-cli-toggle');

@@ -16,8 +16,9 @@ const { parseFortiConfig, analyzePolicies,
         parseFullRoutingTable, parseOspfRoutingTable, parseBgpNetworkTable,
         sortRoutes, formatExistingPolicies }             = require('./lib/forticonfig');
 
-const app  = express();
-const PORT = process.env.PORT || 3737;
+const app   = express();
+const PORT  = process.env.PORT || 3737;
+const tsNow = () => new Date().toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '-');
 
 // ─── Upload storage ───────────────────────────────────────────────────────────
 
@@ -594,7 +595,7 @@ app.get('/api/export/matrix', async (req, res) => {
   // ── Envoi ────────────────────────────────────────────────────────────────
   const label = isDeny ? 'deny' : 'accept';
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  res.setHeader('Content-Disposition', `attachment; filename="fortiflow_matrix_${label}.xlsx"`);
+  res.setHeader('Content-Disposition', `attachment; filename="fortiflow_matrix_${label}_${tsNow()}.xlsx"`);
   try {
     await wb.xlsx.write(res);
     res.end();
@@ -623,7 +624,7 @@ app.get('/api/export/workspace', (req, res) => {
   }
 
   res.setHeader('Content-Type', 'application/json');
-  res.setHeader('Content-Disposition', `attachment; filename="fortiflow_workspace_${Date.now()}.ffws"`);
+  res.setHeader('Content-Disposition', `attachment; filename="fortiflow_workspace_${tsNow()}.ffws"`);
   res.json({
     _ffws:       2,
     exportedAt:  new Date().toISOString(),
@@ -802,21 +803,34 @@ app.post('/api/export/policies-xlsx', express.json({ limit: '50mb' }), async (re
       const isOdd = idx % 2 === 0;
       const roBg  = isOdd ? RO_BG_ODD : RO_BG_EVEN;
       const edBg  = isOdd ? ED_BG_ODD : ED_BG_EVEN;
+      // Résolution des noms en mode /32 hôtes
+      const isSrcHosts = (p._srcMode === 'hosts' || p._use32Src) && p.srcHosts?.length;
+      const isDstHosts = (p._dstMode === 'hosts' || p._use32Dst) && p.dstHosts?.length;
+      const srcDisplay = isSrcHosts
+        ? p.srcHosts.join(', ')
+        : (p.srcSubnet || '');
+      const srcAddrVal = isSrcHosts
+        ? p.srcHosts.map(h => (p._srcHostNames?.[h]) || h).join(', ')
+        : (p._srcAddrName || p.analysis?.srcAddr?.name || '');
+      const dstAddrVal = isDstHosts
+        ? p.dstHosts.map(h => (p._dstHostNames?.[h]) || h).join(', ')
+        : (p._dstAddrName || p.analysis?.dstAddr?.name || '');
+
       const rowData = [
         idx,
-        p.srcSubnet || '',
+        srcDisplay,
         p.dstTarget || '',
         p.dstType === 'internet' ? 'WAN' : 'LAN',
         ((p.analysis?.services || []).map(s => s.label || s.name)).join(', '),
         (p.ports || []).join(', '),
         p._policyName    || '',
-        p._srcAddrName   || '',
-        p._dstAddrName   || '',
+        srcAddrVal,
+        dstAddrVal,
         p._srcintf       || '',
         p._dstintf       || '',
         p._action || p.action || 'accept',
         p._nat ? 'OUI' : 'NON',
-        p._log || 'disable',
+        p._log || 'all',
       ];
       const dataRow = ws.getRow(idx + 3);
       rowData.forEach((val, i) => {
@@ -833,9 +847,8 @@ app.post('/api/export/policies-xlsx', express.json({ limit: '50mb' }), async (re
     // Volet figé sur 2 premières lignes
     ws.views = [{ state: 'frozen', xSplit: 0, ySplit: 2, topLeftCell: 'A3', activeCell: 'A3' }];
 
-    const timestamp = Date.now();
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename="fortiflow_policies_${timestamp}.xlsx"`);
+    res.setHeader('Content-Disposition', `attachment; filename="fortiflow_policies_${tsNow()}.xlsx"`);
     await wb.xlsx.write(res);
     res.end();
   } catch (err) {
@@ -1160,7 +1173,7 @@ app.post('/api/deploy/generate', (req, res) => {
     const download = req.query.download === '1';
     if (download) {
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-      res.setHeader('Content-Disposition', 'attachment; filename="fortiflow_deploy.conf"');
+      res.setHeader('Content-Disposition', `attachment; filename="fortiflow_deploy_${tsNow()}.conf"`);
     } else {
       res.setHeader('Content-Type', 'application/json');
     }
