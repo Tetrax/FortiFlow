@@ -991,7 +991,7 @@ function renderGroups(subnets) {
       return `
         <div class="dst-row">
           <div class="dst-info">
-            <div class="dst-ip">${typeTag(d.type)} ${d.key}${d.type === 'public' && d.country ? ` <span class="geo-tag">${escHtml(d.flag || '')} ${escHtml(d.country)}</span>` : ''}</div>
+            <div class="dst-ip">${typeTag(d.type)} ${d.key}</div>
             <div class="dst-services">${svcTags}${extra}${!d.services.length ? `<span style="color:var(--text2);font-size:11px;">ports: ${portStr || '?'}</span>` : ''}</div>
           </div>
           <div class="dst-stats">

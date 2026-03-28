@@ -2,38 +2,6 @@
 
 const { portName } = require('./ports');
 
-let geoip;
-try { geoip = require('geoip-lite'); } catch { geoip = null; }
-
-// ─── Geo lookup (cache par IP) ────────────────────────────────────────────────
-
-const geoCache = new Map();
-const GEO_CACHE_MAX = 5000;
-function geoCacheSet(ip, val) {
-  if (geoCache.size >= GEO_CACHE_MAX) {
-    // Supprime la première entrée (la plus ancienne)
-    geoCache.delete(geoCache.keys().next().value);
-  }
-  geoCache.set(ip, val);
-}
-
-function lookupCountry(ip) {
-  if (!geoip || !ip) return '';
-  if (geoCache.has(ip)) return geoCache.get(ip);
-  const result = geoip.lookup(ip);
-  const cc = result?.country || '';
-  geoCacheSet(ip, cc);
-  return cc;
-}
-
-// Emoji flag depuis code ISO-2
-function countryFlag(cc) {
-  if (!cc || cc.length !== 2) return '';
-  return String.fromCodePoint(
-    ...cc.toUpperCase().split('').map(c => 0x1F1E0 + c.charCodeAt(0) - 65)
-  );
-}
-
 // ─── RFC1918 ──────────────────────────────────────────────────────────────────
 
 function ip2int(ip) {
@@ -254,7 +222,6 @@ function buildAnalysis(flowInput, knownSubnets = []) {
     const pn         = protoName(f.proto);
     const resolvedSvc = f.service || portName(f.dstport, pn) || '';
     const dstPriv    = isPrivate(f.dstip);
-    const dstCountry = !dstPriv ? lookupCountry(f.dstip) : '';
     return {
       ...f,
       service:    resolvedSvc,
@@ -263,22 +230,9 @@ function buildAnalysis(flowInput, knownSubnets = []) {
       dstType:    dstPriv ? 'private' : 'public',
       srcSubnet:  isPrivate(f.srcip) ? subnetOf(f.srcip) : null,
       dstSubnet:  dstPriv ? subnetOf(f.dstip) : null,
-      dstCountry,
-      dstFlag:    countryFlag(dstCountry),
       totalBytes: f.sentBytes + f.rcvdBytes,
     };
   });
-
-  // ── Geo enrichment dans subnets (destinations publiques) ──
-  for (const sg of Object.values(subnets)) {
-    for (const [dstKey, dst] of Object.entries(sg.dsts)) {
-      if (dst.type === 'public') {
-        const cc = lookupCountry(dstKey);
-        dst.country = cc;
-        dst.flag    = countryFlag(cc);
-      }
-    }
-  }
 
   // ── Policy suggestions (flux acceptés seulement) ──
   const policies = buildPolicies(allowedByIntfGroups);
