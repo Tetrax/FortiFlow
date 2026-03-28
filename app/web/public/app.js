@@ -4181,14 +4181,14 @@ function mergeByPolicyId(policies) {
   for (const [policyId, group] of groups) {
     if (group.length === 1) { merged.push({ ...group[0] }); continue; }
 
-    // ── Pré-pass : grouper par srcSubnet|srcIntf|dstIntf|dstSubnet pour détecter multi-src ──
-    // Avant même le subgrouping par services, on groupe par interface pair + destination.
-    // Cela évite que des services légèrement différents empêchent la fusion multi-src.
+    // ── Pré-pass : grouper par srcSubnet|srcIntf|dstIntf pour détecter multi-dst ──
+    // Avant même le subgrouping par services, on groupe par interface pair.
+    // Cela évite que des services légèrement différents empêchent la fusion multi-dst.
     const ifaceGroups = new Map();
     for (const p of group) {
       const src = p._srcintf || p.srcintf || '';
       const dst = p._dstintf || p.dstintf || '';
-      const ik  = `${p.srcSubnet}|${src}|${dst}|${p.dstTarget || ''}`;
+      const ik  = `${p.srcSubnet}|${src}|${dst}`;
       if (!ifaceGroups.has(ik)) ifaceGroups.set(ik, []);
       ifaceGroups.get(ik).push(p);
     }
