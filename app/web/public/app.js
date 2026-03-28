@@ -4499,41 +4499,6 @@ function renderRiskPanel(data) {
     <div class="risk-section-header" style="${headerStyle}"><span class="risk-chevron">⌄</span><span>⚠ ${rp.length} flux à risque</span></div>
     <div style="${bodyStyle}">${s1Body}</div></div>`;
 
-  if (data.hasFortiConfig) {
-    const zombies = data.zombies;
-    let s2Body = '';
-    if (!zombies) {
-      s2Body = `<div style="color:var(--text2);padding:8px 0">Chargez une config FortiGate pour activer cette analyse</div>`;
-    } else if (zombies.length === 0) {
-      s2Body = `<div style="color:var(--success,#27ae60);padding:8px 0">Aucune policy zombie détectée ✓</div>`;
-    } else {
-      s2Body = `<table style="${tableStyle}"><thead><tr>
-        <th style="${thStyle}">ID</th><th style="${thStyle}">Nom</th>
-        <th style="${thStyle}">Src intf</th><th style="${thStyle}">Src addr</th>
-        <th style="${thStyle}">Dst intf</th><th style="${thStyle}">Dst addr</th>
-        <th style="${thStyle}">Service</th><th style="${thStyle}">Masquée par</th>
-      </tr></thead><tbody>`;
-      for (const z of zombies) {
-        const shadowedByHtml = (z.shadowedBy || []).length
-          ? escHtml(z.shadowedBy.map(p => `#${p.id}${p.name ? ' ' + p.name : ''}`).join(', '))
-          : '<span style="color:var(--text2);font-size:10px">—</span>';
-        s2Body += `<tr>
-          <td style="${tdStyle}">${escHtml(String(z.id))}</td>
-          <td style="${tdStyle}">${escHtml(z.name)}</td>
-          <td style="${tdStyle};font-family:var(--mono);font-size:10px">${escHtml((z.srcintf||[]).filter(Boolean).join(', '))}</td>
-          <td style="${tdStyle}">${escHtml((z.srcaddr||[]).filter(Boolean).join(', '))}</td>
-          <td style="${tdStyle};font-family:var(--mono);font-size:10px">${escHtml((z.dstintf||[]).filter(Boolean).join(', '))}</td>
-          <td style="${tdStyle}">${escHtml((z.dstaddr||[]).filter(Boolean).join(', '))}</td>
-          <td style="${tdStyle}">${escHtml((z.service||[]).filter(Boolean).join(', '))}</td>
-          <td style="${tdStyle};font-size:10px;color:var(--warn,#f39c12)">${shadowedByHtml}</td>
-        </tr>`;
-      }
-      s2Body += `</tbody></table>`;
-    }
-    html += `<div style="${sectionStyle}">
-      <div class="risk-section-header" style="${headerStyle}"><span class="risk-chevron">⌄</span><span>🧟 Policies zombies (${zombies?zombies.length:0})</span></div>
-      <div style="${bodyStyle}">${s2Body}</div></div>`;
-  }
 
   if (data.hasFortiConfig) {
     const shadows = data.shadows;

@@ -512,57 +512,6 @@ app.get('/api/risk-analysis', (req, res) => {
 
   const hasFortiConfig = !!(s.fortiConfig);
 
-  // ── Zombies ──
-  let zombies = null;
-  if (s.fortiConfig && Array.isArray(s.fortiConfig.existingPolicies)) {
-    const seenIds = new Set();
-    for (const p of policies) {
-      for (const id of (p.policyIds || [])) seenIds.add(String(id));
-    }
-
-    // Helper: normalize srcaddr/dstaddr to a lowercase Set for overlap detection
-    const toAddrSet = (arr) => new Set(
-      (Array.isArray(arr) ? arr : []).map(x => String(x).toLowerCase().trim()).filter(Boolean)
-    );
-
-    // Pre-sort accept policies by ID for shadow detection
-    const sortedAccept = s.fortiConfig.existingPolicies
-      .filter(ep => ep.action === 'accept' && ep.status !== 'disable')
-      .sort((a, b) => Number(a.policyid) - Number(b.policyid));
-
-    zombies = s.fortiConfig.existingPolicies
-      .filter(ep => ep.status !== 'disable' && !seenIds.has(String(ep.policyid)))
-      .map(ep => {
-        const zSrc = toAddrSet(ep.srcaddr);
-        const zDst = toAddrSet(ep.dstaddr);
-
-        // Find up to 3 higher-priority (lower ID) policies that likely intercept this traffic
-        const shadowedBy = sortedAccept
-          .filter(c => {
-            if (Number(c.policyid) >= Number(ep.policyid)) return false;
-            const cSrc = toAddrSet(c.srcaddr);
-            const cDst = toAddrSet(c.dstaddr);
-            const srcMatch = cSrc.has('all') || [...zSrc].some(s => cSrc.has(s));
-            const dstMatch = cDst.has('all') || [...zDst].some(d => cDst.has(d));
-            return srcMatch && dstMatch;
-          })
-          .slice(0, 3)
-          .map(c => ({ id: c.policyid, name: c.name || `Policy ${c.policyid}` }));
-
-        return {
-          id:         ep.policyid,
-          name:       ep.name    || '',
-          srcaddr:    Array.isArray(ep.srcaddr) ? ep.srcaddr : [],
-          dstaddr:    Array.isArray(ep.dstaddr) ? ep.dstaddr : [],
-          service:    Array.isArray(ep.service) ? ep.service : [],
-          srcintf:    Array.isArray(ep.srcintf) ? ep.srcintf : [],
-          dstintf:    Array.isArray(ep.dstintf) ? ep.dstintf : [],
-          action:     ep.action  || '',
-          shadowedBy,
-        };
-      });
-  }
-
   // ── Shadows (overly permissive policies) ──
   let shadows = null;
   if (s.fortiConfig && Array.isArray(s.fortiConfig.existingPolicies)) {
@@ -609,7 +558,7 @@ app.get('/api/risk-analysis', (req, res) => {
       });
   }
 
-  res.json({ riskPolicies, zombies, shadows, hasFortiConfig });
+  res.json({ riskPolicies, shadows, hasFortiConfig });
 });
 
 // GET /api/export/flows — CSV download of (filtered) flows
