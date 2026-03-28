@@ -355,7 +355,7 @@ function renderUpload() {
         <div class="drop-sub">
           Formats supportés : <em>.log</em> · <em>.txt</em> · <em>.csv</em> · <em>.xlsx</em> · <em>.gz</em> · <em>.zip</em><br>
           FortiGate syslog (key=value) et exports FortiAnalyzer (CSV / XLSX)<br>
-          Fichiers jusqu'à 300 Mo — parsing streamé côté serveur
+          Fichiers jusqu'à 400 Mo — parsing streamé côté serveur
         </div>
         <br>
         <button class="upload-btn" id="btn-pick">Choisir un fichier</button>

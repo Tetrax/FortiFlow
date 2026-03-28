@@ -78,8 +78,9 @@ const HEADER_MAP = {
   'destination interface': 'dstintf', 'dst interface': 'dstintf', egressintf: 'dstintf',
 
   // Policy
-  policyid: 'policyid', policy_id: 'policyid', policyname: 'policyid',
-  'policy id': 'policyid', 'policy name': 'policyid', ruleid: 'policyid',
+  policyid: 'policyid', policy_id: 'policyid', ruleid: 'policyid',
+  'policy id': 'policyid',
+  policyname: 'policyname', 'policy name': 'policyname', rulename: 'policyname',
 
   // Bytes
   sentbyte: 'sentbyte', sent_byte: 'sentbyte', sentbytes: 'sentbyte',
@@ -147,9 +148,10 @@ function extractFlow(fields) {
     proto,
     action:   (fields.action  || '').toLowerCase().trim(),
     service,
-    srcintf:  fields.srcintf  || '',
-    dstintf:  fields.dstintf  || '',
-    policyid: fields.policyid || '',
+    srcintf:    fields.srcintf    || '',
+    dstintf:    fields.dstintf    || '',
+    policyid:   fields.policyid   || '',
+    policyname: fields.policyname || '',
     date:     fields.date     || '',
     time:     fields.time     || '',
     sentbyte: parseInt(fields.sentbyte || 0, 10) || 0,
@@ -161,13 +163,13 @@ function extractFlow(fields) {
 
 function aggregateFlow(flowMap, flow) {
   if (!flow.srcip || !flow.dstip) return false;
-  const key = `${flow.srcip}|${flow.dstip}|${flow.dstport}|${flow.proto}|${flow.action}|${flow.service}|${flow.srcintf}`;
+  const key = `${flow.srcip}|${flow.dstip}|${flow.dstport}|${flow.proto}|${flow.action}|${flow.service}|${flow.srcintf}|${flow.dstintf}|${flow.policyid}`;
   if (!flowMap.has(key)) {
     flowMap.set(key, {
       srcip: flow.srcip, dstip: flow.dstip,
       srcport: flow.srcport, dstport: flow.dstport,
       proto: flow.proto, action: flow.action, service: flow.service,
-      srcintf: flow.srcintf, dstintf: flow.dstintf, policyid: flow.policyid,
+      srcintf: flow.srcintf, dstintf: flow.dstintf, policyid: flow.policyid, policyname: flow.policyname,
       count: 0, sentBytes: 0, rcvdBytes: 0,
     });
   }

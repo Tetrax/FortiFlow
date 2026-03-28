@@ -635,7 +635,7 @@ app.get('/api/export/workspace', (req, res) => {
   let exportData = s.data;
   if (!exportData.flows) {
     try {
-      const cachePath = require('path').join(__dirname, 'sessions-cache', `${s.id}.json`);
+      const cachePath = require('path').join(__dirname, '..', '..', 'sessions-cache', `${s.id}.json`);
       const cached    = JSON.parse(require('fs').readFileSync(cachePath, 'utf8'));
       if (cached?.data?.flows) {
         exportData = { ...s.data, flows: cached.data.flows };
@@ -696,7 +696,7 @@ app.post('/api/workspaces', express.json({ limit: '10kb' }), async (req, res) =>
   let exportData = s.data;
   if (!exportData?.flows) {
     try {
-      const cachePath = path.join(__dirname, 'sessions-cache', `${s.id}.json`);
+      const cachePath = path.join(__dirname, '..', '..', 'sessions-cache', `${s.id}.json`);
       const cached = JSON.parse(fs.promises ? await require('fs').promises.readFile(cachePath, 'utf8') : require('fs').readFileSync(cachePath, 'utf8'));
       if (cached?.data?.flows) exportData = { ...s.data, flows: cached.data.flows };
     } catch {}
