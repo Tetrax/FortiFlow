@@ -141,3 +141,133 @@ Un fichier `sample_traffic.log` est inclus pour tester rapidement :
 ```bash
 python fortiflow.py sample_traffic.log --mode policy --subnet 24 --verbose
 ```
+
+---
+
+## Déploiement Docker
+
+### Lancer en local (test rapide)
+
+```bash
+docker compose up --build -d
+# Interface disponible sur http://localhost:3737
+```
+
+### Arrêter / relancer
+
+```bash
+docker compose down        # arrêt propre (données conservées dans ./data/)
+docker compose up -d       # redémarrage sans rebuild
+docker compose up --build -d  # rebuild + redémarrage (après mise à jour du code)
+```
+
+Les données persistantes (sessions, workspaces) sont stockées dans `./data/` à la racine du projet.
+
+---
+
+## Migration vers une autre machine
+
+### 1. Prérequis sur la machine cible (Debian)
+
+```bash
+# Docker Engine + Compose plugin
+apt update && apt install -y ca-certificates curl
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
+  https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+  > /etc/apt/sources.list.d/docker.list
+apt update && apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+# Vérification
+docker --version && docker compose version
+```
+
+### 2. Transférer le projet
+
+```bash
+# Sur la machine source — créer une archive du projet
+cd /home/tetrax/workspace
+tar --exclude='FortiFlow/app/web/node_modules' \
+    --exclude='FortiFlow/.git' \
+    --exclude='FortiFlow/app/web/uploads' \
+    -czf fortiflow-transfer.tar.gz FortiFlow/
+
+# Copier vers la machine cible
+scp fortiflow-transfer.tar.gz user@IP_CIBLE:/opt/
+```
+
+### 3. Déployer sur la machine cible
+
+```bash
+# Sur la machine cible
+cd /opt
+tar -xzf fortiflow-transfer.tar.gz
+cd FortiFlow
+
+# Construire l'image et démarrer
+docker compose up --build -d
+
+# Vérifier que le conteneur tourne
+docker compose ps
+docker compose logs -f
+```
+
+L'interface est accessible sur `http://IP_CIBLE:3737`.
+
+### 4. Migrer les données existantes (optionnel)
+
+Si tu veux conserver les sessions et workspaces de l'ancienne machine :
+
+```bash
+# Sur la machine source
+tar -czf fortiflow-data.tar.gz FortiFlow/data/
+
+# Copier vers la machine cible
+scp fortiflow-data.tar.gz user@IP_CIBLE:/opt/
+
+# Sur la machine cible (avant de démarrer Docker)
+cd /opt
+tar -xzf fortiflow-data.tar.gz
+```
+
+### 5. HTTPS avec Let's Encrypt (optionnel)
+
+```bash
+# Installer certbot
+apt install -y certbot
+
+# Obtenir un certificat (port 80 doit être accessible)
+certbot certonly --standalone -d fortiflow.mon-domaine.com
+
+# Dans docker-compose.yml, décommenter les lignes SSL :
+#   - DOMAIN=fortiflow.mon-domaine.com
+#   - SSL_KEY=/certs/privkey.pem
+#   - SSL_CERT=/certs/fullchain.pem
+#   - /etc/letsencrypt:/certs:ro
+
+docker compose up -d
+```
+
+### 6. Reverse proxy Nginx (recommandé en entreprise)
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name fortiflow.mon-domaine.com;
+
+    ssl_certificate     /etc/letsencrypt/live/fortiflow.mon-domaine.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/fortiflow.mon-domaine.com/privkey.pem;
+
+    client_max_body_size 400M;
+
+    location / {
+        proxy_pass         http://localhost:3737;
+        proxy_http_version 1.1;
+        proxy_set_header   Upgrade $http_upgrade;
+        proxy_set_header   Connection "upgrade";
+        proxy_set_header   Host $host;
+        proxy_read_timeout 300s;
+    }
+}
+```
