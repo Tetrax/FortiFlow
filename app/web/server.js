@@ -79,6 +79,26 @@ app.use((req, res, next) => {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+// Extracts sorted (most-specific first) subnet list from fortiConfig.addresses,
+// used to re-analyze flows with real CIDR boundaries instead of hardcoded /24.
+function extractKnownSubnets(fortiConfig) {
+  const addresses = fortiConfig?.addresses || {};
+  const subnets = [];
+  for (const addr of Object.values(addresses)) {
+    if (!addr.cidr || !addr.cidr.includes('/')) continue;
+    const slash = addr.cidr.lastIndexOf('/');
+    const ip  = addr.cidr.slice(0, slash);
+    const prefix = parseInt(addr.cidr.slice(slash + 1), 10);
+    if (isNaN(prefix) || prefix < 0 || prefix > 32) continue;
+    const parts = ip.split('.');
+    if (parts.length !== 4) continue;
+    const ipInt = parts.reduce((acc, p) => (acc * 256) + parseInt(p, 10), 0);
+    const mask  = prefix === 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) >>> 0;
+    subnets.push({ prefix, networkInt: (ipInt & mask) >>> 0, cidr: addr.cidr });
+  }
+  return subnets.sort((a, b) => b.prefix - a.prefix);
+}
+
 function requireSession(req, res) {
   const id = req.query.session || req.params.session;
   const s  = getSession(id);
@@ -1004,6 +1024,19 @@ app.post('/api/deploy/config-upload', upload.single('conffile'), async (req, res
     const fortiConfig = parseFortiConfig(text);
     s.fortiConfig = fortiConfig;
     setFortiConfig(s.id, fortiConfig);
+
+    // Re-analyze with real CIDR subnets from the FortiGate config (before freeing flows).
+    // This replaces the /24 fallback grouping with actual subnet boundaries.
+    if (s.data?.flows?.length > 0) {
+      const knownSubnets = extractKnownSubnets(fortiConfig);
+      if (knownSubnets.length > 0) {
+        const meta = s.data.meta;
+        const newAnalysis = buildAnalysis(s.data.flows, knownSubnets);
+        newAnalysis.meta = meta;
+        s.data = newAnalysis;
+        setSessionData(s.id, newAnalysis);
+      }
+    }
 
     // Free raw flows array — no longer needed once we move to deploy stage.
     // Aggregated data (subnets, policies, stats, matrix) is kept.

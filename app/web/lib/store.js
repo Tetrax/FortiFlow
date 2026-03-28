@@ -32,7 +32,12 @@ function _save(id) {
 
 function _loadAll() {
   try {
-    const files = fs.readdirSync(CACHE_DIR).filter(f => f.endsWith('.json'));
+    const all = fs.readdirSync(CACHE_DIR);
+    // Clean up orphaned .tmp files from interrupted writes
+    all.filter(f => f.endsWith('.tmp')).forEach(f => {
+      try { fs.unlinkSync(path.join(CACHE_DIR, f)); } catch { /* ignore */ }
+    });
+    const files = all.filter(f => f.endsWith('.json'));
     const cutoff = Date.now() - SESSION_TTL_MS;
     for (const f of files) {
       try {

@@ -125,7 +125,11 @@ function networkAddress(ip, prefix) {
 function fortiSubnetToCIDR(subnet) {
   if (!subnet) return null;
   const parts = subnet.trim().split(/\s+/);
-  if (parts.length === 2) return `${parts[0]}/${maskBits(parts[1])}`;
+  if (parts.length === 2) {
+    const bits = maskBits(parts[1]);
+    if (bits === null) return null;
+    return `${parts[0]}/${bits}`;
+  }
   if (parts.length === 1 && parts[0].includes('/')) return parts[0];
   return null;
 }
@@ -134,7 +138,8 @@ function parsePorts(portrange) {
   if (!portrange) return [];
   const ports = [];
   for (const part of portrange.trim().split(/\s+/)) {
-    const [a, b] = part.split('-').map(Number);
+    const clean = part.split(':')[0]; // strip :src_portrange suffix (FortiGate format)
+    const [a, b] = clean.split('-').map(Number);
     if (b && !isNaN(b)) { for (let i = a; i <= Math.min(b, a + 10000); i++) ports.push(i); }
     else if (a && !isNaN(a)) ports.push(a);
   }

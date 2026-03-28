@@ -1180,12 +1180,13 @@ function consolidatePortRanges(ports) {
   const sorted = [...ports].sort((a, b) => a - b);
   const ranges = [];
   let start = sorted[0], prev = sorted[0];
-  for (let i = 1; i <= sorted.length; i++) {
+  for (let i = 1; i < sorted.length; i++) {
     const cur = sorted[i];
     if (cur === prev + 1) { prev = cur; continue; }
     ranges.push(start === prev ? String(start) : `${start}-${prev}`);
     start = cur; prev = cur;
   }
+  ranges.push(start === prev ? String(start) : `${start}-${prev}`);
   return ranges.join(' ');
 }
 

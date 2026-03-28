@@ -5717,7 +5717,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     const srcMode = p._srcMode || (p._use32Src ? 'hosts' : 'subnet');
     const srcModeBadge = srcMode === 'hosts' ? ` <span class="dst-count-badge">/32</span>` : '';
 
-    const rowStatus = isPolicyComplete(p) ? 'ok' : 'warn';
+    const rowStatus = (p._disabled || isPolicyComplete(p)) ? 'ok' : 'warn';
     const statusTitle = (p.analysis?.missingFields || []).join(', ') || '';
     return `
       <tr class="deploy-policy-row ${isAgg ? 'seq-row' : ''} ${p._action === 'deny' ? 'policy-deny-row' : ''} ${p._disabled ? 'policy-disabled-row' : ''}" data-idx="${idx}" ${isAgg ? `data-seq-members="${p._sequenceMembers.join(',')}"` : ''}>
