@@ -515,59 +515,95 @@ app.get('/api/risk-analysis', (req, res) => {
   // ── Zombies ──
   let zombies = null;
   if (s.fortiConfig && Array.isArray(s.fortiConfig.existingPolicies)) {
-    // Collect all policyIds seen in flows
     const seenIds = new Set();
     for (const p of policies) {
       for (const id of (p.policyIds || [])) seenIds.add(String(id));
     }
+
+    // Helper: normalize srcaddr/dstaddr to a lowercase Set for overlap detection
+    const toAddrSet = (arr) => new Set(
+      (Array.isArray(arr) ? arr : []).map(x => String(x).toLowerCase().trim()).filter(Boolean)
+    );
+
+    // Pre-sort accept policies by ID for shadow detection
+    const sortedAccept = s.fortiConfig.existingPolicies
+      .filter(ep => ep.action === 'accept' && ep.status !== 'disable')
+      .sort((a, b) => Number(a.policyid) - Number(b.policyid));
+
     zombies = s.fortiConfig.existingPolicies
       .filter(ep => ep.status !== 'disable' && !seenIds.has(String(ep.policyid)))
-      .map(ep => ({
-        id:       ep.policyid,
-        name:     ep.name     || '',
-        srcaddr:  ep.srcaddr  || '',
-        dstaddr:  ep.dstaddr  || '',
-        service:  ep.service  || '',
-        srcintf:  ep.srcintf  || '',
-        dstintf:  ep.dstintf  || '',
-        action:   ep.action   || '',
-      }));
+      .map(ep => {
+        const zSrc = toAddrSet(ep.srcaddr);
+        const zDst = toAddrSet(ep.dstaddr);
+
+        // Find up to 3 higher-priority (lower ID) policies that likely intercept this traffic
+        const shadowedBy = sortedAccept
+          .filter(c => {
+            if (Number(c.policyid) >= Number(ep.policyid)) return false;
+            const cSrc = toAddrSet(c.srcaddr);
+            const cDst = toAddrSet(c.dstaddr);
+            const srcMatch = cSrc.has('all') || [...zSrc].some(s => cSrc.has(s));
+            const dstMatch = cDst.has('all') || [...zDst].some(d => cDst.has(d));
+            return srcMatch && dstMatch;
+          })
+          .slice(0, 3)
+          .map(c => ({ id: c.policyid, name: c.name || `Policy ${c.policyid}` }));
+
+        return {
+          id:         ep.policyid,
+          name:       ep.name    || '',
+          srcaddr:    Array.isArray(ep.srcaddr) ? ep.srcaddr : [],
+          dstaddr:    Array.isArray(ep.dstaddr) ? ep.dstaddr : [],
+          service:    Array.isArray(ep.service) ? ep.service : [],
+          srcintf:    Array.isArray(ep.srcintf) ? ep.srcintf : [],
+          dstintf:    Array.isArray(ep.dstintf) ? ep.dstintf : [],
+          action:     ep.action  || '',
+          shadowedBy,
+        };
+      });
   }
 
   // ── Shadows (overly permissive policies) ──
   let shadows = null;
   if (s.fortiConfig && Array.isArray(s.fortiConfig.existingPolicies)) {
+    const ifaces = s.fortiConfig.interfaces || {};
+
     shadows = s.fortiConfig.existingPolicies
       .filter(ep => {
         if (ep.action !== 'accept') return false;
         if (ep.status === 'disable') return false;
-        const srcHasAll = (Array.isArray(ep.srcaddr) ? ep.srcaddr : [ep.srcaddr || ''])
-          .some(a => String(a).toLowerCase() === 'all');
-        const dstHasAll = (Array.isArray(ep.dstaddr) ? ep.dstaddr : [ep.dstaddr || ''])
-          .some(a => String(a).toLowerCase() === 'all');
-        const svcHasAll = (Array.isArray(ep.service) ? ep.service : [ep.service || ''])
-          .some(a => String(a).toUpperCase() === 'ALL');
+        const srcArr = Array.isArray(ep.srcaddr) ? ep.srcaddr : [];
+        const dstArr = Array.isArray(ep.dstaddr) ? ep.dstaddr : [];
+        const svcArr = Array.isArray(ep.service) ? ep.service : [];
+        const srcHasAll = srcArr.some(a => String(a).toLowerCase() === 'all');
+        const dstHasAll = dstArr.some(a => String(a).toLowerCase() === 'all');
+        const svcHasAll = svcArr.some(a => String(a).toUpperCase() === 'ALL');
+
+        // Skip WAN policies where dstaddr=all is expected (normal internet access rule)
+        if (dstHasAll && !srcHasAll && !svcHasAll) {
+          const dstintfs = Array.isArray(ep.dstintf) ? ep.dstintf : [];
+          const allDstWan = dstintfs.length > 0 && dstintfs.every(i => ifaces[i]?.isWan);
+          if (allDstWan) return false;
+        }
+
         return srcHasAll || dstHasAll || svcHasAll;
       })
       .map(ep => {
-        const srcHasAll = (Array.isArray(ep.srcaddr) ? ep.srcaddr : [ep.srcaddr || ''])
-          .some(a => String(a).toLowerCase() === 'all');
-        const dstHasAll = (Array.isArray(ep.dstaddr) ? ep.dstaddr : [ep.dstaddr || ''])
-          .some(a => String(a).toLowerCase() === 'all');
-        const svcHasAll = (Array.isArray(ep.service) ? ep.service : [ep.service || ''])
-          .some(a => String(a).toUpperCase() === 'ALL');
+        const srcArr = Array.isArray(ep.srcaddr) ? ep.srcaddr : [];
+        const dstArr = Array.isArray(ep.dstaddr) ? ep.dstaddr : [];
+        const svcArr = Array.isArray(ep.service) ? ep.service : [];
         const reasons = [];
-        if (srcHasAll) reasons.push('srcaddr=all');
-        if (dstHasAll) reasons.push('dstaddr=all');
-        if (svcHasAll) reasons.push('service=ALL');
+        if (srcArr.some(a => String(a).toLowerCase() === 'all')) reasons.push('srcaddr=all');
+        if (dstArr.some(a => String(a).toLowerCase() === 'all')) reasons.push('dstaddr=all');
+        if (svcArr.some(a => String(a).toUpperCase() === 'ALL'))  reasons.push('service=ALL');
         return {
           id:      ep.policyid,
           name:    ep.name    || '',
-          srcaddr: Array.isArray(ep.srcaddr) ? ep.srcaddr.join(', ') : (ep.srcaddr || ''),
-          dstaddr: Array.isArray(ep.dstaddr) ? ep.dstaddr.join(', ') : (ep.dstaddr || ''),
-          service: Array.isArray(ep.service) ? ep.service.join(', ') : (ep.service || ''),
-          srcintf: ep.srcintf || '',
-          dstintf: ep.dstintf || '',
+          srcaddr: srcArr,
+          dstaddr: dstArr,
+          service: svcArr,
+          srcintf: Array.isArray(ep.srcintf) ? ep.srcintf : [],
+          dstintf: Array.isArray(ep.dstintf) ? ep.dstintf : [],
           reason:  reasons.join(', '),
         };
       });

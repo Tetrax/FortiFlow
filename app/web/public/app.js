@@ -4508,14 +4508,24 @@ function renderRiskPanel(data) {
       s2Body = `<div style="color:var(--success,#27ae60);padding:8px 0">Aucune policy zombie détectée ✓</div>`;
     } else {
       s2Body = `<table style="${tableStyle}"><thead><tr>
-        <th style="${thStyle}">ID</th><th style="${thStyle}">Nom</th><th style="${thStyle}">Src</th>
-        <th style="${thStyle}">Dst</th><th style="${thStyle}">Service</th><th style="${thStyle}">Action</th>
+        <th style="${thStyle}">ID</th><th style="${thStyle}">Nom</th>
+        <th style="${thStyle}">Src intf</th><th style="${thStyle}">Src addr</th>
+        <th style="${thStyle}">Dst intf</th><th style="${thStyle}">Dst addr</th>
+        <th style="${thStyle}">Service</th><th style="${thStyle}">Masquée par</th>
       </tr></thead><tbody>`;
       for (const z of zombies) {
+        const shadowedByHtml = (z.shadowedBy || []).length
+          ? escHtml(z.shadowedBy.map(p => `#${p.id}${p.name ? ' ' + p.name : ''}`).join(', '))
+          : '<span style="color:var(--text2);font-size:10px">—</span>';
         s2Body += `<tr>
-          <td style="${tdStyle}">${escHtml(String(z.id))}</td><td style="${tdStyle}">${escHtml(z.name)}</td>
-          <td style="${tdStyle}">${escHtml((z.srcaddr||[]).filter(Boolean).join(', '))}</td><td style="${tdStyle}">${escHtml((z.dstaddr||[]).filter(Boolean).join(', '))}</td>
-          <td style="${tdStyle}">${escHtml((z.service||[]).filter(Boolean).join(', '))}</td><td style="${tdStyle}">${escHtml(z.action)}</td>
+          <td style="${tdStyle}">${escHtml(String(z.id))}</td>
+          <td style="${tdStyle}">${escHtml(z.name)}</td>
+          <td style="${tdStyle};font-family:var(--mono);font-size:10px">${escHtml((z.srcintf||[]).filter(Boolean).join(', '))}</td>
+          <td style="${tdStyle}">${escHtml((z.srcaddr||[]).filter(Boolean).join(', '))}</td>
+          <td style="${tdStyle};font-family:var(--mono);font-size:10px">${escHtml((z.dstintf||[]).filter(Boolean).join(', '))}</td>
+          <td style="${tdStyle}">${escHtml((z.dstaddr||[]).filter(Boolean).join(', '))}</td>
+          <td style="${tdStyle}">${escHtml((z.service||[]).filter(Boolean).join(', '))}</td>
+          <td style="${tdStyle};font-size:10px;color:var(--warn,#f39c12)">${shadowedByHtml}</td>
         </tr>`;
       }
       s2Body += `</tbody></table>`;
@@ -4534,14 +4544,21 @@ function renderRiskPanel(data) {
       s3Body = `<div style="color:var(--success,#27ae60);padding:8px 0">Aucune policy trop permissive détectée ✓</div>`;
     } else {
       s3Body = `<table style="${tableStyle}"><thead><tr>
-        <th style="${thStyle}">ID</th><th style="${thStyle}">Nom</th><th style="${thStyle}">Src</th>
-        <th style="${thStyle}">Dst</th><th style="${thStyle}">Service</th><th style="${thStyle}">Raison</th>
+        <th style="${thStyle}">ID</th><th style="${thStyle}">Nom</th>
+        <th style="${thStyle}">Src intf</th><th style="${thStyle}">Src addr</th>
+        <th style="${thStyle}">Dst intf</th><th style="${thStyle}">Dst addr</th>
+        <th style="${thStyle}">Service</th><th style="${thStyle}">Raison</th>
       </tr></thead><tbody>`;
       for (const sh of shadows) {
         s3Body += `<tr>
-          <td style="${tdStyle}">${escHtml(String(sh.id))}</td><td style="${tdStyle}">${escHtml(sh.name)}</td>
-          <td style="${tdStyle}">${escHtml((sh.srcaddr||[]).filter(Boolean).join(', '))}</td><td style="${tdStyle}">${escHtml((sh.dstaddr||[]).filter(Boolean).join(', '))}</td>
-          <td style="${tdStyle}">${escHtml((sh.service||[]).filter(Boolean).join(', '))}</td><td style="${tdStyle}">${escHtml(sh.reason)}</td>
+          <td style="${tdStyle}">${escHtml(String(sh.id))}</td>
+          <td style="${tdStyle}">${escHtml(sh.name)}</td>
+          <td style="${tdStyle};font-family:var(--mono);font-size:10px">${escHtml((sh.srcintf||[]).filter(Boolean).join(', '))}</td>
+          <td style="${tdStyle}">${escHtml((sh.srcaddr||[]).filter(Boolean).join(', '))}</td>
+          <td style="${tdStyle};font-family:var(--mono);font-size:10px">${escHtml((sh.dstintf||[]).filter(Boolean).join(', '))}</td>
+          <td style="${tdStyle}">${escHtml((sh.dstaddr||[]).filter(Boolean).join(', '))}</td>
+          <td style="${tdStyle}">${escHtml((sh.service||[]).filter(Boolean).join(', '))}</td>
+          <td style="${tdStyle};color:var(--warn,#f39c12)">${escHtml(sh.reason)}</td>
         </tr>`;
       }
       s3Body += `</tbody></table>`;
