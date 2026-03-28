@@ -1700,6 +1700,7 @@ const deployState = {
   collapsedGroups: new Set(),      // collapsed group keys for interface-pair view
   wizardStep:    1,                // 1: config upload, 2: routes, 3: interfaces, 4: policies
   use32Global:   false,            // global /32 mode (use real hosts instead of /24)
+  riskPanelOpen: false,
   sortCol:       null,             // active sort column key
   sortDir:       'desc',           // 'asc' | 'desc'
   availableProfiles: null,         // { antivirus, webfilter, ips, sslSsh } chargés depuis l'API
@@ -3313,6 +3314,7 @@ async function deploy() {
               <div class="dropdown-item ${deployState.viewMode === 'sequence' ? 'active' : ''}" data-view-mode="sequence">⊞ Séquences</div>
             </div>
           </div>
+          <button class="btn-sm ${deployState.riskPanelOpen ? 'btn-accent' : ''}" id="btn-risk-toggle">⚠ Risques</button>
           <span class="toolbar-sep"></span>
           <span style="margin-left:auto"></span>
           <input type="text" id="deploy-search" class="deploy-search-input" placeholder="Rechercher (IP, subnet, service, srcintf:X, dstintf:Y...)" value="${escHtml(deployState.searchFilter || '')}" title="Filtrer par texte libre. Syntaxe spéciale : srcintf:NOM ou dstintf:NOM pour filtrer par interface exacte">
@@ -3327,6 +3329,7 @@ async function deploy() {
           <div class="deploy-legend-item"><span class="deploy-legend-dot auto"></span> Auto-détecté</div>
           <span style="margin-left:auto;font-size:10px;color:var(--text2)">Cliquez sur une ligne pour la personnaliser</span>
         </div>
+        <div id="deploy-risk-panel" style="display:none;padding:0 4px 12px"></div>
         <div class="deploy-step-body" id="deploy-policy-body">
           <div class="empty-state" style="padding:24px">Cliquez sur <strong>Analyser les policies</strong> pour commencer</div>
         </div>
@@ -3561,6 +3564,17 @@ async function deploy() {
       deployState.collapsedGroups = new Set();
       document.querySelectorAll('.dropdown-wrap.open').forEach(w => w.classList.remove('open'));
       if (deployState.analyzed) renderDeployPolicies(filterDeployPolicies(), true);
+      return;
+    }
+
+    if (e.target.id === 'btn-risk-toggle') {
+      deployState.riskPanelOpen = !deployState.riskPanelOpen;
+      const panel = el('deploy-risk-panel');
+      const body  = el('deploy-policy-body');
+      panel.style.display = deployState.riskPanelOpen ? '' : 'none';
+      body.style.display  = deployState.riskPanelOpen ? 'none' : '';
+      e.target.classList.toggle('btn-accent', deployState.riskPanelOpen);
+      if (deployState.riskPanelOpen) loadRiskPanel();
       return;
     }
   });
@@ -4443,6 +4457,120 @@ function mergeByPolicyId(policies) {
   }
 
   return merged;
+}
+
+// ── Analyse de risques ──
+function renderRiskPanel(data) {
+  const LEVEL_BADGE = {
+    critical: `<span style="background:#c0392b;color:#fff;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700">CRITIQUE</span>`,
+    high:     `<span style="background:#e67e22;color:#fff;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700">ÉLEVÉ</span>`,
+    medium:   `<span style="background:#f1c40f;color:#222;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700">MOYEN</span>`,
+  };
+  const sectionStyle = `background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:10px;overflow:hidden`;
+  const headerStyle  = `padding:8px 12px;font-weight:600;font-size:12px;cursor:pointer;display:flex;align-items:center;gap:6px;user-select:none;border-bottom:1px solid var(--border)`;
+  const bodyStyle    = `padding:8px 12px`;
+  const thStyle      = `text-align:left;padding:4px 8px;font-size:10px;font-weight:600;color:var(--text2);border-bottom:1px solid var(--border)`;
+  const tdStyle      = `padding:4px 8px;font-size:11px;border-bottom:1px solid var(--border)`;
+  const tableStyle   = `width:100%;border-collapse:collapse`;
+  let html = '';
+
+  const rp = data.riskPolicies || [];
+  let s1Body = '';
+  if (rp.length === 0) {
+    s1Body = `<div style="color:var(--success,#27ae60);padding:8px 0">Aucun flux à risque détecté ✓</div>`;
+  } else {
+    s1Body = `<table style="${tableStyle}"><thead><tr>
+      <th style="${thStyle}">Src subnet</th><th style="${thStyle}">Destination</th>
+      <th style="${thStyle}">Ports à risque</th><th style="${thStyle}">Niveau</th><th style="${thStyle}">Sessions</th>
+    </tr></thead><tbody>`;
+    for (const row of rp) {
+      const portsDesc = row.ports.map(p => `${escHtml(String(p.port))} (${escHtml(p.label)})`).join('<br>');
+      s1Body += `<tr>
+        <td style="${tdStyle}">${escHtml(row.srcSubnet||'')}</td>
+        <td style="${tdStyle}">${escHtml(row.dstTarget||'')} <span style="font-size:10px;color:var(--text2)">${escHtml(row.dstType||'')}</span></td>
+        <td style="${tdStyle}">${portsDesc}</td>
+        <td style="${tdStyle}">${LEVEL_BADGE[row.level]||escHtml(row.level)}</td>
+        <td style="${tdStyle}">${escHtml(String(row.sessions))}</td>
+      </tr>`;
+    }
+    s1Body += `</tbody></table>`;
+  }
+  html += `<div style="${sectionStyle}">
+    <div class="risk-section-header" style="${headerStyle}"><span class="risk-chevron">⌄</span><span>⚠ ${rp.length} flux à risque</span></div>
+    <div style="${bodyStyle}">${s1Body}</div></div>`;
+
+  if (data.hasFortiConfig) {
+    const zombies = data.zombies;
+    let s2Body = '';
+    if (!zombies) {
+      s2Body = `<div style="color:var(--text2);padding:8px 0">Chargez une config FortiGate pour activer cette analyse</div>`;
+    } else if (zombies.length === 0) {
+      s2Body = `<div style="color:var(--success,#27ae60);padding:8px 0">Aucune policy zombie détectée ✓</div>`;
+    } else {
+      s2Body = `<table style="${tableStyle}"><thead><tr>
+        <th style="${thStyle}">ID</th><th style="${thStyle}">Nom</th><th style="${thStyle}">Src</th>
+        <th style="${thStyle}">Dst</th><th style="${thStyle}">Service</th><th style="${thStyle}">Action</th>
+      </tr></thead><tbody>`;
+      for (const z of zombies) {
+        s2Body += `<tr>
+          <td style="${tdStyle}">${escHtml(String(z.id))}</td><td style="${tdStyle}">${escHtml(z.name)}</td>
+          <td style="${tdStyle}">${escHtml(z.srcaddr)}</td><td style="${tdStyle}">${escHtml(z.dstaddr)}</td>
+          <td style="${tdStyle}">${escHtml(z.service)}</td><td style="${tdStyle}">${escHtml(z.action)}</td>
+        </tr>`;
+      }
+      s2Body += `</tbody></table>`;
+    }
+    html += `<div style="${sectionStyle}">
+      <div class="risk-section-header" style="${headerStyle}"><span class="risk-chevron">⌄</span><span>🧟 Policies zombies (${zombies?zombies.length:0})</span></div>
+      <div style="${bodyStyle}">${s2Body}</div></div>`;
+  }
+
+  if (data.hasFortiConfig) {
+    const shadows = data.shadows;
+    let s3Body = '';
+    if (!shadows) {
+      s3Body = `<div style="color:var(--text2);padding:8px 0">Chargez une config FortiGate pour activer cette analyse</div>`;
+    } else if (shadows.length === 0) {
+      s3Body = `<div style="color:var(--success,#27ae60);padding:8px 0">Aucune policy trop permissive détectée ✓</div>`;
+    } else {
+      s3Body = `<table style="${tableStyle}"><thead><tr>
+        <th style="${thStyle}">ID</th><th style="${thStyle}">Nom</th><th style="${thStyle}">Src</th>
+        <th style="${thStyle}">Dst</th><th style="${thStyle}">Service</th><th style="${thStyle}">Raison</th>
+      </tr></thead><tbody>`;
+      for (const sh of shadows) {
+        s3Body += `<tr>
+          <td style="${tdStyle}">${escHtml(String(sh.id))}</td><td style="${tdStyle}">${escHtml(sh.name)}</td>
+          <td style="${tdStyle}">${escHtml(sh.srcaddr)}</td><td style="${tdStyle}">${escHtml(sh.dstaddr)}</td>
+          <td style="${tdStyle}">${escHtml(sh.service)}</td><td style="${tdStyle}">${escHtml(sh.reason)}</td>
+        </tr>`;
+      }
+      s3Body += `</tbody></table>`;
+    }
+    html += `<div style="${sectionStyle}">
+      <div class="risk-section-header" style="${headerStyle}"><span class="risk-chevron">⌄</span><span>👻 Policies trop permissives (${shadows?shadows.length:0})</span></div>
+      <div style="${bodyStyle}">${s3Body}</div></div>`;
+  }
+
+  return html;
+}
+
+async function loadRiskPanel() {
+  const panel = el('deploy-risk-panel');
+  panel.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text2)">Chargement…</div>';
+  try {
+    const data = await api('/api/risk-analysis');
+    panel.innerHTML = renderRiskPanel(data);
+    panel.querySelectorAll('.risk-section-header').forEach(h => {
+      h.addEventListener('click', () => {
+        const body = h.nextElementSibling;
+        const isOpen = body.style.display !== 'none';
+        body.style.display = isOpen ? 'none' : '';
+        h.querySelector('.risk-chevron').textContent = isOpen ? '›' : '⌄';
+      });
+    });
+  } catch(e) {
+    panel.innerHTML = `<div style="padding:20px;color:var(--error)">Erreur : ${escHtml(e.message)}</div>`;
+  }
 }
 
 // ── Fusion par service : policies partageant le même ensemble de services

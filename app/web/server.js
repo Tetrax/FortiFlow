@@ -424,6 +424,158 @@ app.get('/api/stats', (req, res) => {
   res.json({ stats: s.data.stats, meta: s.data.meta });
 });
 
+// GET /api/risk-analysis — risk scoring, zombie policies, shadow policies
+app.get('/api/risk-analysis', (req, res) => {
+  const s = requireSession(req, res);
+  if (!s) return;
+
+  // ── Port risk definitions ──
+  const ALWAYS_CRITICAL = {
+    21: 'FTP — données en clair',
+    23: 'Telnet — données en clair',
+    69: 'TFTP — sans authentification',
+    512: 'rexec — exécution distante non chiffrée',
+    513: 'rlogin — données en clair',
+    514: 'rsh — shell non chiffré',
+  };
+  const ALWAYS_HIGH = {
+    161: 'SNMP',
+    162: 'SNMP Trap',
+  };
+  // critical if WAN/public, medium if LAN
+  const CRITICAL_IF_WAN = {
+    3389: 'RDP',
+    5900: 'VNC',
+    445:  'SMB',
+    1433: 'MSSQL',
+    3306: 'MySQL',
+    5432: 'PostgreSQL',
+    27017: 'MongoDB',
+    6379: 'Redis',
+    1521: 'Oracle DB',
+  };
+  // high if WAN, medium if LAN
+  const HIGH_IF_WAN = {
+    22:   'SSH',
+    80:   'HTTP non chiffré',
+    5985: 'WinRM HTTP',
+    5986: 'WinRM HTTPS',
+    9200: 'Elasticsearch',
+  };
+
+  const policies = s.data.policies || [];
+
+  // Compute risk score for each policy
+  const riskPolicies = [];
+  for (const p of policies) {
+    const isWan = p.dstType === 'public' || p.dstType === 'WAN';
+    const riskyPorts = [];
+
+    for (const port of (p.ports || [])) {
+      const portNum = parseInt(port, 10);
+      if (isNaN(portNum)) continue;
+
+      if (ALWAYS_CRITICAL[portNum]) {
+        riskyPorts.push({ port: portNum, label: ALWAYS_CRITICAL[portNum], level: 'critical' });
+      } else if (ALWAYS_HIGH[portNum]) {
+        riskyPorts.push({ port: portNum, label: ALWAYS_HIGH[portNum], level: 'high' });
+      } else if (CRITICAL_IF_WAN[portNum]) {
+        riskyPorts.push({ port: portNum, label: CRITICAL_IF_WAN[portNum], level: isWan ? 'critical' : 'medium' });
+      } else if (HIGH_IF_WAN[portNum]) {
+        riskyPorts.push({ port: portNum, label: HIGH_IF_WAN[portNum], level: isWan ? 'high' : 'medium' });
+      }
+    }
+
+    if (riskyPorts.length === 0) continue;
+
+    // Overall level = worst of all risky ports
+    const levelRank = { critical: 3, high: 2, medium: 1 };
+    const worstLevel = riskyPorts.reduce((best, rp) =>
+      (levelRank[rp.level] || 0) > (levelRank[best] || 0) ? rp.level : best, 'medium');
+
+    riskPolicies.push({
+      srcSubnet: p.srcSubnet,
+      dstTarget: p.dstTarget,
+      dstType:   p.dstType,
+      ports:     riskyPorts,
+      level:     worstLevel,
+      sessions:  p.sessions || 0,
+    });
+  }
+
+  // Sort by level desc, then sessions desc
+  const levelRank = { critical: 3, high: 2, medium: 1 };
+  riskPolicies.sort((a, b) => {
+    const ld = (levelRank[b.level] || 0) - (levelRank[a.level] || 0);
+    return ld !== 0 ? ld : b.sessions - a.sessions;
+  });
+
+  const hasFortiConfig = !!(s.fortiConfig);
+
+  // ── Zombies ──
+  let zombies = null;
+  if (s.fortiConfig && Array.isArray(s.fortiConfig.existingPolicies)) {
+    // Collect all policyIds seen in flows
+    const seenIds = new Set();
+    for (const p of policies) {
+      for (const id of (p.policyIds || [])) seenIds.add(String(id));
+    }
+    zombies = s.fortiConfig.existingPolicies
+      .filter(ep => ep.status !== 'disable' && !seenIds.has(String(ep.policyid)))
+      .map(ep => ({
+        id:       ep.policyid,
+        name:     ep.name     || '',
+        srcaddr:  ep.srcaddr  || '',
+        dstaddr:  ep.dstaddr  || '',
+        service:  ep.service  || '',
+        srcintf:  ep.srcintf  || '',
+        dstintf:  ep.dstintf  || '',
+        action:   ep.action   || '',
+      }));
+  }
+
+  // ── Shadows (overly permissive policies) ──
+  let shadows = null;
+  if (s.fortiConfig && Array.isArray(s.fortiConfig.existingPolicies)) {
+    shadows = s.fortiConfig.existingPolicies
+      .filter(ep => {
+        if (ep.action !== 'accept') return false;
+        if (ep.status === 'disable') return false;
+        const srcHasAll = (Array.isArray(ep.srcaddr) ? ep.srcaddr : [ep.srcaddr || ''])
+          .some(a => String(a).toLowerCase() === 'all');
+        const dstHasAll = (Array.isArray(ep.dstaddr) ? ep.dstaddr : [ep.dstaddr || ''])
+          .some(a => String(a).toLowerCase() === 'all');
+        const svcHasAll = (Array.isArray(ep.service) ? ep.service : [ep.service || ''])
+          .some(a => String(a).toUpperCase() === 'ALL');
+        return srcHasAll || dstHasAll || svcHasAll;
+      })
+      .map(ep => {
+        const srcHasAll = (Array.isArray(ep.srcaddr) ? ep.srcaddr : [ep.srcaddr || ''])
+          .some(a => String(a).toLowerCase() === 'all');
+        const dstHasAll = (Array.isArray(ep.dstaddr) ? ep.dstaddr : [ep.dstaddr || ''])
+          .some(a => String(a).toLowerCase() === 'all');
+        const svcHasAll = (Array.isArray(ep.service) ? ep.service : [ep.service || ''])
+          .some(a => String(a).toUpperCase() === 'ALL');
+        const reasons = [];
+        if (srcHasAll) reasons.push('srcaddr=all');
+        if (dstHasAll) reasons.push('dstaddr=all');
+        if (svcHasAll) reasons.push('service=ALL');
+        return {
+          id:      ep.policyid,
+          name:    ep.name    || '',
+          srcaddr: Array.isArray(ep.srcaddr) ? ep.srcaddr.join(', ') : (ep.srcaddr || ''),
+          dstaddr: Array.isArray(ep.dstaddr) ? ep.dstaddr.join(', ') : (ep.dstaddr || ''),
+          service: Array.isArray(ep.service) ? ep.service.join(', ') : (ep.service || ''),
+          srcintf: ep.srcintf || '',
+          dstintf: ep.dstintf || '',
+          reason:  reasons.join(', '),
+        };
+      });
+  }
+
+  res.json({ riskPolicies, zombies, shadows, hasFortiConfig });
+});
+
 // GET /api/export/flows — CSV download of (filtered) flows
 app.get('/api/export/flows', (req, res) => {
   const s = requireSession(req, res);
