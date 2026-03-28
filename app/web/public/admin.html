@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FortiFlow — Admin</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      padding: 32px 24px;
+    }
+
+    h1 {
+      font-size: 1.4rem;
+      font-weight: 600;
+      color: #f8fafc;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 4px;
+    }
+
+    h1 span.badge {
+      font-size: 0.7rem;
+      background: #ef4444;
+      color: #fff;
+      padding: 2px 8px;
+      border-radius: 99px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    .subtitle {
+      font-size: 0.8rem;
+      color: #64748b;
+      margin-bottom: 28px;
+    }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .toolbar-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .stat {
+      font-size: 0.82rem;
+      color: #94a3b8;
+    }
+
+    .stat strong {
+      color: #f1f5f9;
+    }
+
+    button {
+      border: none;
+      cursor: pointer;
+      font-size: 0.82rem;
+      font-weight: 500;
+      border-radius: 6px;
+      padding: 7px 14px;
+      transition: background 0.15s, opacity 0.15s;
+    }
+
+    button:disabled { opacity: 0.4; cursor: default; }
+
+    .btn-refresh {
+      background: #1e293b;
+      color: #94a3b8;
+      border: 1px solid #334155;
+    }
+    .btn-refresh:hover:not(:disabled) { background: #273549; }
+
+    .btn-danger {
+      background: #7f1d1d;
+      color: #fca5a5;
+      border: 1px solid #991b1b;
+    }
+    .btn-danger:hover:not(:disabled) { background: #991b1b; }
+
+    .btn-delete-one {
+      background: transparent;
+      color: #f87171;
+      border: 1px solid #7f1d1d;
+      padding: 4px 10px;
+      font-size: 0.75rem;
+    }
+    .btn-delete-one:hover:not(:disabled) { background: #7f1d1d22; }
+
+    .auto-refresh {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.78rem;
+      color: #64748b;
+    }
+
+    .auto-refresh input[type=checkbox] { accent-color: #3b82f6; cursor: pointer; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.82rem;
+    }
+
+    thead tr {
+      background: #1e293b;
+      color: #94a3b8;
+      text-transform: uppercase;
+      font-size: 0.7rem;
+      letter-spacing: 0.06em;
+    }
+
+    thead th {
+      padding: 10px 14px;
+      text-align: left;
+      font-weight: 600;
+      border-bottom: 1px solid #334155;
+    }
+
+    tbody tr {
+      border-bottom: 1px solid #1e293b;
+      transition: background 0.1s;
+    }
+
+    tbody tr:hover { background: #1a2333; }
+
+    tbody td {
+      padding: 10px 14px;
+      vertical-align: middle;
+    }
+
+    .id-cell {
+      font-family: monospace;
+      font-size: 0.78rem;
+      color: #7dd3fc;
+      max-width: 160px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .status-badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 99px;
+      font-size: 0.72rem;
+      font-weight: 600;
+    }
+    .status-ready    { background: #14532d; color: #4ade80; }
+    .status-parsing  { background: #1e3a5f; color: #60a5fa; }
+    .status-error    { background: #450a0a; color: #f87171; }
+    .status-unknown  { background: #1e293b; color: #94a3b8; }
+
+    .forticonfig-yes { color: #4ade80; }
+    .forticonfig-no  { color: #475569; }
+
+    .empty-state {
+      text-align: center;
+      padding: 60px 0;
+      color: #475569;
+      font-size: 0.9rem;
+    }
+
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: #1e293b;
+      color: #e2e8f0;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 12px 18px;
+      font-size: 0.82rem;
+      opacity: 0;
+      transform: translateY(8px);
+      transition: opacity 0.2s, transform 0.2s;
+      pointer-events: none;
+      z-index: 100;
+    }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    .toast.error { border-color: #7f1d1d; color: #fca5a5; }
+
+    .spinner {
+      display: inline-block;
+      width: 12px; height: 12px;
+      border: 2px solid #334155;
+      border-top-color: #3b82f6;
+      border-radius: 50%;
+      animation: spin 0.6s linear infinite;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <h1>FortiFlow <span class="badge">Admin</span></h1>
+  <p class="subtitle">Sessions actives en mémoire — accès direct uniquement</p>
+
+  <div class="toolbar">
+    <div class="toolbar-left">
+      <span class="stat">Sessions actives : <strong id="count">—</strong></span>
+      <span class="stat">Mémoire heap : <strong id="memory">—</strong></span>
+      <button class="btn-refresh" id="btn-refresh">↻ Actualiser</button>
+      <label class="auto-refresh">
+        <input type="checkbox" id="chk-auto" checked> Auto 5 s
+      </label>
+    </div>
+    <button class="btn-danger" id="btn-delete-all" disabled>✕ Supprimer toutes</button>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Session ID</th>
+        <th>Statut</th>
+        <th>Flows</th>
+        <th>FortiConfig</th>
+        <th>Créée</th>
+        <th>Dernier accès</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    'use strict';
+
+    let autoTimer = null;
+
+    function esc(str) {
+      return String(str ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    }
+
+    function ago(ts) {
+      if (!ts) return '—';
+      const s = Math.floor((Date.now() - ts) / 1000);
+      if (s < 60)   return 'il y a ' + s + 's';
+      if (s < 3600) return 'il y a ' + Math.floor(s / 60) + 'min';
+      return 'il y a ' + Math.floor(s / 3600) + 'h';
+    }
+
+    function fmt(ts) {
+      if (!ts) return '—';
+      return new Date(ts).toLocaleString('fr-FR');
+    }
+
+    function renderRow(s) {
+      const statusClass = { ready: 'status-ready', parsing: 'status-parsing', error: 'status-error' }[s.status] || 'status-unknown';
+      const tr = document.createElement('tr');
+
+      // ID cell
+      const tdId = document.createElement('td');
+      tdId.className = 'id-cell';
+      tdId.title = s.id;
+      tdId.textContent = s.id;
+
+      // Status cell
+      const tdStatus = document.createElement('td');
+      const badge = document.createElement('span');
+      badge.className = 'status-badge ' + statusClass;
+      badge.textContent = s.status;
+      tdStatus.appendChild(badge);
+      if (s.error) {
+        const warn = document.createElement('span');
+        warn.title = s.error;
+        warn.textContent = ' ⚠';
+        warn.style.cssText = 'color:#f87171;font-size:0.72rem;cursor:help';
+        tdStatus.appendChild(warn);
+      }
+
+      // Flows
+      const tdFlows = document.createElement('td');
+      tdFlows.textContent = s.flowCount !== null ? s.flowCount.toLocaleString('fr-FR') : '—';
+
+      // FortiConfig
+      const tdForti = document.createElement('td');
+      tdForti.className = s.hasFortiConfig ? 'forticonfig-yes' : 'forticonfig-no';
+      tdForti.textContent = s.hasFortiConfig ? '✓' : '—';
+
+      // Created
+      const tdCreated = document.createElement('td');
+      tdCreated.title = fmt(s.createdAt);
+      tdCreated.textContent = ago(s.createdAt);
+
+      // Last access
+      const tdAccess = document.createElement('td');
+      tdAccess.title = fmt(s.lastAccess);
+      tdAccess.textContent = ago(s.lastAccess);
+
+      // Delete button
+      const tdAction = document.createElement('td');
+      const btn = document.createElement('button');
+      btn.className = 'btn-delete-one';
+      btn.textContent = '✕';
+      btn.dataset.id = s.id;
+      tdAction.appendChild(btn);
+
+      tr.append(tdId, tdStatus, tdFlows, tdForti, tdCreated, tdAccess, tdAction);
+      return tr;
+    }
+
+    async function load() {
+      const btnRefresh = document.getElementById('btn-refresh');
+      btnRefresh.innerHTML = '<span class="spinner"></span>';
+      btnRefresh.disabled = true;
+
+      try {
+        const [sessRes, healthRes] = await Promise.all([
+          fetch('/api/admin/sessions'),
+          fetch('/api/health'),
+        ]);
+        const sessions = await sessRes.json();
+        const health   = await healthRes.json();
+
+        document.getElementById('count').textContent  = sessions.length;
+        document.getElementById('memory').textContent = health.memoryMB + ' MB';
+
+        const tbody     = document.getElementById('tbody');
+        const btnDelAll = document.getElementById('btn-delete-all');
+
+        tbody.replaceChildren();
+
+        if (!sessions.length) {
+          const tr = document.createElement('tr');
+          const td = document.createElement('td');
+          td.colSpan = 7;
+          const empty = document.createElement('div');
+          empty.className = 'empty-state';
+          empty.textContent = 'Aucune session active';
+          td.appendChild(empty);
+          tr.appendChild(td);
+          tbody.appendChild(tr);
+          btnDelAll.disabled = true;
+          return;
+        }
+
+        btnDelAll.disabled = false;
+        sessions.sort((a, b) => b.lastAccess - a.lastAccess);
+        sessions.forEach(s => tbody.appendChild(renderRow(s)));
+      } catch (e) {
+        showToast('Erreur de chargement : ' + e.message, true);
+      } finally {
+        btnRefresh.textContent = '↻ Actualiser';
+        btnRefresh.disabled = false;
+      }
+    }
+
+    async function deleteOne(id) {
+      try {
+        const r = await fetch('/api/admin/sessions/' + encodeURIComponent(id), { method: 'DELETE' });
+        if (!r.ok) throw new Error((await r.json()).error);
+        showToast('Session supprimée');
+        await load();
+      } catch (e) {
+        showToast('Erreur : ' + e.message, true);
+      }
+    }
+
+    async function deleteAll() {
+      if (!confirm('Supprimer TOUTES les sessions actives ?')) return;
+      try {
+        const r = await fetch('/api/admin/sessions', { method: 'DELETE' });
+        const d = await r.json();
+        showToast(d.deleted + ' session(s) supprimée(s)');
+        await load();
+      } catch (e) {
+        showToast('Erreur : ' + e.message, true);
+      }
+    }
+
+    function showToast(msg, isError) {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.className = 'toast show' + (isError ? ' error' : '');
+      clearTimeout(t._timer);
+      t._timer = setTimeout(() => { t.className = 'toast'; }, 3000);
+    }
+
+    function scheduleAuto() {
+      clearInterval(autoTimer);
+      if (document.getElementById('chk-auto').checked) {
+        autoTimer = setInterval(load, 5000);
+      }
+    }
+
+    // Event delegation for delete buttons
+    document.getElementById('tbody').addEventListener('click', function(e) {
+      const btn = e.target.closest('.btn-delete-one');
+      if (!btn || btn.disabled) return;
+      btn.disabled = true;
+      btn.textContent = '…';
+      deleteOne(btn.dataset.id).finally(() => {
+        if (btn.isConnected) {
+          btn.disabled = false;
+          btn.textContent = '✕';
+        }
+      });
+    });
+
+    document.getElementById('btn-refresh').addEventListener('click', load);
+    document.getElementById('btn-delete-all').addEventListener('click', deleteAll);
+    document.getElementById('chk-auto').addEventListener('change', scheduleAuto);
+
+    load();
+    scheduleAuto();
+  </script>
+</body>
+</html>

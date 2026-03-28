@@ -151,4 +151,16 @@ setInterval(() => {
 // ─── Load persisted sessions on startup ───────────────────────────────────────
 _loadAll();
 
-module.exports = { createSession, getSession, setSessionData, setFortiConfig, setSessionError, deleteSession, getStats };
+function listSessions() {
+  return [...sessions.values()].map(s => ({
+    id:           s.id,
+    status:       s.status,
+    createdAt:    s.createdAt,
+    lastAccess:   s.lastAccess,
+    flowCount:    s.data?.flows?.length ?? null,
+    hasFortiConfig: !!s.fortiConfig,
+    error:        s.error || null,
+  }));
+}
+
+module.exports = { createSession, getSession, setSessionData, setFortiConfig, setSessionError, deleteSession, getStats, listSessions };

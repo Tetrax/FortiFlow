@@ -9,7 +9,7 @@ const { WebSocketServer } = require('ws');
 const { parseFile }                                      = require('./lib/parser');
 const { buildAnalysis, consolidatePolicies }             = require('./lib/analyzer');
 const { createSession, getSession, setSessionData, setFortiConfig,
-        setSessionError, deleteSession, getStats }       = require('./lib/store');
+        setSessionError, deleteSession, getStats, listSessions } = require('./lib/store');
 const { parseFortiConfig, analyzePolicies,
         generateConfig, validateAgainstExisting,
         preflightValidation,
@@ -153,6 +153,33 @@ function sendCsv(res, filename, rows, columns) {
 // GET /api/health — server health & memory monitoring (no session required)
 app.get('/api/health', (_req, res) => {
   res.json(getStats());
+});
+
+// ─── Admin routes (/admin page) ───────────────────────────────────────────────
+
+// GET /api/admin/sessions — liste toutes les sessions actives
+app.get('/api/admin/sessions', (_req, res) => {
+  res.json(listSessions());
+});
+
+// DELETE /api/admin/sessions/:id — supprime une session
+app.delete('/api/admin/sessions/:id', (req, res) => {
+  const s = getSession(req.params.id);
+  if (!s) return res.status(404).json({ error: 'Session introuvable' });
+  deleteSession(req.params.id);
+  res.json({ ok: true });
+});
+
+// DELETE /api/admin/sessions — supprime TOUTES les sessions
+app.delete('/api/admin/sessions', (_req, res) => {
+  const sessions = listSessions();
+  sessions.forEach(s => deleteSession(s.id));
+  res.json({ deleted: sessions.length });
+});
+
+// GET /admin — page d'administration (accès direct uniquement)
+app.get('/admin', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'admin.html'));
 });
 
 // POST /api/upload — sauvegarde le fichier, démarre le parse en arrière-plan,
