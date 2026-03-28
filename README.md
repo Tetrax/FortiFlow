@@ -146,6 +146,16 @@ python fortiflow.py sample_traffic.log --mode policy --subnet 24 --verbose
 
 ## Déploiement Docker
 
+### Prérequis
+
+| Composant | Version minimum | Testé avec |
+|-----------|----------------|------------|
+| Docker Engine | 20.10+ | 29.2.1 |
+| Docker Compose plugin | v2.0+ | v5.1.0 |
+| Node.js *(hors Docker)* | 18 LTS+ | 22.x |
+
+> L'image embarque Node.js 20 LTS — aucune installation Node requise si tu passes par Docker.
+
 ### Lancer en local (test rapide)
 
 ```bash
