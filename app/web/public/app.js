@@ -2460,6 +2460,7 @@ function mountDrawer() {
         const cur = p._multiDstSubnets[si].useSubnet;
         p._multiDstSubnets[si].useSubnet = (cur === false) ? true : false;
         populateDrawer(_drawerIdx);
+        syncAddrCell(_drawerIdx, 'dst');
       }
       return;
     }
@@ -2472,6 +2473,7 @@ function mountDrawer() {
         const cur = p._multiSrcSubnets[si].useSubnet;
         p._multiSrcSubnets[si].useSubnet = (cur === false) ? true : false;
         populateDrawer(_drawerIdx);
+        syncAddrCell(_drawerIdx, 'src');
       }
       return;
     }
@@ -5065,9 +5067,9 @@ function policyIdsCell(p) {
   return shown.map(id => `<span class="policy-id-badge" ${tip ? `title="${escHtml(tip)}"` : ''}>${escHtml(id)}</span>`).join(' ') + more;
 }
 
-function isPolicyComplete(p) {
+function isPolicyComplete(p, _debug) {
   const a = p.analysis || {};
-  const dbg = () => {};
+  const dbg = msg => { if (_debug) console.log('[complete]', msg, 'dstMode:', p._dstMode, '_use32Dst:', p._use32Dst, '_isMultiDst:', p._isMultiDst, 'dstHosts:', p.dstHosts, '_dstHostsFound:', p._dstHostsFound, '_dstHostNames:', p._dstHostNames, '_multiDstSubnets:', JSON.stringify(p._multiDstSubnets)); };
 
   // Interfaces must be explicitly selected
   if (!p._srcintf) { dbg('FAIL: no _srcintf'); return false; }
@@ -5156,7 +5158,7 @@ function syncRowStatus(idx) {
   if (!p) return;
   const bar = document.querySelector(`.deploy-policy-row[data-idx="${idx}"] .status-bar`);
   if (!bar) return;
-  bar.className = `status-bar status-${isPolicyComplete(p) ? 'ok' : (p.analysis?.status || 'warn')}`;
+  bar.className = `status-bar status-${isPolicyComplete(p) ? 'ok' : 'warn'}`;
 }
 
 function countMissingObjects(analyzed) {
@@ -5173,6 +5175,9 @@ function countMissingObjects(analyzed) {
   }
   return { addrs: addrs.size, svcs: svcs.size };
 }
+
+window.debugPolicy = idx => { const p = deployState.analyzed?.[idx]; if (!p) return console.log('no policy at', idx); isPolicyComplete(p, true); };
+window.debugAllIncomplete = () => (deployState.analyzed || []).forEach((p, i) => { if (!isPolicyComplete(p)) isPolicyComplete(p, true); });
 
 // ── F7: Event delegation on the deploy table ──────────────────────────────────
 // Searchable interface dropdown — replaces native <select> for iface fields
@@ -5712,7 +5717,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     const srcMode = p._srcMode || (p._use32Src ? 'hosts' : 'subnet');
     const srcModeBadge = srcMode === 'hosts' ? ` <span class="dst-count-badge">/32</span>` : '';
 
-    const rowStatus = isPolicyComplete(p) ? 'ok' : (p.analysis?.status || 'warn');
+    const rowStatus = isPolicyComplete(p) ? 'ok' : 'warn';
     const statusTitle = (p.analysis?.missingFields || []).join(', ') || '';
     return `
       <tr class="deploy-policy-row ${isAgg ? 'seq-row' : ''} ${p._action === 'deny' ? 'policy-deny-row' : ''} ${p._disabled ? 'policy-disabled-row' : ''}" data-idx="${idx}" ${isAgg ? `data-seq-members="${p._sequenceMembers.join(',')}"` : ''}>
