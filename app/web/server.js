@@ -90,6 +90,7 @@ function extractKnownSubnets(fortiConfig) {
     const ip  = addr.cidr.slice(0, slash);
     const prefix = parseInt(addr.cidr.slice(slash + 1), 10);
     if (isNaN(prefix) || prefix < 0 || prefix > 32) continue;
+    if (prefix === 32) continue; // /32 hosts: used for individual matching only, not subnet grouping
     const parts = ip.split('.');
     if (parts.length !== 4) continue;
     const ipInt = parts.reduce((acc, p) => (acc * 256) + parseInt(p, 10), 0);
