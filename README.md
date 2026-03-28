@@ -197,7 +197,8 @@ docker --version && docker compose version
 
 ```bash
 # Sur la machine source — créer une archive du projet
-cd /home/tetrax/workspace
+# (adapter le chemin si le projet n'est pas dans ~/workspace)
+cd ~/workspace   # ou /opt, /home/user, peu importe
 tar --exclude='FortiFlow/app/web/node_modules' \
     --exclude='FortiFlow/.git' \
     --exclude='FortiFlow/app/web/uploads' \
