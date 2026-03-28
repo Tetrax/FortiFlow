@@ -4514,8 +4514,8 @@ function renderRiskPanel(data) {
       for (const z of zombies) {
         s2Body += `<tr>
           <td style="${tdStyle}">${escHtml(String(z.id))}</td><td style="${tdStyle}">${escHtml(z.name)}</td>
-          <td style="${tdStyle}">${escHtml(z.srcaddr)}</td><td style="${tdStyle}">${escHtml(z.dstaddr)}</td>
-          <td style="${tdStyle}">${escHtml(z.service)}</td><td style="${tdStyle}">${escHtml(z.action)}</td>
+          <td style="${tdStyle}">${escHtml((z.srcaddr||[]).filter(Boolean).join(', '))}</td><td style="${tdStyle}">${escHtml((z.dstaddr||[]).filter(Boolean).join(', '))}</td>
+          <td style="${tdStyle}">${escHtml((z.service||[]).filter(Boolean).join(', '))}</td><td style="${tdStyle}">${escHtml(z.action)}</td>
         </tr>`;
       }
       s2Body += `</tbody></table>`;
@@ -4540,8 +4540,8 @@ function renderRiskPanel(data) {
       for (const sh of shadows) {
         s3Body += `<tr>
           <td style="${tdStyle}">${escHtml(String(sh.id))}</td><td style="${tdStyle}">${escHtml(sh.name)}</td>
-          <td style="${tdStyle}">${escHtml(sh.srcaddr)}</td><td style="${tdStyle}">${escHtml(sh.dstaddr)}</td>
-          <td style="${tdStyle}">${escHtml(sh.service)}</td><td style="${tdStyle}">${escHtml(sh.reason)}</td>
+          <td style="${tdStyle}">${escHtml((sh.srcaddr||[]).filter(Boolean).join(', '))}</td><td style="${tdStyle}">${escHtml((sh.dstaddr||[]).filter(Boolean).join(', '))}</td>
+          <td style="${tdStyle}">${escHtml((sh.service||[]).filter(Boolean).join(', '))}</td><td style="${tdStyle}">${escHtml(sh.reason)}</td>
         </tr>`;
       }
       s3Body += `</tbody></table>`;
