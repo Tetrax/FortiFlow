@@ -516,44 +516,70 @@ app.get('/api/risk-analysis', (req, res) => {
   let shadows = null;
   if (s.fortiConfig && Array.isArray(s.fortiConfig.existingPolicies)) {
     const ifaces = s.fortiConfig.interfaces || {};
+    const zones  = s.fortiConfig.zones      || {};
+
+    const cleanArr = (arr) => (Array.isArray(arr) ? arr : []).filter(v => v && String(v).trim());
+    const isWanIntf = (name) => ifaces[name]?.isWan || zones[name]?.isWan || false;
+    const isGeoIp   = (name) => /^[A-Z]{2}$/.test(name); // codes ISO 2 lettres (géo-IP FortiGate)
+
+    const getDirection = (ep) => {
+      const srcintfs = cleanArr(ep.srcintf);
+      const dstintfs = cleanArr(ep.dstintf);
+      const srcIsWan = srcintfs.length > 0 && srcintfs.every(i => isWanIntf(i));
+      const dstIsWan = dstintfs.length > 0 && dstintfs.every(i => isWanIntf(i));
+      if (!srcIsWan && dstIsWan) return 'lan-wan';
+      if (srcIsWan && !dstIsWan) return 'wan-lan';
+      return 'lan-lan';
+    };
 
     shadows = s.fortiConfig.existingPolicies
       .filter(ep => {
         if (ep.action !== 'accept') return false;
         if (ep.status === 'disable') return false;
-        const srcArr = Array.isArray(ep.srcaddr) ? ep.srcaddr : [];
-        const dstArr = Array.isArray(ep.dstaddr) ? ep.dstaddr : [];
-        const svcArr = Array.isArray(ep.service) ? ep.service : [];
+        const srcArr = cleanArr(ep.srcaddr);
+        const dstArr = cleanArr(ep.dstaddr);
+        const svcArr = cleanArr(ep.service);
         const srcHasAll = srcArr.some(a => String(a).toLowerCase() === 'all');
         const dstHasAll = dstArr.some(a => String(a).toLowerCase() === 'all');
         const svcHasAll = svcArr.some(a => String(a).toUpperCase() === 'ALL');
+        const dir = getDirection(ep);
 
-        // Skip WAN policies where dstaddr=all is expected (normal internet access rule)
-        if (dstHasAll && !srcHasAll && !svcHasAll) {
-          const dstintfs = Array.isArray(ep.dstintf) ? ep.dstintf : [];
-          const allDstWan = dstintfs.length > 0 && dstintfs.every(i => ifaces[i]?.isWan);
-          if (allDstWan) return false;
+        if (dir === 'lan-wan') {
+          // dstaddr=all est normal pour internet ; seul service=ALL est problématique
+          return svcHasAll;
         }
-
-        return srcHasAll || dstHasAll || svcHasAll;
+        if (dir === 'wan-lan') {
+          // Flagué si srcaddr=all, >10 sources, ou présence de géo-IP
+          return srcHasAll || srcArr.length > 10 || srcArr.some(a => isGeoIp(a));
+        }
+        // lan-lan : dstaddr=all OU service=ALL sont problématiques
+        return dstHasAll || svcHasAll;
       })
       .map(ep => {
-        const srcArr = Array.isArray(ep.srcaddr) ? ep.srcaddr : [];
-        const dstArr = Array.isArray(ep.dstaddr) ? ep.dstaddr : [];
-        const svcArr = Array.isArray(ep.service) ? ep.service : [];
+        const srcArr = cleanArr(ep.srcaddr);
+        const dstArr = cleanArr(ep.dstaddr);
+        const svcArr = cleanArr(ep.service);
+        const dir = getDirection(ep);
+        const srcHasAll = srcArr.some(a => String(a).toLowerCase() === 'all');
+        const dstHasAll = dstArr.some(a => String(a).toLowerCase() === 'all');
+        const svcHasAll = svcArr.some(a => String(a).toUpperCase() === 'ALL');
+        const hasGeoIp  = srcArr.some(a => isGeoIp(a));
         const reasons = [];
-        if (srcArr.some(a => String(a).toLowerCase() === 'all')) reasons.push('srcaddr=all');
-        if (dstArr.some(a => String(a).toLowerCase() === 'all')) reasons.push('dstaddr=all');
-        if (svcArr.some(a => String(a).toUpperCase() === 'ALL'))  reasons.push('service=ALL');
+        if (srcHasAll) reasons.push('srcaddr=all');
+        if (dir !== 'lan-wan' && dstHasAll) reasons.push('dstaddr=all');
+        if (svcHasAll) reasons.push('service=ALL');
+        if (dir === 'wan-lan' && srcArr.length > 10) reasons.push(`${srcArr.length} sources`);
+        if (dir === 'wan-lan' && hasGeoIp) reasons.push('geo-ip');
         return {
-          id:      ep.policyid,
-          name:    ep.name    || '',
-          srcaddr: srcArr,
-          dstaddr: dstArr,
-          service: svcArr,
-          srcintf: Array.isArray(ep.srcintf) ? ep.srcintf : [],
-          dstintf: Array.isArray(ep.dstintf) ? ep.dstintf : [],
-          reason:  reasons.join(', '),
+          id:        ep.policyid,
+          name:      ep.name || '',
+          srcaddr:   srcArr,
+          dstaddr:   dstArr,
+          service:   svcArr,
+          srcintf:   cleanArr(ep.srcintf),
+          dstintf:   cleanArr(ep.dstintf),
+          reason:    reasons.join(', '),
+          direction: dir,
         };
       });
   }

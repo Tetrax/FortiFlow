@@ -69,7 +69,7 @@ function extractSections(lines, sectionNames) {
       const idx  = rest.indexOf(' ');
       if (idx > 0) {
         const key = rest.slice(0, idx);
-        const val = rest.slice(idx + 1).trim().replace(/^"|"$/g, '');
+        const val = rest.slice(idx + 1).trim();
         if (isAppend && editProps[key]) {
           editProps[key] += ' ' + val;
         } else {

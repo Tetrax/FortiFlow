@@ -4502,34 +4502,61 @@ function renderRiskPanel(data) {
 
   if (data.hasFortiConfig) {
     const shadows = data.shadows;
+    const cleanJoin = (arr) => (arr||[]).filter(v => v && String(v).trim()).join(', ');
+    const wrapStyle = 'word-break:break-word;white-space:normal;';
+    const renderPermTable = (list) => {
+      if (list.length === 0) return `<div style="color:var(--text2);font-size:11px;padding:4px 0">Aucune</div>`;
+      let t = `<table style="${tableStyle}table-layout:fixed;width:100%"><thead><tr>
+        <th style="${thStyle};width:40px">ID</th>
+        <th style="${thStyle};width:8%">Nom</th>
+        <th style="${thStyle};width:10%">Src intf</th>
+        <th style="${thStyle};width:22%">Src addr</th>
+        <th style="${thStyle};width:10%">Dst intf</th>
+        <th style="${thStyle};width:22%">Dst addr</th>
+        <th style="${thStyle};width:10%">Service</th>
+        <th style="${thStyle}">Raison</th>
+      </tr></thead><tbody>`;
+      for (const sh of list) {
+        const srcAddr = cleanJoin(sh.srcaddr);
+        const dstAddr = cleanJoin(sh.dstaddr);
+        const svc     = cleanJoin(sh.service);
+        t += `<tr>
+          <td style="${tdStyle}">${escHtml(String(sh.id))}</td>
+          <td style="${tdStyle}${wrapStyle}">${escHtml(sh.name)}</td>
+          <td style="${tdStyle}${wrapStyle}font-family:var(--mono);font-size:10px">${escHtml(cleanJoin(sh.srcintf))}</td>
+          <td style="${tdStyle}${wrapStyle}">${escHtml(srcAddr)}</td>
+          <td style="${tdStyle}${wrapStyle}font-family:var(--mono);font-size:10px">${escHtml(cleanJoin(sh.dstintf))}</td>
+          <td style="${tdStyle}${wrapStyle}">${escHtml(dstAddr)}</td>
+          <td style="${tdStyle}${wrapStyle}">${escHtml(svc)}</td>
+          <td style="${tdStyle};color:var(--warn,#f39c12)">${escHtml(sh.reason)}</td>
+        </tr>`;
+      }
+      t += `</tbody></table>`;
+      return t;
+    };
+
     let s3Body = '';
     if (!shadows) {
       s3Body = `<div style="color:var(--text2);padding:8px 0">Chargez une config FortiGate pour activer cette analyse</div>`;
     } else if (shadows.length === 0) {
       s3Body = `<div style="color:var(--success,#27ae60);padding:8px 0">Aucune policy trop permissive détectée ✓</div>`;
     } else {
-      s3Body = `<table style="${tableStyle}"><thead><tr>
-        <th style="${thStyle}">ID</th><th style="${thStyle}">Nom</th>
-        <th style="${thStyle}">Src intf</th><th style="${thStyle}">Src addr</th>
-        <th style="${thStyle}">Dst intf</th><th style="${thStyle}">Dst addr</th>
-        <th style="${thStyle}">Service</th><th style="${thStyle}">Raison</th>
-      </tr></thead><tbody>`;
-      for (const sh of shadows) {
-        s3Body += `<tr>
-          <td style="${tdStyle}">${escHtml(String(sh.id))}</td>
-          <td style="${tdStyle}">${escHtml(sh.name)}</td>
-          <td style="${tdStyle};font-family:var(--mono);font-size:10px">${escHtml((sh.srcintf||[]).filter(Boolean).join(', '))}</td>
-          <td style="${tdStyle}">${escHtml((sh.srcaddr||[]).filter(Boolean).join(', '))}</td>
-          <td style="${tdStyle};font-family:var(--mono);font-size:10px">${escHtml((sh.dstintf||[]).filter(Boolean).join(', '))}</td>
-          <td style="${tdStyle}">${escHtml((sh.dstaddr||[]).filter(Boolean).join(', '))}</td>
-          <td style="${tdStyle}">${escHtml((sh.service||[]).filter(Boolean).join(', '))}</td>
-          <td style="${tdStyle};color:var(--warn,#f39c12)">${escHtml(sh.reason)}</td>
-        </tr>`;
+      const dirs = [
+        { key: 'lan-wan', label: '🌐 LAN → WAN' },
+        { key: 'wan-lan', label: '⬇ WAN → LAN' },
+        { key: 'lan-lan', label: '🔁 LAN → LAN' },
+      ];
+      for (const d of dirs) {
+        const list = shadows.filter(sh => sh.direction === d.key);
+        if (list.length === 0) continue;
+        s3Body += `<div style="margin-bottom:14px">
+          <div style="font-size:11px;font-weight:600;color:var(--text2);margin-bottom:4px;padding:2px 0;border-bottom:1px solid var(--border)">${d.label} (${list.length})</div>
+          ${renderPermTable(list)}
+        </div>`;
       }
-      s3Body += `</tbody></table>`;
     }
     html += `<div style="${sectionStyle}">
-      <div class="risk-section-header" style="${headerStyle}"><span class="risk-chevron">⌄</span><span>👻 Policies trop permissives (${shadows?shadows.length:0})</span></div>
+      <div class="risk-section-header" style="${headerStyle}"><span class="risk-chevron">⌄</span><span>⚠ Policies trop permissives (${shadows?shadows.length:0})</span></div>
       <div style="${bodyStyle}">${s3Body}</div></div>`;
   }
 
