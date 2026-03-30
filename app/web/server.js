@@ -30,7 +30,7 @@ fs.mkdirSync(WS_HISTORY_DIR, { recursive: true });
 
 // ─── Risk ports config ────────────────────────────────────────────────────────
 
-const RISK_PORTS_CONFIG_PATH = path.join(__dirname, 'risk-ports.json');
+const RISK_PORTS_CONFIG_PATH = path.join(__dirname, 'workspaces', 'risk-ports.json');
 
 const DEFAULT_RISK_PORTS = {
   always_critical: {
