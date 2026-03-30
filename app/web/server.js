@@ -28,6 +28,52 @@ fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 const WS_HISTORY_DIR = path.join(__dirname, 'workspaces');
 fs.mkdirSync(WS_HISTORY_DIR, { recursive: true });
 
+// ─── Risk ports config ────────────────────────────────────────────────────────
+
+const RISK_PORTS_CONFIG_PATH = path.join(__dirname, 'risk-ports.json');
+
+const DEFAULT_RISK_PORTS = {
+  always_critical: {
+    21:  'FTP — données en clair',
+    23:  'Telnet — données en clair',
+    69:  'TFTP — sans authentification',
+    512: 'rexec — exécution distante non chiffrée',
+    513: 'rlogin — données en clair',
+    514: 'rsh — shell non chiffré',
+  },
+  always_high: {
+    161: 'SNMP',
+    162: 'SNMP Trap',
+  },
+  critical_if_wan: {
+    3389:  'RDP',
+    5900:  'VNC',
+    445:   'SMB',
+    1433:  'MSSQL',
+    3306:  'MySQL',
+    5432:  'PostgreSQL',
+    27017: 'MongoDB',
+    6379:  'Redis',
+    1521:  'Oracle DB',
+  },
+  high_if_wan: {
+    22:   'SSH',
+    80:   'HTTP non chiffré',
+    5985: 'WinRM HTTP',
+    5986: 'WinRM HTTPS',
+    9200: 'Elasticsearch',
+  },
+};
+
+function getRiskPortsConfig() {
+  try {
+    if (fs.existsSync(RISK_PORTS_CONFIG_PATH)) {
+      return JSON.parse(fs.readFileSync(RISK_PORTS_CONFIG_PATH, 'utf8'));
+    }
+  } catch (_) {}
+  return DEFAULT_RISK_PORTS;
+}
+
 function loadWsIndex() {
   try { return JSON.parse(fs.readFileSync(path.join(WS_HISTORY_DIR, 'index.json'), 'utf8')); }
   catch { return []; }
@@ -424,44 +470,55 @@ app.get('/api/stats', (req, res) => {
   res.json({ stats: s.data.stats, meta: s.data.meta });
 });
 
+// GET /api/risk-ports — current port risk classification config
+app.get('/api/risk-ports', (_req, res) => {
+  res.json(getRiskPortsConfig());
+});
+
+// PUT /api/risk-ports — update port risk classification config
+app.put('/api/risk-ports', express.json(), (req, res) => {
+  const cfg = req.body;
+  const keys = ['always_critical', 'always_high', 'critical_if_wan', 'high_if_wan'];
+  for (const k of keys) {
+    if (!cfg[k] || typeof cfg[k] !== 'object' || Array.isArray(cfg[k])) {
+      return res.status(400).json({ error: `Clé invalide : ${k}` });
+    }
+    // Validate that all values in each category are { port: string, label: string }
+    for (const [port, label] of Object.entries(cfg[k])) {
+      if (isNaN(parseInt(port, 10)) || typeof label !== 'string') {
+        return res.status(400).json({ error: `Port ou libellé invalide dans ${k}` });
+      }
+    }
+  }
+  try {
+    fs.writeFileSync(RISK_PORTS_CONFIG_PATH, JSON.stringify(cfg, null, 2));
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// DELETE /api/risk-ports — reset to defaults (delete custom config file)
+app.delete('/api/risk-ports', (_req, res) => {
+  try {
+    if (fs.existsSync(RISK_PORTS_CONFIG_PATH)) fs.unlinkSync(RISK_PORTS_CONFIG_PATH);
+    res.json(DEFAULT_RISK_PORTS);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /api/risk-analysis — risk scoring, zombie policies, shadow policies
 app.get('/api/risk-analysis', (req, res) => {
   const s = requireSession(req, res);
   if (!s) return;
 
-  // ── Port risk definitions ──
-  const ALWAYS_CRITICAL = {
-    21: 'FTP — données en clair',
-    23: 'Telnet — données en clair',
-    69: 'TFTP — sans authentification',
-    512: 'rexec — exécution distante non chiffrée',
-    513: 'rlogin — données en clair',
-    514: 'rsh — shell non chiffré',
-  };
-  const ALWAYS_HIGH = {
-    161: 'SNMP',
-    162: 'SNMP Trap',
-  };
-  // critical if WAN/public, medium if LAN
-  const CRITICAL_IF_WAN = {
-    3389: 'RDP',
-    5900: 'VNC',
-    445:  'SMB',
-    1433: 'MSSQL',
-    3306: 'MySQL',
-    5432: 'PostgreSQL',
-    27017: 'MongoDB',
-    6379: 'Redis',
-    1521: 'Oracle DB',
-  };
-  // high if WAN, medium if LAN
-  const HIGH_IF_WAN = {
-    22:   'SSH',
-    80:   'HTTP non chiffré',
-    5985: 'WinRM HTTP',
-    5986: 'WinRM HTTPS',
-    9200: 'Elasticsearch',
-  };
+  // ── Port risk definitions (from config file or defaults) ──
+  const portsCfg       = getRiskPortsConfig();
+  const ALWAYS_CRITICAL  = portsCfg.always_critical  || {};
+  const ALWAYS_HIGH      = portsCfg.always_high      || {};
+  const CRITICAL_IF_WAN  = portsCfg.critical_if_wan  || {};
+  const HIGH_IF_WAN      = portsCfg.high_if_wan      || {};
 
   const policies = s.data.policies || [];
 

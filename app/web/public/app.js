@@ -3315,6 +3315,7 @@ async function deploy() {
             </div>
           </div>
           <button class="btn-sm ${deployState.riskPanelOpen ? 'btn-accent' : ''}" id="btn-risk-toggle">⚠ Risques</button>
+          <button class="btn-sm" id="btn-risk-ports" title="Configurer les ports à risque">⚙ Ports</button>
           <span class="toolbar-sep"></span>
           <span style="margin-left:auto"></span>
           <input type="text" id="deploy-search" class="deploy-search-input" placeholder="Rechercher (IP, subnet, service, srcintf:X, dstintf:Y...)" value="${escHtml(deployState.searchFilter || '')}" title="Filtrer par texte libre. Syntaxe spéciale : srcintf:NOM ou dstintf:NOM pour filtrer par interface exacte">
@@ -3564,6 +3565,11 @@ async function deploy() {
       deployState.collapsedGroups = new Set();
       document.querySelectorAll('.dropdown-wrap.open').forEach(w => w.classList.remove('open'));
       if (deployState.analyzed) renderDeployPolicies(filterDeployPolicies(), true);
+      return;
+    }
+
+    if (e.target.id === 'btn-risk-ports') {
+      showRiskPortsModal();
       return;
     }
 
@@ -4580,6 +4586,178 @@ async function loadRiskPanel() {
   } catch(e) {
     panel.innerHTML = `<div style="padding:20px;color:var(--error)">Erreur : ${escHtml(e.message)}</div>`;
   }
+}
+
+// ── Configuration des ports à risque ──
+// Note: All dynamic values inserted into HTML strings below are escaped via escHtml()
+// before insertion, following the same XSS-prevention pattern used throughout app.js.
+function buildRiskPortsModalHtml(cfg) {
+  const inputStyle = 'background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:3px;padding:2px 5px';
+  const SECTIONS = [
+    { key: 'always_critical', label: '🔴 Toujours CRITIQUE',                color: '#c0392b' },
+    { key: 'always_high',     label: '🟠 Toujours ÉLEVÉ',                   color: '#e67e22' },
+    { key: 'critical_if_wan', label: '🔴/🟡 CRITIQUE si WAN, MOYEN si LAN', color: '#c0392b' },
+    { key: 'high_if_wan',     label: '🟠/🟡 ÉLEVÉ si WAN, MOYEN si LAN',   color: '#e67e22' },
+  ];
+  let sectionsHtml = '';
+  for (const sec of SECTIONS) {
+    const ports = cfg[sec.key] || {};
+    let rows = '';
+    for (const [port, label] of Object.entries(ports)) {
+      // escHtml() applied to all dynamic values (port number and label from saved config)
+      rows += `<tr>`
+        + `<td style="padding:3px 5px"><input class="rp-port" type="number" min="1" max="65535"`
+        + ` value="${escHtml(String(port))}" style="${inputStyle};width:64px;font-family:var(--mono);font-size:11px"></td>`
+        + `<td style="padding:3px 5px"><input class="rp-label" type="text"`
+        + ` value="${escHtml(String(label))}" style="${inputStyle};width:260px;font-size:11px"></td>`
+        + `<td style="padding:3px 5px"><button class="rp-del btn-sm" style="padding:1px 5px;font-size:10px;color:var(--error,#e74c3c)">✕</button></td>`
+        + `</tr>`;
+    }
+    sectionsHtml += `<div class="rp-section" data-section="${escHtml(sec.key)}" style="margin-bottom:18px">`
+      + `<div style="font-size:11px;font-weight:700;color:${sec.color};margin-bottom:6px;border-bottom:1px solid var(--border);padding-bottom:4px">${sec.label}</div>`
+      + `<table style="border-collapse:collapse;width:100%"><thead><tr>`
+      + `<th style="text-align:left;padding:2px 5px;font-size:10px;color:var(--text2);width:80px">Port</th>`
+      + `<th style="text-align:left;padding:2px 5px;font-size:10px;color:var(--text2)">Description</th>`
+      + `<th style="width:28px"></th></tr></thead>`
+      + `<tbody class="rp-tbody">${rows}</tbody></table>`
+      + `<button class="rp-add btn-sm" data-section="${escHtml(sec.key)}" style="margin-top:6px;font-size:11px">+ Ajouter</button>`
+      + `</div>`;
+  }
+  return `<div style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:20px;width:540px;max-height:88vh;overflow-y:auto">`
+    + `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">`
+    + `<span style="font-weight:700;font-size:13px">⚙ Ports à risque</span>`
+    + `<button id="rp-close" class="btn-sm">✕</button></div>`
+    + `<div style="font-size:11px;color:var(--text2);margin-bottom:16px;line-height:1.5">`
+    + `Classification des ports pour l'analyse de risques.<br>`
+    + `Les ports conditionnels sont évalués selon la nature de la destination (WAN/public vs LAN/privé).</div>`
+    + sectionsHtml
+    + `<div style="display:flex;gap:8px;padding-top:12px;border-top:1px solid var(--border)">`
+    + `<button id="rp-save" class="btn-sm btn-accent" style="font-size:12px">💾 Sauvegarder et relancer</button>`
+    + `<button id="rp-reset" class="btn-sm" style="font-size:12px;opacity:0.7">↺ Réinitialiser aux défauts</button>`
+    + `</div></div>`;
+}
+
+async function showRiskPortsModal() {
+  const existing = document.getElementById('risk-ports-modal-overlay');
+  if (existing) { existing.remove(); return; }
+
+  const overlay = document.createElement('div');
+  overlay.id = 'risk-ports-modal-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center';
+  document.body.appendChild(overlay);
+
+  const inputStyle = 'background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:3px;padding:2px 5px';
+
+  function setLoading() {
+    const d = document.createElement('div');
+    d.style.cssText = 'padding:30px;color:var(--text2);font-size:12px';
+    d.textContent = 'Chargement…';
+    overlay.replaceChildren(d);
+  }
+
+  function setError(msg) {
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:24px;font-size:12px';
+    const p = document.createElement('p');
+    p.style.color = 'var(--error,#e74c3c)';
+    p.textContent = 'Erreur : ' + msg;
+    const btn = document.createElement('button');
+    btn.className = 'btn-sm'; btn.textContent = 'Fermer'; btn.style.marginTop = '12px';
+    btn.addEventListener('click', () => overlay.remove());
+    wrap.appendChild(p); wrap.appendChild(btn);
+    overlay.replaceChildren(wrap);
+  }
+
+  function collectConfig() {
+    const result = { always_critical: {}, always_high: {}, critical_if_wan: {}, high_if_wan: {} };
+    overlay.querySelectorAll('.rp-section').forEach(sec => {
+      const key = sec.dataset.section;
+      sec.querySelectorAll('.rp-tbody tr').forEach(row => {
+        const port  = parseInt(row.querySelector('.rp-port')?.value?.trim(), 10);
+        const label = row.querySelector('.rp-label')?.value?.trim();
+        if (!isNaN(port) && port > 0 && label) result[key][port] = label;
+      });
+    });
+    return result;
+  }
+
+  function addNewRow(tbody) {
+    const tr = document.createElement('tr');
+    const tdPort = document.createElement('td'); tdPort.style.padding = '3px 5px';
+    const inPort = document.createElement('input');
+    inPort.className = 'rp-port'; inPort.type = 'number'; inPort.min = '1'; inPort.max = '65535';
+    inPort.placeholder = 'Port'; inPort.style.cssText = inputStyle + ';width:64px;font-family:var(--mono);font-size:11px';
+    tdPort.appendChild(inPort);
+    const tdLabel = document.createElement('td'); tdLabel.style.padding = '3px 5px';
+    const inLabel = document.createElement('input');
+    inLabel.className = 'rp-label'; inLabel.type = 'text'; inLabel.placeholder = 'Description';
+    inLabel.style.cssText = inputStyle + ';width:260px;font-size:11px';
+    tdLabel.appendChild(inLabel);
+    const tdDel = document.createElement('td'); tdDel.style.padding = '3px 5px';
+    const btnDel = document.createElement('button');
+    btnDel.className = 'rp-del btn-sm'; btnDel.textContent = '✕';
+    btnDel.style.cssText = 'padding:1px 5px;font-size:10px;color:var(--error,#e74c3c)';
+    tdDel.appendChild(btnDel);
+    tr.appendChild(tdPort); tr.appendChild(tdLabel); tr.appendChild(tdDel);
+    tbody.appendChild(tr);
+    inPort.focus();
+  }
+
+  async function loadAndRender(url, method) {
+    setLoading();
+    try {
+      const r = await fetch(url, { method: method || 'GET' });
+      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || r.statusText); }
+      const cfg = await r.json();
+      // buildRiskPortsModalHtml escapes all cfg values with escHtml() before HTML insertion
+      const modalWrap = document.createElement('div');
+      modalWrap.style.cssText = 'display:contents';
+      modalWrap.innerHTML = buildRiskPortsModalHtml(cfg);
+      overlay.replaceChildren(modalWrap.firstElementChild);
+      bindModalEvents();
+    } catch (e) {
+      setError(e.message);
+    }
+  }
+
+  function bindModalEvents() {
+    overlay.addEventListener('click', async e => {
+      if (e.target === overlay)                    { overlay.remove(); return; }
+      if (e.target.id === 'rp-close')              { overlay.remove(); return; }
+      if (e.target.classList.contains('rp-del'))   { e.target.closest('tr').remove(); return; }
+      if (e.target.classList.contains('rp-add'))   {
+        const sec = e.target.closest('.rp-section');
+        addNewRow(sec.querySelector('.rp-tbody'));
+        return;
+      }
+      if (e.target.id === 'rp-reset') {
+        if (!confirm('Réinitialiser aux ports par défaut ? Vos modifications seront perdues.')) return;
+        await loadAndRender('/api/risk-ports', 'DELETE');
+        return;
+      }
+      if (e.target.id === 'rp-save') {
+        const cfg = collectConfig();
+        const btn = e.target;
+        btn.disabled = true; btn.textContent = 'Sauvegarde…';
+        try {
+          const r = await fetch('/api/risk-ports', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(cfg),
+          });
+          if (!r.ok) { const err = await r.json().catch(() => ({})); throw new Error(err.error || r.statusText); }
+          overlay.remove();
+          if (deployState.riskPanelOpen) loadRiskPanel();
+        } catch (err) {
+          btn.textContent = 'Erreur : ' + err.message;
+          btn.disabled = false;
+        }
+      }
+    });
+  }
+
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  await loadAndRender('/api/risk-ports', 'GET');
 }
 
 // ── Fusion par service : policies partageant le même ensemble de services
