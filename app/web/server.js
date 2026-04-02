@@ -1347,12 +1347,6 @@ app.post('/api/deploy/config-upload', upload.single('conffile'), async (req, res
       }
     }
 
-    // Free raw flows array — no longer needed once we move to deploy stage.
-    // Aggregated data (subnets, policies, stats, matrix) is kept.
-    if (s.data && s.data.flows) {
-      s.data.flows = null;
-    }
-
     // Build a fast policyid → policy lookup (keyed as string for log compatibility)
     const policyMap = new Map();
     for (const pol of fortiConfig.existingPolicies || []) {
