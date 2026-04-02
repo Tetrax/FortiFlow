@@ -420,7 +420,68 @@ app.get('/api/policies', (req, res) => {
   if (req.query.dst_type) {
     policies = policies.filter(p => p.dstType === req.query.dst_type);
   }
-  res.json(policies);
+
+  // Exclure les policies sans trafic reçu (scan probable) — activé par défaut
+  const includeNoRcvd = req.query.include_no_rcvd === '1';
+  let excluded = { total: 0, dstTargets: [] };
+  if (!includeNoRcvd) {
+    const excl = policies.filter(p => p.rcvdBytes === 0);
+    excluded = {
+      total: excl.length,
+      dstTargets: [...new Set(excl.map(p => p.dstTarget))].slice(0, 10),
+    };
+    policies = policies.filter(p => p.rcvdBytes > 0);
+  }
+
+  res.json({ policies, excluded });
+});
+
+// GET /api/raw-policies — policies brutes /32 → /32, 1 service par règle
+app.get('/api/raw-policies', (req, res) => {
+  const s = requireSession(req, res);
+  if (!s) return;
+  if (!s.data?.flows) {
+    return res.status(410).json({ error: 'Flows libérés après chargement de la config FortiGate — vue brute non disponible' });
+  }
+
+  let flows = s.data.flows.filter(f => f.action === 'accept');
+  if (req.query.dst_type) {
+    flows = flows.filter(f => f.dstType === req.query.dst_type);
+  }
+
+  // Exclure les flows sans trafic reçu — activé par défaut
+  const includeNoRcvd = req.query.include_no_rcvd === '1';
+  let excluded = { total: 0, dstTargets: [] };
+  if (!includeNoRcvd) {
+    const exclFlows = flows.filter(f => f.rcvdBytes === 0);
+    excluded = {
+      total: exclFlows.length,
+      dstTargets: [...new Set(exclFlows.map(f => f.dstip))].slice(0, 10),
+    };
+    flows = flows.filter(f => f.rcvdBytes > 0);
+  }
+
+  // Une règle par (srcip, dstip, service/port) — notation /32
+  const rawPolicies = flows.map(f => {
+    const srcAddr     = `${f.srcip}/32`;
+    const dstAddr     = f.dstType === 'public' ? f.dstip : `${f.dstip}/32`;
+    const serviceDesc = f.service || (f.dstport ? `${f.dstport}/${f.protoName || 'TCP'}` : f.protoName || 'ANY');
+    return {
+      srcSubnet:   srcAddr,
+      dstTarget:   dstAddr,
+      dstType:     f.dstType,
+      serviceDesc,
+      sessions:    f.count,
+      sentBytes:   f.sentBytes,
+      rcvdBytes:   f.rcvdBytes,
+      action:      'accept',
+      name:        `FF-${f.srcip.replace(/\./g, '_')}-to-${f.dstip.replace(/\./g, '_')}`,
+    };
+  }).sort((a, b) => b.sessions - a.sessions);
+
+  rawPolicies.forEach((p, i) => { p.id = i + 1; });
+
+  res.json({ policies: rawPolicies, excluded });
 });
 
 // GET /api/consolidated-policies — policies optimisées (multi-src / multi-dst)
