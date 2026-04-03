@@ -87,7 +87,7 @@ function buildAllSubnetGroupsAndPorts(flows, topN = 25, knownSubnets = []) {
     const dstType = isPrivate(flow.dstip) ? 'private' : 'public';
     if (!dstKey) return;
     if (!sg.dsts[dstKey]) {
-      sg.dsts[dstKey] = { key: dstKey, type: dstType, ports: new Set(), protos: new Set(), services: new Set(), policyIds: new Set(), dstIPs: new Set(), srcIPs: new Set(), count: 0, sentBytes: 0, rcvdBytes: 0 };
+      sg.dsts[dstKey] = { key: dstKey, type: dstType, ports: new Set(), protos: new Set(), services: new Set(), policyIds: new Set(), dstIPs: new Set(), srcIPs: new Set(), count: 0, sentBytes: 0, rcvdBytes: 0, noRcvdFlows: 0 };
     }
     const dst = sg.dsts[dstKey];
     if (flow.dstport)  dst.ports.add(flow.dstport);
@@ -99,6 +99,7 @@ function buildAllSubnetGroupsAndPorts(flows, topN = 25, knownSubnets = []) {
     dst.count      += flow.count;
     dst.sentBytes  += flow.sentBytes;
     dst.rcvdBytes  += flow.rcvdBytes;
+    if ((flow.rcvdBytes || 0) === 0) dst.noRcvdFlows += flow.count;
   }
 
   for (const f of flows) {
@@ -334,6 +335,7 @@ function buildPolicies(subnetGroups) {
         sessions:    dst.count,
         sentBytes:   dst.sentBytes,
         rcvdBytes:   dst.rcvdBytes,
+        noRcvdFlows: dst.noRcvdFlows,
         action:      'accept',
         // FortiGate-compatible comment
         name:        `FF-${srcSubnet.replace(/\//g, '_').replace(/\./g, '_')}-to-${dstKey.replace(/\//g, '_').replace(/\./g, '_')}`,
@@ -412,14 +414,15 @@ function consolidatePolicies(rawPolicies) {
       phase1.set(key, {
         srcs: new Set(), dst: p.dstTarget, dstType: p.dstType,
         fp, services: p.services, ports: p.ports, protos: p.protos,
-        serviceDesc: p.serviceDesc, sessions: 0, sentBytes: 0, rcvdBytes: 0,
+        serviceDesc: p.serviceDesc, sessions: 0, sentBytes: 0, rcvdBytes: 0, noRcvdFlows: 0,
       });
     }
     const e = phase1.get(key);
     e.srcs.add(p.srcSubnet);
-    e.sessions  += p.sessions;
-    e.sentBytes += p.sentBytes;
-    e.rcvdBytes += p.rcvdBytes;
+    e.sessions    += p.sessions;
+    e.sentBytes   += p.sentBytes;
+    e.rcvdBytes   += p.rcvdBytes;
+    e.noRcvdFlows += (p.noRcvdFlows || 0);
   }
 
   // ── Passe 2 : (sources triées + fp) → regrouper les dstTargets ──
@@ -431,15 +434,16 @@ function consolidatePolicies(rawPolicies) {
       phase2.set(key, {
         srcSubnets: [...e.srcs].sort(), dstTargets: [], dstTypes: {},
         fp: e.fp, services: e.services, ports: e.ports, protos: e.protos,
-        serviceDesc: e.serviceDesc, sessions: 0, sentBytes: 0, rcvdBytes: 0,
+        serviceDesc: e.serviceDesc, sessions: 0, sentBytes: 0, rcvdBytes: 0, noRcvdFlows: 0,
       });
     }
     const g = phase2.get(key);
     g.dstTargets.push(e.dst);
     g.dstTypes[e.dst] = e.dstType;
-    g.sessions  += e.sessions;
-    g.sentBytes += e.sentBytes;
-    g.rcvdBytes += e.rcvdBytes;
+    g.sessions    += e.sessions;
+    g.sentBytes   += e.sentBytes;
+    g.rcvdBytes   += e.rcvdBytes;
+    g.noRcvdFlows += e.noRcvdFlows;
   }
 
   let id = 1;
@@ -463,6 +467,7 @@ function consolidatePolicies(rawPolicies) {
         sessions:     g.sessions,
         sentBytes:    g.sentBytes,
         rcvdBytes:    g.rcvdBytes,
+        noRcvdFlows:  g.noRcvdFlows,
         action:       'accept',
         // Combien de policies brutes sont fusionnées ici
         rawCount:     g.srcSubnets.length * dstTargets.length,

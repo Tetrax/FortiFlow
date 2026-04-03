@@ -4399,11 +4399,11 @@ function updateNoRcvdToggleBtn() {
   if (!btn) return;
   const count = deployState._noRcvdCount || 0;
   if (deployState.hideNoRcvd) {
-    btn.textContent = '\u26a0 ' + count + ' sans r\u00e9ponse masqu\u00e9e' + (count > 1 ? 's' : '') + ' \u2014 Afficher';
+    btn.textContent = '\u26a0 ' + count + ' scan potentiel' + (count > 1 ? 's' : '') + ' masqu\u00e9' + (count > 1 ? 's' : '') + ' \u2014 Afficher';
     btn.style.color = 'var(--warn)';
     btn.style.opacity = '0.85';
   } else {
-    btn.textContent = '\u26a0 ' + count + ' sans r\u00e9ponse affich\u00e9e' + (count > 1 ? 's' : '') + ' \u2014 Masquer';
+    btn.textContent = '\u26a0 ' + count + ' scan potentiel' + (count > 1 ? 's' : '') + ' \u2014 Masquer';
     btn.style.color = 'var(--warn)';
     btn.style.opacity = '1';
   }
@@ -4413,9 +4413,9 @@ function filterDeployPolicies() {
   const q = (deployState.searchFilter || '').toLowerCase().trim();
   let result = deployState.analyzed || [];
 
-  // Masquer les policies sans réponse (rcvdBytes = 0) si le toggle est actif
+  // Masquer les policies avec trafic unidirectionnel (noRcvdFlows > 0) si le toggle est actif
   if (deployState.hideNoRcvd) {
-    result = result.filter(p => (p.rcvdBytes || 0) > 0);
+    result = result.filter(p => (p.noRcvdFlows || 0) === 0);
   }
 
   if (q) {
@@ -5559,7 +5559,7 @@ async function analyzeDeployPolicies() {
     }
   } catch { /* non-bloquant */ }
 
-  const noRcvdCount = analyzed.filter(p => (p.rcvdBytes || 0) === 0).length;
+  const noRcvdCount = analyzed.filter(p => (p.noRcvdFlows || 0) > 0).length;
   deployState._noRcvdCount = noRcvdCount;
   if (info) {
     info.innerHTML = analyzed.length + ' policies' + deniedNote + (noRcvdCount > 0 ? ' · <span id="no-rcvd-toggle-wrap"></span>' : '') + ' · ';
@@ -5569,7 +5569,7 @@ async function analyzeDeployPolicies() {
         const btn = document.createElement('button');
         btn.id = 'no-rcvd-toggle';
         btn.className = 'no-rcvd-toggle-btn';
-        btn.title = 'Aucun octet reçu \u2014 trafic unidirectionnel ou scan probable. Cliquez pour afficher/masquer.';
+        btn.title = 'Ces policies contiennent des flows sans r\u00e9ponse \u2014 trafic unidirectionnel ou scan probable. Cliquez pour afficher/masquer.';
         wrap.replaceWith(btn);
       }
     }
@@ -6648,6 +6648,42 @@ function renderDeployPolicies(analyzed, resetPage = true) {
 
   // Wire event delegation on deploy-policy-body (idempotent — only installed once)
   wireDeployTable();
+
+  // Synchronise le bouton "sans réponse" dans la barre info (cas session restaurée ou re-render)
+  syncNoRcvdInfoBtn();
+}
+
+// Injecte ou met à jour le bouton toggle "sans réponse" dans deploy-merge-info
+// Appelé depuis renderDeployPolicies pour couvrir les sessions restaurées
+function syncNoRcvdInfoBtn() {
+  if (!deployState.analyzed) return;
+
+  // Calculer le count si pas encore connu
+  if (deployState._noRcvdCount === undefined) {
+    deployState._noRcvdCount = deployState.analyzed.filter(p => (p.noRcvdFlows || 0) > 0).length;
+  }
+  const count = deployState._noRcvdCount;
+  if (count === 0) return;
+
+  const info = el('deploy-merge-info');
+  if (!info) return;
+
+  // Si le bouton existe déjà, juste mettre à jour le libellé
+  if (info.querySelector('#no-rcvd-toggle')) {
+    updateNoRcvdToggleBtn();
+    return;
+  }
+
+  // Sinon, injecter le bouton après le contenu existant
+  const btn = document.createElement('button');
+  btn.id = 'no-rcvd-toggle';
+  btn.className = 'no-rcvd-toggle-btn';
+  btn.title = 'Ces policies contiennent des flows sans r\u00e9ponse \u2014 trafic unidirectionnel ou scan probable. Cliquez pour afficher/masquer.';
+  // Insérer avant le dernier " · " si possible, sinon à la fin
+  const lastDot = info.lastChild;
+  info.insertBefore(document.createTextNode(' \u00b7 '), lastDot);
+  info.insertBefore(btn, lastDot);
+  updateNoRcvdToggleBtn();
 }
 
 async function generateDeployConf() {
