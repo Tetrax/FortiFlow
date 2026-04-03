@@ -3899,6 +3899,7 @@ async function deploy() {
     }
     deployState.selected = new Set((deployState.analyzed || []).map((_, i) => i));
     deployState.mergeSelected = new Set();
+    deployState._noRcvdCount = undefined; // force recalcul du compteur après split
     _updateMergeSelectionBtn();
     renderDeployPolicies(filterDeployPolicies(), false);
   });
@@ -4214,18 +4215,22 @@ function splitPoliciesByHostAndService(analyzedPolicies) {
     const srcList  = srcHosts.length > 0 ? srcHosts : [null];
     const dstList  = dstHosts.length > 0 ? dstHosts : [null];
 
+    const noRcvdSrcSet = new Set(p.noRcvdSrcHosts || []);
     for (const srcHost of srcList) {
+      // Pour ce srcHost, détermine si il avait des flows sans réponse
+      const hostNoRcvd = srcHost ? (noRcvdSrcSet.has(srcHost) ? 1 : 0) : (p.noRcvdFlows || 0);
       for (const dstHost of dstList) {
         for (const svc of svcList) {
           result.push({
             ...p,
             ...forceHosts,
-            srcSubnet:   srcHost ? srcHost + '/32' : p.srcSubnet,
-            srcHosts:    srcHost ? [srcHost] : (p.srcHosts || []),
-            dstTarget:   dstHost ? dstHost + '/32' : p.dstTarget,
-            dstHosts:    dstHost ? [dstHost] : (p.dstHosts || []),
-            serviceDesc: svc ? (svc.label || svc.name || '') : p.serviceDesc,
-            analysis:    svc ? { ...p.analysis, services: [svc] } : p.analysis,
+            srcSubnet:    srcHost ? srcHost + '/32' : p.srcSubnet,
+            srcHosts:     srcHost ? [srcHost] : (p.srcHosts || []),
+            dstTarget:    dstHost ? dstHost + '/32' : p.dstTarget,
+            dstHosts:     dstHost ? [dstHost] : (p.dstHosts || []),
+            serviceDesc:  svc ? (svc.label || svc.name || '') : p.serviceDesc,
+            analysis:     svc ? { ...p.analysis, services: [svc] } : p.analysis,
+            noRcvdFlows:  hostNoRcvd,
           });
         }
       }
