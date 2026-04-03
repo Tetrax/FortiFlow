@@ -1866,6 +1866,7 @@ const deployState = {
   sortCol:       null,             // active sort column key
   sortDir:       'desc',           // 'asc' | 'desc'
   availableProfiles: null,         // { antivirus, webfilter, ips, sslSsh } chargés depuis l'API
+  hideNoRcvd:    true,             // masquer par défaut les policies sans réponse (rcvdBytes=0)
 };
 
 // Collapsed state for interface category groups (persists across re-renders)
@@ -3824,6 +3825,17 @@ async function deploy() {
     });
   }
 
+  // Toggle "sans réponse" (rcvdBytes=0) — wired once
+  if (!window._noRcvdToggleWired) {
+    window._noRcvdToggleWired = true;
+    document.addEventListener('click', e => {
+      if (!e.target.closest('#no-rcvd-toggle')) return;
+      deployState.hideNoRcvd = !deployState.hideNoRcvd;
+      updateNoRcvdToggleBtn();
+      renderDeployPolicies(filterDeployPolicies(), false);
+    });
+  }
+
   // Wizard nav buttons
   document.querySelectorAll('.wizard-next, .wizard-prev').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -4381,9 +4393,30 @@ function mergeServices(group) {
 }
 
 // Filtre les policies analysées selon le texte de recherche
+// Met à jour le libellé du bouton toggle "sans réponse"
+function updateNoRcvdToggleBtn() {
+  const btn = document.getElementById('no-rcvd-toggle');
+  if (!btn) return;
+  const count = deployState._noRcvdCount || 0;
+  if (deployState.hideNoRcvd) {
+    btn.textContent = '\u26a0 ' + count + ' sans r\u00e9ponse masqu\u00e9e' + (count > 1 ? 's' : '') + ' \u2014 Afficher';
+    btn.style.color = 'var(--warn)';
+    btn.style.opacity = '0.85';
+  } else {
+    btn.textContent = '\u26a0 ' + count + ' sans r\u00e9ponse affich\u00e9e' + (count > 1 ? 's' : '') + ' \u2014 Masquer';
+    btn.style.color = 'var(--warn)';
+    btn.style.opacity = '1';
+  }
+}
+
 function filterDeployPolicies() {
   const q = (deployState.searchFilter || '').toLowerCase().trim();
   let result = deployState.analyzed || [];
+
+  // Masquer les policies sans réponse (rcvdBytes = 0) si le toggle est actif
+  if (deployState.hideNoRcvd) {
+    result = result.filter(p => (p.rcvdBytes || 0) > 0);
+  }
 
   if (q) {
     // Syntaxe spéciale : srcintf:X, dstintf:X (filtres exacts sur l'interface)
@@ -5489,8 +5522,8 @@ async function analyzeDeployPolicies() {
     };
   });
 
-  // Tri par srcSubnet pour faciliter la lecture
-  analyzed.sort((a, b) => (a.srcSubnet || '').localeCompare(b.srcSubnet || ''));
+  // Tri par volume de sessions décroissant (policies les plus actives en premier)
+  analyzed.sort((a, b) => (b.sessions || 0) - (a.sessions || 0));
 
   // Auto /32 : peu d'hôtes réels = utiliser les /32 par défaut (≤ AUTO32_THRESHOLD hôtes)
   for (const p of analyzed) {
@@ -5527,10 +5560,21 @@ async function analyzeDeployPolicies() {
   } catch { /* non-bloquant */ }
 
   const noRcvdCount = analyzed.filter(p => (p.rcvdBytes || 0) === 0).length;
-  const noRcvdNote = noRcvdCount > 0
-    ? ' · <span class="deploy-denied-note" style="color:var(--warn)" title="Aucun octet reçu — trafic unidirectionnel ou scan probable. Vérifiez ces règles.">\u26a0 ' + noRcvdCount + ' sans r\u00e9ponse</span>'
-    : '';
-  if (info) info.innerHTML = analyzed.length + ' policies' + deniedNote + noRcvdNote + ' · ';
+  deployState._noRcvdCount = noRcvdCount;
+  if (info) {
+    info.innerHTML = analyzed.length + ' policies' + deniedNote + (noRcvdCount > 0 ? ' · <span id="no-rcvd-toggle-wrap"></span>' : '') + ' · ';
+    if (noRcvdCount > 0) {
+      const wrap = info.querySelector('#no-rcvd-toggle-wrap');
+      if (wrap) {
+        const btn = document.createElement('button');
+        btn.id = 'no-rcvd-toggle';
+        btn.className = 'no-rcvd-toggle-btn';
+        btn.title = 'Aucun octet reçu \u2014 trafic unidirectionnel ou scan probable. Cliquez pour afficher/masquer.';
+        wrap.replaceWith(btn);
+      }
+    }
+  }
+  updateNoRcvdToggleBtn();
 
   // Load available security profiles for the dropdown selectors
   try {
