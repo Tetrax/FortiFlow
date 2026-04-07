@@ -879,7 +879,7 @@ td.mono { font-family: var(--mono); }
 
 /* ── Deploy view ─────────────────────────────────────────────────────────────── */
 
-.deploy-wrap { display: flex; flex-direction: column; gap: 20px; padding: 32px 36px; max-width: 1400px; }
+.deploy-wrap { display: flex; flex-direction: column; gap: 20px; padding: 32px 36px; }
 
 .deploy-step { background: var(--bg1); border: 1px solid var(--border); border-radius: 6px; min-width: 0; }
 
@@ -1136,6 +1136,15 @@ td.mono { font-family: var(--mono); }
   100% { background: transparent; }
 }
 .policy-row-flash { animation: rowFlash 1.8s ease-out forwards; }
+.policy-scan-row { background: rgba(245,158,11,0.06) !important; }
+.policy-scan-row:hover { background: rgba(245,158,11,0.12) !important; }
+.policy-scan-row td { border-bottom-color: rgba(245,158,11,0.2); }
+.scan-badge {
+  font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
+  color: var(--warn, #f59e0b); background: rgba(245,158,11,0.15);
+  border: 1px solid rgba(245,158,11,0.35); border-radius: 3px;
+  padding: 1px 5px; margin-right: 4px; white-space: nowrap;
+}
 
 .history-btn-group { display: flex; gap: 2px; }
 .btn-history {
@@ -1221,7 +1230,8 @@ td.mono { font-family: var(--mono); }
 
 .deploy-merge-bar {
   display: flex; align-items: center; gap: 8px; padding: 10px 20px;
-  background: var(--bg2); border-bottom: 1px solid var(--border); flex-wrap: wrap;
+  background: var(--bg2); border-bottom: 1px solid var(--border);
+  overflow-x: auto; flex-wrap: nowrap;
 }
 
 /* ── Service tooltip ─────────────────────────────────────────────────────────── */

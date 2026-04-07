@@ -1221,7 +1221,7 @@ function renderPoliciesTable(policies, excluded) {
       : '';
     parts.push('<div class="excluded-banner">');
     parts.push('<span class="excluded-icon">\u26a0</span>');
-    parts.push('<span>' + fmtNum(excluded.total) + ' r\u00e8gle' + (excluded.total > 1 ? 's exclues' : ' exclue') + ' — aucun trafic re\u00e7u (scan probable)' + sample + '</span>');
+    parts.push('<span>' + fmtNum(excluded.total) + ' r\u00e8gle' + (excluded.total > 1 ? 's exclues' : ' exclue') + ' — aucun trafic re\u00e7u en retour' + sample + '</span>');
     parts.push('<button class="excluded-toggle" onclick="toggleIncludeNoRcvd()">Inclure quand m\u00eame</button>');
     parts.push('</div>');
   } else if (state.policies.includeNoRcvd) {
@@ -1857,7 +1857,7 @@ const deployState = {
   pageSize:      100,
   selectedSdwan: null,  // user-selected SD-WAN priority interface
   warnings:      [],
-  viewMode:      'flat',           // 'flat' | 'interface-pair' | 'sequence'
+  viewMode:      'interface-pair',  // 'interface-pair' | 'sequence'
   collapsedGroups: new Set(),      // collapsed group keys for interface-pair view
   wizardStep:    1,                // 1: config upload, 2: routes, 3: interfaces, 4: policies
   use32Global:   false,            // global /32 mode (use real hosts instead of /24)
@@ -2077,7 +2077,7 @@ function importSession(file) {
           deployState.generatedCli         = ds.generatedCli  || null;
           deployState.addrGroups           = ds.addrGroups    || null;
           deployState.warnings             = ds.warnings      || [];
-          deployState.viewMode             = ds.viewMode      || 'flat';
+          deployState.viewMode             = ds.viewMode      || 'interface-pair';
         }
 
         // Navigation : deploy si dispo, sinon dashboard
@@ -2103,7 +2103,7 @@ function importSession(file) {
         deployState.generatedCli  = ds.generatedCli;
         deployState.addrGroups    = ds.addrGroups;
         deployState.warnings      = ds.warnings || [];
-        deployState.viewMode      = ds.viewMode  || 'flat';
+        deployState.viewMode      = ds.viewMode  || 'interface-pair';
         deploy();
       } else {
         alert('Fichier de session invalide');
@@ -3531,14 +3531,6 @@ async function deploy() {
               <div class="dropdown-item" data-merge="reset">↺ Réinitialiser</div>
             </div>
           </div>
-          <div class="dropdown-wrap">
-            <button class="btn-sm dropdown-trigger">☰ Vue ▾</button>
-            <div class="dropdown-menu">
-              <div class="dropdown-item ${deployState.viewMode === 'flat' ? 'active' : ''}" data-view-mode="flat">☰ Liste classique</div>
-              <div class="dropdown-item ${deployState.viewMode === 'interface-pair' ? 'active' : ''}" data-view-mode="interface-pair">⇄ Par interfaces</div>
-              <div class="dropdown-item ${deployState.viewMode === 'sequence' ? 'active' : ''}" data-view-mode="sequence">⊞ Séquences</div>
-            </div>
-          </div>
           <button class="btn-sm ${deployState.riskPanelOpen ? 'btn-accent' : ''}" id="btn-risk-toggle">⚠ Risques</button>
           <button class="btn-sm" id="btn-risk-ports" title="Configurer les ports à risque">⚙ Ports</button>
           <button class="btn-sm" id="btn-brute-mode" title="Afficher chaque règle en /32 src, /32 dst, 1 service">Brute /32</button>
@@ -3549,6 +3541,7 @@ async function deploy() {
             <button class="btn-sm btn-history" id="btn-policy-redo" disabled title="Rétablir">›</button>
           </span>
           <span style="margin-left:auto"></span>
+          <button id="no-rcvd-toggle" class="no-rcvd-toggle-btn" style="display:none;flex-shrink:0" title="Flows sans r\u00e9ponse — cliquer pour afficher/masquer"></button>
           <input type="text" id="deploy-search" class="deploy-search-input" placeholder="Rechercher (IP, subnet, service, srcintf:X, dstintf:Y...)" value="${escHtml(deployState.searchFilter || '')}" title="Filtrer par texte libre. Syntaxe spéciale : srcintf:NOM ou dstintf:NOM pour filtrer par interface exacte">
         </div>
         <div class="missing-bar" id="deploy-missing-bar" style="display:none">
@@ -3790,15 +3783,6 @@ async function deploy() {
       return;
     }
 
-    // View mode from dropdown
-    const viewItem = e.target.closest('[data-view-mode]');
-    if (viewItem) {
-      deployState.viewMode = viewItem.dataset.viewMode;
-      deployState.collapsedGroups = new Set();
-      document.querySelectorAll('.dropdown-wrap.open').forEach(w => w.classList.remove('open'));
-      if (deployState.analyzed) renderDeployPolicies(filterDeployPolicies(), true);
-      return;
-    }
 
     if (e.target.id === 'btn-risk-ports') {
       showRiskPortsModal();
@@ -3897,7 +3881,7 @@ async function deploy() {
     } else {
       deployState.analyzed = orig.map(p => ({ ...p }));
     }
-    deployState.selected = new Set((deployState.analyzed || []).map((_, i) => i));
+    deployState.selected = defaultSelectedSet(deployState.analyzed || []);
     deployState.mergeSelected = new Set();
     deployState._noRcvdCount = undefined; // force recalcul du compteur après split
     _updateMergeSelectionBtn();
@@ -4216,6 +4200,8 @@ function splitPoliciesByHostAndService(analyzedPolicies) {
     const dstList  = dstHosts.length > 0 ? dstHosts : [null];
 
     const noRcvdSrcSet = new Set(p.noRcvdSrcHosts || []);
+    const splitCount   = srcList.length * dstList.length * svcList.length;
+    const sessionsPer  = Math.max(1, Math.round((p.sessions || 0) / splitCount));
     for (const srcHost of srcList) {
       // Pour ce srcHost, détermine si il avait des flows sans réponse
       const hostNoRcvd = srcHost ? (noRcvdSrcSet.has(srcHost) ? 1 : 0) : (p.noRcvdFlows || 0);
@@ -4231,6 +4217,7 @@ function splitPoliciesByHostAndService(analyzedPolicies) {
             serviceDesc:  svc ? (svc.label || svc.name || '') : p.serviceDesc,
             analysis:     svc ? { ...p.analysis, services: [svc] } : p.analysis,
             noRcvdFlows:  hostNoRcvd,
+            sessions:     sessionsPer,
           });
         }
       }
@@ -4287,7 +4274,7 @@ function mergeSelectedDeployPolicies() {
   newList.sort((a, b) => (b.sessions || 0) - (a.sessions || 0));
   newList.forEach((p, i) => { p._listIdx = i; });
   deployState.analyzed = newList;
-  deployState.selected = new Set(newList.map((_, i) => i));
+  deployState.selected = defaultSelectedSet(newList);
   deployState.mergeSelected = new Set();
 
   // Trouver l'index de la policy fusionnée pour y naviguer
@@ -4404,23 +4391,35 @@ function updateNoRcvdToggleBtn() {
   if (!btn) return;
   const count = deployState._noRcvdCount || 0;
   if (deployState.hideNoRcvd) {
-    btn.textContent = '\u26a0 ' + count + ' scan potentiel' + (count > 1 ? 's' : '') + ' masqu\u00e9' + (count > 1 ? 's' : '') + ' \u2014 Afficher';
+    btn.textContent = '\u26a0 ' + count + ' sans r\u00e9ponse masqu\u00e9' + (count > 1 ? 's' : '') + ' \u2014 Afficher';
     btn.style.color = 'var(--warn)';
     btn.style.opacity = '0.85';
   } else {
-    btn.textContent = '\u26a0 ' + count + ' scan potentiel' + (count > 1 ? 's' : '') + ' \u2014 Masquer';
+    btn.textContent = '\u26a0 ' + count + ' sans r\u00e9ponse \u2014 Masquer';
     btn.style.color = 'var(--warn)';
     btn.style.opacity = '1';
   }
+}
+
+// Une policy est un scan probable si ≥80% de ses flows n'ont reçu aucune réponse
+function isScanPolicy(p) {
+  const noRcvd = p.noRcvdFlows || 0;
+  const total  = p.sessions || 0;
+  return noRcvd > 0 && total > 0 && (noRcvd / total) >= 0.8;
+}
+
+// Retourne un Set d'indices pour toutes les policies non-scan (sélection initiale par défaut)
+function defaultSelectedSet(arr) {
+  return new Set(arr.reduce((acc, p, i) => { if (!isScanPolicy(p)) acc.push(i); return acc; }, []));
 }
 
 function filterDeployPolicies() {
   const q = (deployState.searchFilter || '').toLowerCase().trim();
   let result = deployState.analyzed || [];
 
-  // Masquer les policies avec trafic unidirectionnel (noRcvdFlows > 0) si le toggle est actif
+  // Masquer les policies dont ≥80% des flows sont sans réponse (scan probable)
   if (deployState.hideNoRcvd) {
-    result = result.filter(p => (p.noRcvdFlows || 0) === 0);
+    result = result.filter(p => !isScanPolicy(p));
   }
 
   if (q) {
@@ -4493,9 +4492,7 @@ function dstTargetCell(p, idx) {
 
   let modeBadge = '';
   if (p.dstType === 'private' && dstHosts.length > 0) {
-    modeBadge = dstMode === 'hosts'
-      ? ` <span class="dst-count-badge" title="${dstHosts.length} hôtes /32">/32 · ${dstHosts.length}h</span>`
-      : '';
+    modeBadge = ` <span class="dst-count-badge" title="${dstHosts.length} h\u00f4tes">${dstHosts.length}h</span>`;
   }
 
   const ipsBadge = ips && ips.length > 0 ? ` <span class="dst-count-badge">${ips.length} IPs</span>` : '';
@@ -5396,18 +5393,22 @@ function applyMerge(mode) {
     }
   }
 
-  // Reset selection to all
-  deployState.selected = new Set(deployState.analyzed.map((_, i) => i));
+  // Reset selection (hors scan policies)
+  deployState.selected = defaultSelectedSet(deployState.analyzed);
   renderDeployPolicies(filterDeployPolicies());
 
   const info = el('deploy-merge-info');
   if (info) {
     const orig = deployState._analyzedOriginal?.length || deployState.analyzed.length;
     const cur  = deployState.analyzed.length;
+    // Conserver le bouton scan potentiels s'il existe, puis remettre le texte
+    const existingBtn = info.querySelector('#no-rcvd-toggle');
     info.textContent = mode === 'reset'
       ? `${cur} policies (original)`
       : `${cur} policies (économie : ${orig - cur})`;
+    if (existingBtn) info.appendChild(existingBtn);
   }
+  syncNoRcvdInfoBtn();
 }
 
 // ─── Policy analysis ──────────────────────────────────────────────────────────
@@ -5543,7 +5544,7 @@ async function analyzeDeployPolicies() {
   deployState._analyzedOriginal     = null;
   deployState.baseAnalyzedPolicies  = analyzed.map(p => ({ ...p })); // snapshot for reset
   deployState.generatedCli          = null;
-  deployState.selected              = new Set(analyzed.map((_, i) => i));
+  deployState.selected              = defaultSelectedSet(analyzed);
   _drawerHistory = [];  // clear undo history from previous session
   _policyUndo = [];
   _policyRedo = [];
@@ -5564,22 +5565,12 @@ async function analyzeDeployPolicies() {
     }
   } catch { /* non-bloquant */ }
 
-  const noRcvdCount = analyzed.filter(p => (p.noRcvdFlows || 0) > 0).length;
+  const noRcvdCount = analyzed.filter(isScanPolicy).length;
   deployState._noRcvdCount = noRcvdCount;
   if (info) {
-    info.innerHTML = analyzed.length + ' policies' + deniedNote + (noRcvdCount > 0 ? ' · <span id="no-rcvd-toggle-wrap"></span>' : '') + ' · ';
-    if (noRcvdCount > 0) {
-      const wrap = info.querySelector('#no-rcvd-toggle-wrap');
-      if (wrap) {
-        const btn = document.createElement('button');
-        btn.id = 'no-rcvd-toggle';
-        btn.className = 'no-rcvd-toggle-btn';
-        btn.title = 'Ces policies contiennent des flows sans r\u00e9ponse \u2014 trafic unidirectionnel ou scan probable. Cliquez pour afficher/masquer.';
-        wrap.replaceWith(btn);
-      }
-    }
+    info.innerHTML = analyzed.length + ' policies' + deniedNote + ' · ';
   }
-  updateNoRcvdToggleBtn();
+  syncNoRcvdInfoBtn();
 
   // Load available security profiles for the dropdown selectors
   try {
@@ -6314,6 +6305,7 @@ function wireDeployTable() {
   container.addEventListener('click', e => {
     const header = e.target.closest('.intf-pair-header');
     if (!header) return;
+    e.stopPropagation();
     const pair = header.dataset.pair;
     if (deployState.collapsedGroups.has(pair)) {
       deployState.collapsedGroups.delete(pair);
@@ -6391,7 +6383,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
   if (resetPage) deployState.page = 1;
 
   // In sequence mode, aggregate before pagination
-  const viewMode = deployState.viewMode || 'flat';
+  const viewMode = deployState.viewMode || 'interface-pair';
   const displayList = viewMode === 'sequence' ? buildSequenceAggregated(analyzed) : analyzed;
 
   const total     = displayList.length;
@@ -6495,14 +6487,16 @@ function renderDeployPolicies(analyzed, resetPage = true) {
 
     // Mode indicator
     const srcMode = p._srcMode || (p._use32Src ? 'hosts' : 'subnet');
-    const srcModeBadge = srcMode === 'hosts' ? ` <span class="dst-count-badge">/32</span>` : '';
+    const srcHostCount = (p.srcHosts || []).length;
+    const srcModeBadge = srcHostCount > 0 ? ` <span class="dst-count-badge">${srcHostCount}h</span>` : '';
 
     const rowStatus = (p._disabled || isPolicyComplete(p)) ? 'ok' : 'warn';
     const statusTitle = (p.analysis?.missingFields || []).join(', ') || '';
     const isHighlighted = !isAgg && idx === deployState._highlightIdx;
     if (isHighlighted) deployState._highlightIdx = null; // consommer une seule fois
+    const isScan = isScanPolicy(p);
     return `
-      <tr class="deploy-policy-row ${isAgg ? 'seq-row' : ''} ${p._action === 'deny' ? 'policy-deny-row' : ''} ${p._disabled ? 'policy-disabled-row' : ''} ${isHighlighted ? 'policy-row-flash' : ''}" data-idx="${idx}" ${isAgg ? `data-seq-members="${p._sequenceMembers.join(',')}"` : ''}>
+      <tr class="deploy-policy-row ${isAgg ? 'seq-row' : ''} ${p._action === 'deny' ? 'policy-deny-row' : ''} ${p._disabled ? 'policy-disabled-row' : ''} ${isHighlighted ? 'policy-row-flash' : ''} ${isScan ? 'policy-scan-row' : ''}" data-idx="${idx}" ${isAgg ? `data-seq-members="${p._sequenceMembers.join(',')}"` : ''}>
         <td><button class="btn-del-item deploy-del-policy" data-idx="${idx}" ${isAgg ? `data-seq-members="${p._sequenceMembers.join(',')}"` : ''} title="Supprimer cette policy">✕</button></td>
         <td><input type="checkbox" ${chkAttr}></td>
         <td class="merge-chk-cell"><input type="checkbox" ${mergeChkAttr} title="Sélectionner pour fusion"></td>
@@ -6510,7 +6504,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
         <td><button class="btn-toggle-policy" data-idx="${idx}" title="${p._disabled ? 'Policy désactivée — cliquer pour activer' : 'Policy activée — cliquer pour désactiver'}"><span class="policy-status-badge ${p._disabled ? 'badge-disabled' : 'badge-enabled'}">${p._disabled ? 'DIS' : 'ENA'}</span></button></td>
         <td class="impact-cell"><div class="impact-bar" style="width:${barW}%"></div><span class="impact-val">${fmtNum(p.sessions || 0)}</span></td>
         <td>${actionBadge}${dirBadge}</td>
-        <td>${warnBadge}${seqBadge}${srcSubnetText}${srcModeBadge}</td>
+        <td>${warnBadge}${seqBadge}${isScan ? '<span class="scan-badge" title="Trafic sans réponse (≥80% de flows sans retour) — aucune règle nécessaire">⚠ sans réponse</span>' : ''}${srcSubnetText}${srcModeBadge}</td>
         <td>${srcAddrCell}</td>
         ${allSrcAutoFlag ? '' : `<td>${srcIntf}</td>`}
         <td>${dstTargetCell(p, idx)}</td>
@@ -6528,7 +6522,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     for (const [pair, members] of groups) {
       const collapsed = deployState.collapsedGroups.has(pair);
       parts.push(`<tr class="intf-pair-header ${collapsed ? 'collapsed' : ''}" data-pair="${escHtml(pair)}">
-        <td colspan="10"><div class="intf-pair-header-inner">
+        <td colspan="99"><div class="intf-pair-header-inner">
           <span class="intf-pair-toggle">${collapsed ? '▸' : '▾'}</span>
           <span class="intf-pair-name">${escHtml(pair)}</span>
           <span class="intf-pair-count">${members.length} policy(s)</span>
@@ -6654,41 +6648,23 @@ function renderDeployPolicies(analyzed, resetPage = true) {
   // Wire event delegation on deploy-policy-body (idempotent — only installed once)
   wireDeployTable();
 
-  // Synchronise le bouton "sans réponse" dans la barre info (cas session restaurée ou re-render)
+  // Synchronise le bouton "sans réponse" dans deploy-merge-info (toolbar)
   syncNoRcvdInfoBtn();
 }
 
-// Injecte ou met à jour le bouton toggle "sans réponse" dans deploy-merge-info
-// Appelé depuis renderDeployPolicies pour couvrir les sessions restaurées
+// Injecte ou met à jour le bouton toggle "sans réponse" dans le conteneur dédié (droite de toolbar)
 function syncNoRcvdInfoBtn() {
   if (!deployState.analyzed) return;
 
-  // Calculer le count si pas encore connu
   if (deployState._noRcvdCount === undefined) {
-    deployState._noRcvdCount = deployState.analyzed.filter(p => (p.noRcvdFlows || 0) > 0).length;
+    deployState._noRcvdCount = deployState.analyzed.filter(isScanPolicy).length;
   }
   const count = deployState._noRcvdCount;
-  if (count === 0) return;
 
-  const info = el('deploy-merge-info');
-  if (!info) return;
-
-  // Si le bouton existe déjà, juste mettre à jour le libellé
-  if (info.querySelector('#no-rcvd-toggle')) {
-    updateNoRcvdToggleBtn();
-    return;
-  }
-
-  // Sinon, injecter le bouton après le contenu existant
-  const btn = document.createElement('button');
-  btn.id = 'no-rcvd-toggle';
-  btn.className = 'no-rcvd-toggle-btn';
-  btn.title = 'Ces policies contiennent des flows sans r\u00e9ponse \u2014 trafic unidirectionnel ou scan probable. Cliquez pour afficher/masquer.';
-  // Insérer avant le dernier " · " si possible, sinon à la fin
-  const lastDot = info.lastChild;
-  info.insertBefore(document.createTextNode(' \u00b7 '), lastDot);
-  info.insertBefore(btn, lastDot);
-  updateNoRcvdToggleBtn();
+  let btn = document.getElementById('no-rcvd-toggle');
+  if (!btn) return; // bouton statique manquant
+  btn.style.display = count === 0 ? 'none' : '';
+  if (count > 0) updateNoRcvdToggleBtn();
 }
 
 async function generateDeployConf() {
