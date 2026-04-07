@@ -224,7 +224,7 @@ docker compose ps
 docker compose logs -f
 ```
 
-L'interface est accessible sur `http://IP_CIBLE:3737`.
+L'interface est accessible sur `https://IP_CIBLE` une fois les certificats en place (voir étape 5).
 
 ### 4. Migrer les données existantes (optionnel)
 
@@ -242,43 +242,45 @@ cd /opt
 tar -xzf fortiflow-data.tar.gz
 ```
 
-### 5. HTTPS avec Let's Encrypt (optionnel)
+### 5. HTTPS (réseau interne / PKI d'entreprise)
 
+Le `docker-compose.yml` est préconfiguré pour HTTPS sur le port 443. Il suffit de placer les certificats dans `/etc/ssl/fortiflow/` sur la machine hôte.
+
+**Structure attendue :**
+```
+/etc/ssl/fortiflow/
+├── privkey.pem      ← clé privée
+└── fullchain.pem    ← certificat + chaîne intermédiaire
+```
+
+**Option A — PKI interne (AD CS, EJBCA, etc.) :**
+Signer une CSR pour le CN/SAN de la machine et déposer les fichiers ci-dessus.
+
+**Option B — `mkcert` (certificat reconnu sur le parc local) :**
 ```bash
-# Installer certbot
-apt install -y certbot
-
-# Obtenir un certificat (port 80 doit être accessible)
-certbot certonly --standalone -d fortiflow.mon-domaine.com
-
-# Dans docker-compose.yml, décommenter les lignes SSL :
-#   - DOMAIN=fortiflow.mon-domaine.com
-#   - SSL_KEY=/certs/privkey.pem
-#   - SSL_CERT=/certs/fullchain.pem
-#   - /etc/letsencrypt:/certs:ro
-
-docker compose up -d
+# Sur le poste admin
+mkcert -install                        # installe la CA locale (une seule fois)
+mkcert <IP_OU_HOSTNAME>                # génère privkey.pem + fullchain.pem
+mkdir -p /etc/ssl/fortiflow
+cp <IP_OU_HOSTNAME>-key.pem /etc/ssl/fortiflow/privkey.pem
+cp <IP_OU_HOSTNAME>.pem     /etc/ssl/fortiflow/fullchain.pem
 ```
 
-### 6. Reverse proxy Nginx (recommandé en entreprise)
-
-```nginx
-server {
-    listen 443 ssl;
-    server_name fortiflow.mon-domaine.com;
-
-    ssl_certificate     /etc/letsencrypt/live/fortiflow.mon-domaine.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/fortiflow.mon-domaine.com/privkey.pem;
-
-    client_max_body_size 400M;
-
-    location / {
-        proxy_pass         http://localhost:3737;
-        proxy_http_version 1.1;
-        proxy_set_header   Upgrade $http_upgrade;
-        proxy_set_header   Connection "upgrade";
-        proxy_set_header   Host $host;
-        proxy_read_timeout 300s;
-    }
-}
+**Option C — Self-signed (si aucune PKI disponible) :**
+```bash
+mkdir -p /etc/ssl/fortiflow
+openssl req -x509 -newkey rsa:4096 -days 3650 -nodes \
+  -keyout /etc/ssl/fortiflow/privkey.pem \
+  -out    /etc/ssl/fortiflow/fullchain.pem \
+  -subj "/CN=fortiflow" \
+  -addext "subjectAltName=IP:<IP_MACHINE>"
 ```
+
+**Démarrer après avoir placé les certificats :**
+```bash
+docker compose up --build -d
+# Interface disponible sur https://IP_CIBLE
+```
+
+> Le serveur détecte automatiquement la présence des certificats au démarrage.
+> S'ils sont absents, il bascule en HTTP sur le même port (utile pour un premier test).
