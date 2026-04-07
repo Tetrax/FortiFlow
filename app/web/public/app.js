@@ -1115,8 +1115,8 @@ async function policies() {
     '  </select>',
     '  <button class="filter-btn" id="btn-apply-policy-filter">Filtrer</button>',
     '  <div class="view-toggle-group" id="policy-view-toggle">',
-    '    <button class="view-toggle-btn active" data-vmode="aggregated">Agr\u00e9g\u00e9e /24</button>',
-    '    <button class="view-toggle-btn" data-vmode="raw">Brute /32</button>',
+    '    <button class="view-toggle-btn active" data-vmode="aggregated">Agr\u00e9g\u00e9e</button>',
+    '    <button class="view-toggle-btn" data-vmode="raw">D\u00e9taill\u00e9e</button>',
     '  </div>',
     '  <span style="margin-left:auto;display:flex;gap:8px;">',
     '    <a class="export-btn primary" id="btn-export-policies" href="#">\u2b07 Export CSV FortiGate</a>',
@@ -2275,61 +2275,209 @@ function collectMissingObjects() {
   return result;
 }
 
+// ── Objects modal helpers ──────────────────────────────────────────────────────
+
+function _objSvcKey(item) {
+  return item.key || (item.port ? `${item.port}/${(item.proto||'tcp').toUpperCase()}` : `label:${item.label}`);
+}
+
+function _buildObjAddrRow(item, prefix) {
+  const label = item.cidr || item.ip || item.key;
+  const badge = item.policyCount > 0
+    ? `<span class="obj-modal-badge">${item.policyCount} polic${item.policyCount > 1 ? 'ies' : 'y'}</span>` : '';
+  return `<div class="obj-modal-row">
+    <span class="obj-modal-key mono">${escHtml(label)}</span>${badge}
+    <input class="deploy-name-input obj-modal-input" data-obj-prefix="${prefix}" data-obj-key="${escHtml(item.cidr || item.ip || item.key)}" value="${escHtml(item.name || '')}" placeholder="Nom FortiGate\u2026">
+  </div>`;
+}
+
+function _buildObjSvcRow(item, selKeys) {
+  const key   = _objSvcKey(item);
+  const label = item.label || (item.port ? `${item.port}/${item.proto}` : item.key);
+  const badge = item.policyCount > 0
+    ? `<span class="obj-modal-badge">${item.policyCount} polic${item.policyCount > 1 ? 'ies' : 'y'}</span>` : '';
+  const sel   = selKeys.has(key);
+  return `<div class="obj-modal-row obj-svc-row${sel ? ' obj-svc-selected' : ''}" data-svc-key="${escHtml(key)}">
+    <input type="checkbox" class="obj-svc-chk"${sel ? ' checked' : ''} style="flex-shrink:0;cursor:pointer">
+    <span class="obj-modal-key mono">${escHtml(label)}</span>${badge}
+    <input class="deploy-name-input obj-modal-input" data-obj-prefix="svc" data-obj-key="${escHtml(key)}" value="${escHtml(item.name || '')}" placeholder="Nom FortiGate\u2026" onclick="event.stopPropagation()">
+  </div>`;
+}
+
+function _buildObjSvcMergeBar(services, selKeys, mergeMode, mergeName, mergeRange) {
+  const sel = services.filter(s => selKeys.has(_objSvcKey(s)));
+  if (sel.length < 2) return '';
+  const protos = new Set(sel.map(s => (s.proto || 'tcp').toUpperCase()));
+  if (protos.size > 1) {
+    return `<div class="obj-svc-merge-bar" style="color:var(--warn)">\u26a0 Protocoles diff\u00e9rents (${[...protos].join(', ')}) \u2014 impossible de fusionner</div>`;
+  }
+  const proto = [...protos][0];
+  const ports = sel.map(s => s.port).filter(Boolean).sort((a, b) => a - b);
+  const rangeSuggestion = ports.length >= 2 ? `${ports[0]}-${ports[ports.length - 1]}` : '';
+  const name = mergeName || `FF_SVC_${proto}_MULTI`;
+  const mode = mergeMode || 'list';
+  return `<div class="obj-svc-merge-bar">
+    <span style="font-size:11px;color:var(--text2)">${sel.length} ports ${proto} s\u00e9lectionn\u00e9s</span>
+    <input class="deploy-name-input obj-svc-merge-name" value="${escHtml(name)}" placeholder="FF_SVC_${escHtml(proto)}_MULTI" style="width:160px">
+    <button class="btn-sm obj-svc-merge-type${mode==='list'?' btn-active':''}" data-mode="list">Ports individ.</button>
+    <button class="btn-sm obj-svc-merge-type${mode==='range'?' btn-active':''}" data-mode="range">Range</button>
+    ${mode === 'range'
+      ? `<input class="deploy-name-input obj-svc-merge-range" value="${escHtml(mergeRange || rangeSuggestion)}" placeholder="${escHtml(rangeSuggestion || '80-90')}" style="width:100px">`
+      : `<span style="font-size:10px;color:var(--text2)">${ports.join(', ')}</span>`}
+    <button class="btn-sm btn-accent obj-svc-do-merge">Fusionner</button>
+  </div>`;
+}
+
+function _buildObjSection(id, title, bodyHtml, collapsed) {
+  if (!bodyHtml) return '';
+  const arrow = collapsed ? '\u25b8' : '\u25be';
+  return `<div class="obj-modal-section" data-section-id="${id}">
+    <div class="obj-modal-section-title obj-section-toggle" data-section="${id}">
+      <span class="obj-section-arrow">${arrow}</span> ${escHtml(title)}
+    </div>
+    <div class="obj-modal-section-body"${collapsed ? ' style="display:none"' : ''}>${bodyHtml}</div>
+  </div>`;
+}
+
 function showObjectsModal() {
   const missing = collectMissingObjects();
   if (missing.total === 0) return;
+  document.querySelector('.obj-modal-overlay')?.remove();
 
-  function section(title, icon, items, inputPrefix) {
-    if (!items.length) return '';
-    const rows = items.map((item, i) => {
-      const label = item.cidr || item.ip || item.label;
-      const hint  = item.policyCount > 1 ? `<span style="font-size:10px;color:var(--text2)">${item.policyCount} policies</span>` : '';
-      return `<div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border)">
-        <span class="mono" style="min-width:160px;font-size:11px">${escHtml(label)}</span>
-        ${hint}
-        <input class="deploy-name-input obj-modal-input" style="flex:1" data-obj-prefix="${inputPrefix}" data-obj-key="${escHtml(item.cidr || item.ip || item.key)}" value="${escHtml(item.name)}" placeholder="Nom FortiGate…">
-      </div>`;
-    }).join('');
-    return `<div style="margin-bottom:16px">
-      <div style="font-size:12px;font-weight:600;margin-bottom:6px">${icon} ${title} <span style="font-size:11px;font-weight:400;color:var(--text2)">(${items.length})</span></div>
-      ${rows}
-    </div>`;
+  // Modal state (closure)
+  const state = { collapsed: new Set(), selSvcs: new Set(), mergeMode: 'list', mergeName: '', mergeRange: '' };
+
+  function buildBody() {
+    const addrHtml = missing.addresses.map(i => _buildObjAddrRow(i, 'addr')).join('');
+    const hostHtml = missing.hosts.map(i => _buildObjAddrRow(i, 'host')).join('');
+    const svcRows  = missing.services.map(i => _buildObjSvcRow(i, state.selSvcs)).join('');
+    const mergeBar = _buildObjSvcMergeBar(missing.services, state.selSvcs, state.mergeMode, state.mergeName, state.mergeRange);
+    return _buildObjSection('addr', `\u25c8 Adresses / Subnets (${missing.addresses.length})`, addrHtml, state.collapsed.has('addr'))
+      + _buildObjSection('host', `\u25c9 H\u00f4tes /32 (${missing.hosts.length})`, hostHtml, state.collapsed.has('host'))
+      + _buildObjSection('svc', `\u2699 Services (${missing.services.length})`, svcRows + mergeBar, state.collapsed.has('svc'));
   }
 
   const modal = document.createElement('div');
-  modal.className = 'merge-modal-overlay';
-  modal.innerHTML = `
-    <div class="merge-modal" style="max-width:560px;width:90vw">
-      <div style="font-size:14px;font-weight:600;margin-bottom:4px">Objets à créer <span style="font-weight:400;color:var(--text2);font-size:12px">(${missing.total})</span></div>
-      <div style="font-size:11px;color:var(--text2);margin-bottom:14px">Nommez les objets manquants — ils seront appliqués à toutes les policies concernées.</div>
-      <div id="obj-modal-body" style="max-height:55vh;overflow-y:auto;padding-right:4px">
-        ${section('Adresses subnets', '🔖', missing.addresses, 'addr')}
-        ${section('Hôtes /32', '📍', missing.hosts, 'host')}
-        ${section('Services', '⚙', missing.services, 'svc')}
-      </div>
-      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
-        <button class="btn-sm" id="obj-modal-cancel">Annuler</button>
-        <button class="btn-accent" id="obj-modal-apply">✓ Appliquer à toutes les policies</button>
-      </div>
-    </div>`;
+  modal.className = 'merge-modal-overlay obj-modal-overlay';
+  modal.innerHTML = `<div class="merge-modal obj-modal-panel">
+    <div class="obj-modal-header">
+      <span>Objets \u00e0 nommer <span class="obj-modal-count">(${missing.total})</span></span>
+      <button class="btn-sm" id="obj-modal-close">\u2715</button>
+    </div>
+    <div style="font-size:11px;color:var(--text2);margin-bottom:14px">Les noms seront appliqu\u00e9s \u00e0 toutes les policies concern\u00e9es.</div>
+    <div id="obj-modal-body" style="max-height:62vh;overflow-y:auto;padding-right:6px">${buildBody()}</div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;border-top:1px solid var(--border);padding-top:12px">
+      <button class="btn-sm" id="obj-modal-cancel">Annuler</button>
+      <button class="btn-accent" id="obj-modal-apply">\u2713 Appliquer</button>
+    </div>
+  </div>`;
 
   document.body.appendChild(modal);
-  modal.querySelector('#obj-modal-cancel').addEventListener('click', () => modal.remove());
-  modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+  const close = () => modal.remove();
+  modal.querySelector('#obj-modal-close').addEventListener('click', close);
+  modal.querySelector('#obj-modal-cancel').addEventListener('click', close);
+  modal.addEventListener('click', e => { if (e.target === modal) close(); });
+
+  function rerender() {
+    // Snapshot current input values before re-render
+    const vals = {};
+    modal.querySelectorAll('.obj-modal-input').forEach(inp => { vals[inp.dataset.objKey] = inp.value; });
+    const body = modal.querySelector('#obj-modal-body');
+    body.innerHTML = buildBody();
+    // Restore input values
+    modal.querySelectorAll('.obj-modal-input').forEach(inp => {
+      if (vals[inp.dataset.objKey] !== undefined) inp.value = vals[inp.dataset.objKey];
+    });
+  }
+
+  // Event delegation
+  modal.addEventListener('click', e => {
+    // Collapse / expand section
+    const toggle = e.target.closest('.obj-section-toggle');
+    if (toggle) {
+      const id = toggle.dataset.section;
+      if (state.collapsed.has(id)) state.collapsed.delete(id); else state.collapsed.add(id);
+      rerender(); return;
+    }
+    // Service row or checkbox click
+    const svcRow = e.target.closest('.obj-svc-row');
+    if (svcRow && !e.target.matches('.obj-modal-input')) {
+      state.mergeName = modal.querySelector('.obj-svc-merge-name')?.value || state.mergeName;
+      state.mergeRange = modal.querySelector('.obj-svc-merge-range')?.value || state.mergeRange;
+      const key = svcRow.dataset.svcKey;
+      if (state.selSvcs.has(key)) state.selSvcs.delete(key); else state.selSvcs.add(key);
+      rerender(); return;
+    }
+    // Merge mode toggle
+    const modeBtn = e.target.closest('.obj-svc-merge-type');
+    if (modeBtn) {
+      state.mergeName = modal.querySelector('.obj-svc-merge-name')?.value || state.mergeName;
+      state.mergeRange = modal.querySelector('.obj-svc-merge-range')?.value || state.mergeRange;
+      state.mergeMode = modeBtn.dataset.mode;
+      rerender(); return;
+    }
+    // Do merge
+    if (e.target.closest('.obj-svc-do-merge')) {
+      const nameVal  = modal.querySelector('.obj-svc-merge-name')?.value.trim();
+      const rangeVal = modal.querySelector('.obj-svc-merge-range')?.value.trim();
+      const selItems = missing.services.filter(s => state.selSvcs.has(_objSvcKey(s)));
+      if (selItems.length < 2) return;
+      const proto = (selItems[0].proto || 'tcp').toUpperCase();
+      const ports = selItems.map(s => s.port).filter(Boolean).sort((a, b) => a - b);
+      const portRange = (state.mergeMode === 'range' && rangeVal) ? rangeVal : null;
+      const svcName = nameVal || `FF_SVC_${proto}_MULTI`;
+      applyGlobalSvcMerge(state.selSvcs, {
+        label: svcName, found: false, name: null, source: null,
+        suggestedName: svcName, isNamed: false, proto: proto.toLowerCase(),
+        ports: portRange ? null : ports,
+        portRange: portRange || null,
+        port: portRange ? null : ports[0],
+        portHint: portRange ? `${proto}: ${portRange}` : `${proto}: ${ports.join(', ')}`,
+        _isMerged: true,
+      });
+      // Remove merged keys from missing.services list
+      missing.services = missing.services.filter(s => !state.selSvcs.has(_objSvcKey(s)));
+      missing.services.push({ key: `label:${svcName}`, label: svcName, name: svcName, proto: proto.toLowerCase(), policyCount: selItems.reduce((a, s) => a + (s.policyCount || 0), 0) });
+      state.selSvcs.clear();
+      state.mergeName = '';
+      state.mergeRange = '';
+      rerender(); return;
+    }
+  });
+
   modal.querySelector('#obj-modal-apply').addEventListener('click', () => {
     const addrMap = {}, hostsMap = {}, svcMap = {};
     modal.querySelectorAll('.obj-modal-input').forEach(inp => {
-      const prefix = inp.dataset.objPrefix;
-      const key    = inp.dataset.objKey;
-      const val    = inp.value.trim();
+      const { objPrefix: prefix, objKey: key } = inp.dataset;
+      const val = inp.value.trim();
       if (!val) return;
-      if (prefix === 'addr') addrMap[key] = val;
+      if (prefix === 'addr')      addrMap[key]  = val;
       else if (prefix === 'host') hostsMap[key] = val;
-      else if (prefix === 'svc')  svcMap[key]  = val;
+      else if (prefix === 'svc')  svcMap[key]   = val;
     });
-    modal.remove();
+    close();
     applyObjectNames(addrMap, hostsMap, svcMap);
   });
+}
+
+// Applique une fusion de services à toutes les policies concernées
+function applyGlobalSvcMerge(selectedKeys, mergedSvc) {
+  for (const p of deployState.analyzed) {
+    const svcs = p.analysis?.services;
+    if (!svcs) continue;
+    const matching = svcs.filter(s => {
+      const k = s.isNamed ? `label:${s.label}` : `${s.port}/${(s.proto||'tcp').toUpperCase()}`;
+      return selectedKeys.has(k);
+    });
+    if (matching.length < 2) continue;
+    const remaining = svcs.filter(s => {
+      const k = s.isNamed ? `label:${s.label}` : `${s.port}/${(s.proto||'tcp').toUpperCase()}`;
+      return !selectedKeys.has(k);
+    });
+    remaining.push({ ...mergedSvc });
+    p.analysis.services = remaining;
+  }
+  renderDeployPolicies(filterDeployPolicies(), false);
 }
 
 function applyObjectNames(addrMap, hostsMap, svcMap) {
@@ -3531,9 +3679,14 @@ async function deploy() {
               <div class="dropdown-item" data-merge="reset">↺ Réinitialiser</div>
             </div>
           </div>
-          <button class="btn-sm ${deployState.riskPanelOpen ? 'btn-accent' : ''}" id="btn-risk-toggle">⚠ Risques</button>
-          <button class="btn-sm" id="btn-risk-ports" title="Configurer les ports à risque">⚙ Ports</button>
-          <button class="btn-sm" id="btn-brute-mode" title="Afficher chaque règle en /32 src, /32 dst, 1 service">Brute /32</button>
+          <div class="dropdown-wrap" id="analyse-dropdown">
+            <button class="btn-sm dropdown-trigger ${deployState.riskPanelOpen ? 'btn-accent' : ''}" id="btn-analyse-menu">Analyse ▾</button>
+            <div class="dropdown-menu" style="min-width:160px">
+              <div class="dropdown-item" id="btn-risk-toggle">⚠ Risques</div>
+              <div class="dropdown-item" id="btn-risk-ports">⚙ Ports à risque</div>
+            </div>
+          </div>
+          <button class="btn-sm" id="btn-brute-mode" title="Détailler les policies par service ou par hôte">Détailler ▾</button>
           <button class="btn-sm btn-accent" id="btn-merge-selection" style="display:none" title="Fusionner les policies sélectionnées en une seule">⚡ Fusionner la sélection (<span id="merge-sel-count">0</span>)</button>
           <span class="toolbar-sep"></span>
           <span class="history-btn-group" title="Historique des modifications (10 max)">
@@ -3544,9 +3697,9 @@ async function deploy() {
           <button id="no-rcvd-toggle" class="no-rcvd-toggle-btn" style="display:none;flex-shrink:0" title="Flows sans r\u00e9ponse — cliquer pour afficher/masquer"></button>
           <input type="text" id="deploy-search" class="deploy-search-input" placeholder="Rechercher (IP, subnet, service, srcintf:X, dstintf:Y...)" value="${escHtml(deployState.searchFilter || '')}" title="Filtrer par texte libre. Syntaxe spéciale : srcintf:NOM ou dstintf:NOM pour filtrer par interface exacte">
         </div>
-        <div class="missing-bar" id="deploy-missing-bar" style="display:none">
+        <div class="missing-bar" id="deploy-missing-bar" style="display:none;cursor:pointer" onclick="showObjectsModal()" title="Cliquer pour nommer les objets manquants">
           <span id="deploy-missing-text"></span>
-          <span style="margin-left:auto;font-size:10px;opacity:0.7">Cliquez sur une policy pour éditer</span>
+          <span style="margin-left:auto;font-size:10px;opacity:0.7">→ Cliquer pour nommer</span>
         </div>
         <div class="deploy-legend" id="deploy-legend" style="display:none">
           <div class="deploy-legend-item"><span class="deploy-legend-dot found"></span> Objet existant</div>
@@ -3785,17 +3938,19 @@ async function deploy() {
 
 
     if (e.target.id === 'btn-risk-ports') {
+      document.querySelectorAll('.dropdown-wrap.open').forEach(w => w.classList.remove('open'));
       showRiskPortsModal();
       return;
     }
 
     if (e.target.id === 'btn-risk-toggle') {
+      document.querySelectorAll('.dropdown-wrap.open').forEach(w => w.classList.remove('open'));
       deployState.riskPanelOpen = !deployState.riskPanelOpen;
       const panel = el('deploy-risk-panel');
       const body  = el('deploy-policy-body');
       panel.style.display = deployState.riskPanelOpen ? '' : 'none';
       body.style.display  = deployState.riskPanelOpen ? 'none' : '';
-      e.target.classList.toggle('btn-accent', deployState.riskPanelOpen);
+      el('btn-analyse-menu')?.classList.toggle('btn-accent', deployState.riskPanelOpen);
       if (deployState.riskPanelOpen) loadRiskPanel();
       return;
     }
@@ -3866,7 +4021,7 @@ async function deploy() {
     deployState.bruteMode = cycle[deployState.bruteMode] || 'service';
     const btn = el('btn-brute-mode');
     if (btn) {
-      const labels = { 'off': 'Brute /32', 'service': 'Brute /svc \u2713', 'host': '1:1 /32 \u2713' };
+      const labels = { 'off': 'Détailler ▾', 'service': 'Par service ✓', 'host': 'Par hôte 1:1 ✓' };
       btn.textContent = labels[deployState.bruteMode];
       btn.classList.toggle('btn-active', deployState.bruteMode !== 'off');
     }
@@ -6525,7 +6680,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
         <td colspan="99"><div class="intf-pair-header-inner">
           <span class="intf-pair-toggle">${collapsed ? '▸' : '▾'}</span>
           <span class="intf-pair-name">${escHtml(pair)}</span>
-          <span class="intf-pair-count">${members.length} policy(s)</span>
+          <span class="intf-pair-count">${members.length} polic${members.length > 1 ? 'ies' : 'y'}</span>
         </div></td>
       </tr>`);
       if (!collapsed) {
@@ -6554,7 +6709,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
   const body = el('deploy-policy-body');
   body.innerHTML = `
     <div style="margin-bottom:8px;font-size:12px;color:var(--text2);display:flex;align-items:center;gap:12px">
-      <span>${total} policy(s) · <strong>${selCount}</strong> sélectionnées${hasMerge ? ' · <span style="color:var(--accent2)">⚡ fusion</span>' : ''}${
+      <span>${total} polic${total > 1 ? 'ies' : 'y'} · <strong>${selCount}</strong> sélectionnées${hasMerge ? ' · <span style="color:var(--accent2)">⚡ fusion</span>' : ''}${
         (deployState.warnings || []).length > 0
           ? ` · <span style="color:var(--warn)">⚠ ${deployState.warnings.length} conflit${deployState.warnings.length > 1 ? 's' : ''}</span>`
           : ''
@@ -6565,8 +6720,8 @@ function renderDeployPolicies(analyzed, resetPage = true) {
       <table class="deploy-policy-table">
         <thead><tr>
           <th></th>
-          <th class="col-hdr-cli" title="Inclure dans le CLI généré">CLI<br><input type="checkbox" id="chk-all-deploy" title="Tout cocher / décocher"></th>
-          <th class="col-hdr-merge" title="Sélectionner des policies à fusionner manuellement">⚡<br>Fusion</th>
+          <th class="col-hdr-chk" title="Inclure dans le CLI généré"><input type="checkbox" id="chk-all-deploy" title="Tout cocher / décocher"></th>
+          <th class="col-hdr-chk" title="Sélectionner des policies à fusionner manuellement">⚡</th>
           <th></th>
           <th title="Activer / désactiver la policy dans le CLI généré"></th>
           ${thSort('Sessions', 'sessions')}

@@ -1043,13 +1043,11 @@ td.mono { font-family: var(--mono); }
 .policy-disabled-row { opacity: 0.45; }
 .policy-disabled-row:hover { opacity: 0.65; }
 
-/* CLI / Merge column headers */
-.col-hdr-cli, .col-hdr-merge {
+/* Checkbox / icon column headers */
+.col-hdr-chk {
   text-align: center !important; padding: 4px 6px !important;
-  font-size: 8.5px !important; line-height: 1.3; white-space: nowrap;
+  font-size: 11px !important; line-height: 1.3; white-space: nowrap;
 }
-.col-hdr-cli  { color: var(--accent, #4f8ef7) !important; }
-.col-hdr-merge { color: var(--warning, #f59e0b) !important; }
 
 /* CLI checkbox (deploy-chk) — blue */
 .deploy-chk { accent-color: var(--accent, #4f8ef7); }
@@ -1298,6 +1296,26 @@ td:has([data-tip]) { overflow: visible; }
 /* Merge diff modal */
 .merge-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.75); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; z-index: 1000; }
 .merge-modal { background: var(--bg2); border: 1px solid var(--border2); border-radius: 8px; padding: 28px; max-width: 600px; width: 90%; max-height: 80vh; overflow-y: auto; box-shadow: 0 24px 64px rgba(0,0,0,0.6); }
+
+/* Objects naming modal */
+.obj-modal-panel { max-width: 680px !important; padding: 24px !important; }
+.obj-modal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; font-size: 14px; font-weight: 600; }
+.obj-modal-count { font-weight: 400; color: var(--text2); font-size: 12px; }
+.obj-modal-section { margin-bottom: 18px; }
+.obj-modal-section-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text2); margin-bottom: 6px; }
+.obj-modal-row { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--border); }
+.obj-modal-key { min-width: 160px; font-size: 11px; color: var(--text); }
+.obj-modal-badge { font-size: 9px; color: var(--text2); background: var(--bg3); border-radius: 3px; padding: 1px 5px; white-space: nowrap; flex-shrink: 0; }
+.obj-section-toggle { cursor: pointer; user-select: none; display: flex; align-items: center; gap: 5px; }
+.obj-section-toggle:hover { color: var(--text); }
+.obj-section-arrow { font-size: 10px; }
+.obj-modal-section-body { padding-top: 4px; }
+.obj-svc-row { cursor: pointer; border-radius: 3px; }
+.obj-svc-row:hover { background: var(--bg3); }
+.obj-svc-selected { background: rgba(99,179,237,0.08); outline: 1px solid var(--accent); border-radius: 3px; }
+.obj-svc-merge-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; background: var(--bg3); border-radius: 5px; padding: 8px 10px; margin-top: 8px; border: 1px solid var(--border2); }
+.missing-bar { cursor: pointer; }
+.missing-bar:hover { background: rgba(245,158,11,0.12) !important; }
 
 /* ── View toggle buttons ─────────────────────────────────────────────────────── */
 .view-toggle-group { display: inline-flex; gap: 2px; margin-left: 12px; }
