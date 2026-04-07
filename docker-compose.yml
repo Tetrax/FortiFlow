@@ -6,14 +6,15 @@ services:
     container_name: fortiflow
     restart: unless-stopped
     ports:
-      - "443:443"
+      - "3737:3737"
     environment:
-      - PORT=443
-      - SSL_KEY=/certs/privkey.pem
-      - SSL_CERT=/certs/fullchain.pem
+      - PORT=3737
+      # HTTPS optionnel — décommenter si certificats disponibles :
+      # - SSL_KEY=/certs/privkey.pem
+      # - SSL_CERT=/certs/fullchain.pem
     volumes:
       # Persistance des sessions et des workspaces entre redémarrages
       - ./data/sessions-cache:/sessions-cache
       - ./data/workspaces:/app/workspaces
-      # Certificats TLS — adapter le chemin selon ton PKI interne :
-      - /etc/ssl/fortiflow:/certs:ro
+      # HTTPS — monter le répertoire des certificats en lecture seule :
+      # - /etc/ssl/fortiflow:/certs:ro
