@@ -378,6 +378,7 @@ function buildMatrix(subnetGroups) {
   for (let si = 0; si < srcSubnets.length; si++) {
     const src = srcSubnets[si];
     const sg  = subnetGroups[src];
+    if (!sg) continue; // réseau dst-only, pas de trafic source
     for (let di = 0; di < dstSubnets.length; di++) {
       const dst = sg.dsts[dstSubnets[di]];
       if (!dst) continue;
