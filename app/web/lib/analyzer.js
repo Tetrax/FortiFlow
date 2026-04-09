@@ -349,9 +349,15 @@ function buildPolicies(subnetGroups) {
 
 // ─── Heatmap matrix ───────────────────────────────────────────────────────────
 
+// Tri numérique d'une adresse IP/CIDR (ex: "10.0.2.0/24" < "10.0.10.0/24")
+function ipSortKey(cidr) {
+  const ip = cidr.split('/')[0];
+  return ip.split('.').map(n => parseInt(n, 10).toString().padStart(3, '0')).join('.');
+}
+
 function buildMatrix(subnetGroups) {
   // Only private→private for the matrix
-  const srcSubnets = Object.keys(subnetGroups).sort();
+  const srcSet = new Set(Object.keys(subnetGroups));
   const dstSet = new Set();
 
   for (const sg of Object.values(subnetGroups)) {
@@ -359,7 +365,11 @@ function buildMatrix(subnetGroups) {
       if (dst.type === 'private') dstSet.add(key);
     }
   }
-  const dstSubnets = [...dstSet].sort();
+
+  // Liste unifiée : mêmes réseaux au même indice sur les deux axes
+  const allSubnets = [...new Set([...srcSet, ...dstSet])].sort((a, b) => ipSortKey(a).localeCompare(ipSortKey(b)));
+  const srcSubnets = allSubnets;
+  const dstSubnets = allSubnets;
 
   // Build cell list for efficient Canvas rendering
   const cells = [];
