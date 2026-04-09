@@ -1853,6 +1853,8 @@ const deployState = {
   searchFilter:  '',
   selected:      new Set(),
   mergeSelected: new Set(),
+  mergeScope:    'all',       // 'all' | 'internet' | 'lan'
+  mergeStrategy: 'max',       // 'max' | 'service' | 'policy'
   page:          1,
   pageSize:      100,
   selectedSdwan: null,  // user-selected SD-WAN priority interface
@@ -2115,13 +2117,31 @@ function importSession(file) {
 }
 
 // ── F9: Merge diff modal ──
-function showMergeDiff(mode) {
+// Applique scope + stratégie à un jeu de policies et retourne le résultat fusionné
+function computeMerge(original, scope, strategy) {
+  const isInternet = p => p._isWan || p.dstType === 'public' || p.dstTarget === 'all';
+  const clone = arr => arr.map(p => ({ ...p }));
+  if (strategy === 'max') {
+    return mergeAnalyzedPolicies(clone(original), scope);
+  }
+  // Pour service/policy : filtrer par scope puis fusionner uniquement le sous-ensemble
+  let inScope, outScope;
+  if (scope === 'all') {
+    inScope = clone(original); outScope = [];
+  } else if (scope === 'internet') {
+    inScope = clone(original.filter(isInternet)); outScope = clone(original.filter(p => !isInternet(p)));
+  } else {
+    inScope = clone(original.filter(p => !isInternet(p))); outScope = clone(original.filter(isInternet));
+  }
+  const merged = strategy === 'service' ? mergeByService(inScope) : mergeByPolicyId(inScope);
+  return [...merged, ...outScope].sort((a, b) => (b.sessions || 0) - (a.sessions || 0));
+}
+
+function showMergeDiff(scope, strategy) {
   const original = deployState._analyzedOriginal || deployState.analyzed;
   if (!original) return;
-  let preview;
-  if (mode === 'policy')        preview = mergeByPolicyId(original.map(p => ({ ...p })));
-  else if (mode === 'service')  preview = mergeByService(original.map(p => ({ ...p })));
-  else preview = mergeAnalyzedPolicies(original.map(p => ({ ...p })), mode);
+  const preview = computeMerge(original, scope, strategy);
+  const label = `${scope === 'all' ? 'Tout' : scope === 'internet' ? 'Internet' : 'LAN'} · ${strategy === 'max' ? 'Max grouping' : strategy === 'service' ? 'Par service' : 'Par src/dst'}`;
 
   const beforeCount = original.length;
   const afterCount  = preview.length;
@@ -2157,7 +2177,7 @@ function showMergeDiff(mode) {
   modal.className = 'merge-modal-overlay';
   modal.innerHTML = `
     <div class="merge-modal">
-      <div style="font-size:14px;font-weight:600;margin-bottom:12px">Aperçu fusion : ${mode}</div>
+      <div style="font-size:14px;font-weight:600;margin-bottom:12px">Aperçu fusion : ${label}</div>
       <div style="display:flex;gap:20px;margin-bottom:16px">
         <div class="stat-card" style="flex:1;padding:12px"><div class="stat-value">${beforeCount}</div><div class="stat-label">avant</div></div>
         <div class="stat-card" style="flex:1;padding:12px"><div class="stat-value" style="color:var(--accent)">${afterCount}</div><div class="stat-label">après</div></div>
@@ -2173,7 +2193,7 @@ function showMergeDiff(mode) {
 
   document.body.appendChild(modal);
   modal.querySelector('#merge-cancel').addEventListener('click', () => modal.remove());
-  modal.querySelector('#merge-confirm').addEventListener('click', () => { modal.remove(); applyMerge(mode); });
+  modal.querySelector('#merge-confirm').addEventListener('click', () => { modal.remove(); applyMerge(scope, strategy); });
   modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
 }
 
@@ -3713,16 +3733,24 @@ async function deploy() {
         </div>
         <div class="deploy-toolbar" id="deploy-merge-bar" style="display:none">
           <span id="deploy-merge-info" style="font-size:11px;color:var(--text2)"></span>
-          <div class="dropdown-wrap">
+          <div class="dropdown-wrap" id="merge-dropdown-wrap">
             <button class="btn-sm dropdown-trigger">⚡ Fusion ▾</button>
-            <div class="dropdown-menu">
-              <div class="dropdown-item" data-merge="internet">Fusionner Internet</div>
-              <div class="dropdown-item" data-merge="lan">Fusionner LAN</div>
-              <div class="dropdown-item" data-merge="all">Tout fusionner</div>
-              <div class="dropdown-item" data-merge="policy">Fusionner par Sources / Destinations</div>
-              <div class="dropdown-item" data-merge="service">Fusionner par service</div>
-              <div class="dropdown-sep"></div>
-              <div class="dropdown-item" data-merge="selection">Fusionner la sélection</div>
+            <div class="dropdown-menu" style="min-width:210px;padding:10px 12px" onclick="event.stopPropagation()">
+              <div style="font-size:10px;font-weight:700;color:var(--text2);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px">Périmètre</div>
+              <div style="display:flex;gap:4px;margin-bottom:10px">
+                <button class="btn-sm merge-scope-btn ${deployState.mergeScope==='all'?'active':''}" data-scope="all">Tout</button>
+                <button class="btn-sm merge-scope-btn ${deployState.mergeScope==='internet'?'active':''}" data-scope="internet">Internet</button>
+                <button class="btn-sm merge-scope-btn ${deployState.mergeScope==='lan'?'active':''}" data-scope="lan">LAN</button>
+              </div>
+              <div style="font-size:10px;font-weight:700;color:var(--text2);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px">Stratégie</div>
+              <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:12px">
+                <button class="btn-sm merge-strategy-btn ${deployState.mergeStrategy==='max'?'active':''}" data-strategy="max">Max grouping</button>
+                <button class="btn-sm merge-strategy-btn ${deployState.mergeStrategy==='service'?'active':''}" data-strategy="service">Par service</button>
+                <button class="btn-sm merge-strategy-btn ${deployState.mergeStrategy==='policy'?'active':''}" data-strategy="policy">Par src/dst</button>
+              </div>
+              <button class="btn-sm btn-accent" style="width:100%;margin-bottom:8px" data-merge="apply">▶ Appliquer</button>
+              <div class="dropdown-sep" style="margin:4px -4px"></div>
+              <div class="dropdown-item" data-merge="selection">⚡ Fusionner la sélection</div>
               <div class="dropdown-sep"></div>
               <div class="dropdown-item" data-merge="reset">↺ Réinitialiser</div>
             </div>
@@ -3993,14 +4021,28 @@ async function deploy() {
       return;
     }
 
+    // Merge scope toggle
+    const scopeBtn = e.target.closest('.merge-scope-btn');
+    if (scopeBtn) {
+      deployState.mergeScope = scopeBtn.dataset.scope;
+      document.querySelectorAll('.merge-scope-btn').forEach(b => b.classList.toggle('active', b.dataset.scope === deployState.mergeScope));
+      return;
+    }
+    // Merge strategy toggle
+    const strategyBtn = e.target.closest('.merge-strategy-btn');
+    if (strategyBtn) {
+      deployState.mergeStrategy = strategyBtn.dataset.strategy;
+      document.querySelectorAll('.merge-strategy-btn').forEach(b => b.classList.toggle('active', b.dataset.strategy === deployState.mergeStrategy));
+      return;
+    }
     // Merge action from dropdown
     const mergeItem = e.target.closest('[data-merge]');
     if (mergeItem) {
       const mode = mergeItem.dataset.merge;
       document.querySelectorAll('.dropdown-wrap.open').forEach(w => w.classList.remove('open'));
-      if (mode === 'reset') applyMerge(mode);
+      if (mode === 'reset') applyMerge('reset');
       else if (mode === 'selection') mergeSelectedDeployPolicies();
-      else if (mode) showMergeDiff(mode);
+      else if (mode === 'apply') showMergeDiff(deployState.mergeScope, deployState.mergeStrategy);
       return;
     }
 
@@ -5575,7 +5617,8 @@ function mergeByService(policies) {
   return merged;
 }
 
-function applyMerge(mode) {
+function applyMerge(scope, strategy) {
+  const mode = scope; // compat interne (reset utilise le 1er arg)
   if (!deployState.analyzed) return;
   if (mode !== 'reset' && mode !== 'selection') _savePolicySnapshot();
   if (mode === 'reset') {
@@ -5616,12 +5659,8 @@ function applyMerge(mode) {
     if (mode === 'selection') {
       mergeSelectedDeployPolicies();
       return;
-    } else if (mode === 'policy') {
-      deployState.analyzed = mergeByPolicyId(deployState._analyzedOriginal);
-    } else if (mode === 'service') {
-      deployState.analyzed = mergeByService(deployState._analyzedOriginal);
     } else {
-      deployState.analyzed = mergeAnalyzedPolicies(deployState._analyzedOriginal, mode);
+      deployState.analyzed = computeMerge(deployState._analyzedOriginal, scope, strategy || 'max');
     }
   }
 
