@@ -2141,7 +2141,7 @@ function showMergeDiff(scope, strategy) {
   const original = deployState._analyzedOriginal || deployState.analyzed;
   if (!original) return;
   const preview = computeMerge(original, scope, strategy);
-  const label = `${scope === 'all' ? 'Tout' : scope === 'internet' ? 'Internet' : 'LAN'} · ${strategy === 'max' ? 'Max grouping' : strategy === 'service' ? 'Par service' : 'Par src/dst'}`;
+  const label = `${scope === 'all' ? 'Tout' : scope === 'internet' ? 'Internet' : 'LAN'} · ${strategy === 'max' ? 'Par source' : strategy === 'service' ? 'Par service' : 'Par src/dst'}`;
 
   const beforeCount = original.length;
   const afterCount  = preview.length;
@@ -3744,7 +3744,7 @@ async function deploy() {
               </div>
               <div style="font-size:10px;font-weight:700;color:var(--text2);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px">Stratégie</div>
               <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:12px">
-                <button class="btn-sm merge-strategy-btn ${deployState.mergeStrategy==='max'?'active':''}" data-strategy="max">Max grouping</button>
+                <button class="btn-sm merge-strategy-btn ${deployState.mergeStrategy==='max'?'active':''}" data-strategy="max">Par source</button>
                 <button class="btn-sm merge-strategy-btn ${deployState.mergeStrategy==='service'?'active':''}" data-strategy="service">Par service</button>
                 <button class="btn-sm merge-strategy-btn ${deployState.mergeStrategy==='policy'?'active':''}" data-strategy="policy">Par src/dst</button>
               </div>
