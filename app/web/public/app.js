@@ -2209,8 +2209,9 @@ function collectMissingObjects() {
         addresses.get(cidr).policyCount++;
       }
     }
-    // Multi-dst : collecter les subnets manquants
-    if (p._isMultiDst && p._multiDstSubnets?.length) {
+    // Multi-dst : collecter les subnets manquants (sauf si mode "all" activé sur policy WAN)
+    const _moIsWan = p._isWan || p.dstType === 'public';
+    if (p._isMultiDst && p._multiDstSubnets?.length && !(_moIsWan && p._dstUseAll === true)) {
       for (const s of p._multiDstSubnets) {
         if (!s.addrFound) {
           const cidr = s.subnet;
@@ -2813,6 +2814,14 @@ function mountDrawer() {
       renderDeployPolicies(filterDeployPolicies(), false);
       return;
     }
+    const dstAllBtn = e.target.closest('.drawer-dstall-btn');
+    if (dstAllBtn) {
+      _snapAndShow();
+      p._dstUseAll = dstAllBtn.dataset.val === 'true';
+      populateDrawer(_drawerIdx);
+      renderDeployPolicies(filterDeployPolicies(), false);
+      return;
+    }
     const grpBtn = e.target.closest('.drawer-grp-toggle');
     if (grpBtn) {
       _snapAndShow();
@@ -3330,23 +3339,35 @@ function populateDrawer(idx) {
         <button class="btn-del-item" data-del-type="dst-subnet" data-si="${si}" title="Retirer ce subnet">✕</button>
       </div>${hostsHtml}`;
     }).join('');
+    const isMultiDstWan = p._isWan || p.dstTypeSummary === 'public' || subs.some(s => s.subnet === 'all' || (p.dstTypes || {})[s.subnet] === 'public');
+    const dstUseAllMulti = p._dstUseAll === true;
     dstSection = `<div class="drawer-section">
       <div class="drawer-section-title">Destinations (${subs.length})</div>
-      ${subRows}
+      ${isMultiDstWan ? `<div class="drawer-toggle-row" style="margin-bottom:8px">
+        <span style="font-size:11px;color:var(--text2)">Mode :</span>
+        <button class="drawer-toggle-btn drawer-dstall-btn ${!dstUseAllMulti ? 'active' : ''}" data-val="false">IPs spécifiques (${subs.length})</button>
+        <button class="drawer-toggle-btn drawer-dstall-btn ${dstUseAllMulti ? 'active' : ''}" data-val="true">all</button>
+      </div>` : ''}
+      ${isMultiDstWan && dstUseAllMulti ? `<div class="drawer-field">
+        <span class="drawer-field-label">Objet addr</span>
+        <span class="drawer-field-value" style="color:var(--success)">&#10003; all${badgeHtml('config')}</span>
+      </div>` : `${subRows}
       <div class="drawer-toggle-row" style="margin-top:8px">
         <button class="drawer-toggle-btn drawer-grp-toggle ${p._useDstGroup ? 'active' : ''}" data-type="dst">Grouper (addrgrp)</button>
         ${p._useDstGroup ? (p._dstAddrGrpFound
           ? `<span style="color:var(--success);font-size:11px" title="${escHtml(subs.map(s => s.subnet).join(', '))}">&#10003; ${escHtml(p._dstAddrName)}</span>`
           : `<input class="drawer-input drawer-grp-name" value="${escHtml(p._dstAddrName || '')}" placeholder="${escHtml(suggestedDstGrp)}" style="width:160px">`)
           : ''}
-      </div>
+      </div>`}
       ${_addrBanner('dst')}
     </div>`;
   } else {
     const dstAddrName = p._dstAddrName || a.dstAddr?.name || '';
     const dstFound = a.dstAddr?.found;
+    const isWan = p._isWan || p.dstType === 'public';
+    const dstUseAll = p._dstUseAll !== undefined ? p._dstUseAll : isWan;
     let dstHostsHtml = '';
-    if (dstHosts.length > 0 && dstMode === 'hosts') {
+    if (dstHosts.length > 0 && (dstMode === 'hosts' || (isWan && !dstUseAll))) {
       const dstFoundSet = new Set(p._dstHostsFound || []);
       const visibleDstHostsSingle = dstHosts.filter(h => !p._excludedDstHosts?.has(h));
       dstHostsHtml = `<div class="drawer-host-list">${visibleDstHostsSingle.slice(0, 80).map(h => {
@@ -3361,13 +3382,39 @@ function populateDrawer(idx) {
         </div>`;
       }).join('')}</div>`;
     }
+    // WAN + IPs spécifiques + pas de dstHosts : montrer dstTarget comme objet à nommer
+    let dstWanSpecificHtml = '';
+    if (isWan && !dstUseAll && dstHosts.length === 0 && p.dstTarget && p.dstTarget !== 'all') {
+      const ip = p.dstTarget;
+      const autoName = `FF_HOST_${ip.replace(/[\./]/g,'_')}`;
+      const customName = p._dstAddrName || '';
+      const dstTargetFound = dstFound && dstAddrName !== 'all';
+      dstWanSpecificHtml = dstTargetFound
+        ? `<div class="drawer-field">
+            <span class="drawer-field-label">Objet addr</span>
+            <span class="drawer-field-value" style="color:var(--success)">&#10003; ${escHtml(dstAddrName)}${badgeHtml('config')}</span>
+          </div>`
+        : `<div class="drawer-field">
+            <span class="drawer-field-label">Objet addr</span>
+            <input class="drawer-input drawer-dst-name" value="${escHtml(inputVal(customName, autoName))}" placeholder="${escHtml(autoName)}">${badgeHtml('auto')}
+          </div>`;
+    }
     dstSection = `<div class="drawer-section">
       <div class="drawer-section-title">Destination</div>
       <div class="drawer-field">
         <span class="drawer-field-label">Target</span>
         <span class="drawer-field-value">${escHtml(p.dstTarget || '—')}</span>
       </div>
-      ${p.dstType === 'private' ? `<div class="drawer-toggle-row">
+      ${isWan ? `<div class="drawer-toggle-row">
+        <span style="font-size:11px;color:var(--text2)">Mode :</span>
+        <button class="drawer-toggle-btn drawer-dstall-btn ${dstUseAll ? 'active' : ''}" data-val="true">all</button>
+        <button class="drawer-toggle-btn drawer-dstall-btn ${!dstUseAll ? 'active' : ''}" data-val="false">IPs spécifiques${dstHosts.length > 0 ? ` (${dstHosts.length})` : ''}</button>
+      </div>
+      ${dstUseAll ? `<div class="drawer-field">
+        <span class="drawer-field-label">Objet addr</span>
+        <span class="drawer-field-value" style="color:var(--success)">&#10003; all${badgeHtml('config')}</span>
+      </div>` : dstWanSpecificHtml}
+      ` : `${p.dstType === 'private' ? `<div class="drawer-toggle-row">
         <span style="font-size:11px;color:var(--text2)">Mode :</span>
         <button class="drawer-toggle-btn drawer-mode-btn ${dstMode==='subnet'?'active':''}" data-type="dst" data-mode="subnet">/24 subnet</button>
         <button class="drawer-toggle-btn drawer-mode-btn ${dstMode==='hosts'?'active':''} ${dstHosts.length<1?'disabled':''}" data-type="dst" data-mode="hosts">/32 hôtes (${dstHosts.length})</button>
@@ -3377,6 +3424,7 @@ function populateDrawer(idx) {
         ${dstFound ? `<span class="drawer-field-value" style="color:var(--success)" title="${escHtml(a.dstAddr?.cidr || p.dstTarget || '')}">&#10003; ${escHtml(dstAddrName)}${badgeHtml('config')}</span>`
           : `<input class="drawer-input drawer-dst-name" value="${escHtml(inputVal(dstAddrName, a.dstAddr?.suggestedName || suggestAddrNameFE(p.dstTarget)))}" placeholder="${escHtml(dstAddrName || 'FF_...')}">${badgeHtml('auto')}`}
       </div>` : ''}
+      `}
       ${dstHostsHtml}
       ${_addrBanner('dst')}
     </div>`;
@@ -3902,6 +3950,26 @@ async function deploy() {
     deploy();
   });
 
+  // VDOM selector
+  el('vdom-selector')?.addEventListener('change', async (e) => {
+    const vdom = e.target.value;
+    try {
+      const r = await fetch(`/api/deploy/config-vdom?session=${state.session}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ vdom }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+      deployState.fortiConfig = data;
+      const ir = await fetch(`/api/deploy/interfaces?session=${state.session}`);
+      if (ir.ok) deployState.interfaces = await ir.json();
+      deploy();
+    } catch (err) {
+      alert('Erreur changement VDOM : ' + err.message);
+    }
+  });
+
   // Analyze
   el('btn-analyze')?.addEventListener('click', analyzeDeployPolicies);
 
@@ -4097,7 +4165,16 @@ function renderConfSummary(cfg) {
     ${cfg.sdwan ? '<div class="conf-stat"><span class="conf-stat-val">⚡</span><span class="conf-stat-lbl">SD-WAN actif</span></div>' : ''}
     <div class="conf-stat ${cfg.bgp ? '' : 'conf-stat-off'}" title="${cfg.bgp ? 'Voisins BGP utilisés comme routes hôtes /32' : 'Pas de BGP détecté'}"><span class="conf-stat-val">${cfg.bgp ? 'ON' : 'OFF'}</span><span class="conf-stat-lbl">BGP</span></div>
     <div class="conf-stat ${cfg.ospf ? '' : 'conf-stat-off'}" title="${cfg.ospf ? 'OSPF actif' : 'Pas d\'OSPF détecté'}"><span class="conf-stat-val">${cfg.ospf ? 'ON' : 'OFF'}</span><span class="conf-stat-lbl">OSPF</span></div>
-    <div class="conf-stat ${cfg.vdom ? 'conf-stat-warn' : 'conf-stat-off'}" title="${cfg.vdom ? 'Configs multi-VDOM : seul le premier VDOM est parsé' : 'Pas de multi-VDOM détecté'}"><span class="conf-stat-val">${cfg.vdom ? 'ON' : 'OFF'}</span><span class="conf-stat-lbl">VDOM</span></div>
+    ${cfg.vdomList?.length > 1
+      ? `<div class="conf-stat" style="flex-direction:row;align-items:center;gap:6px;padding:4px 8px">
+           <select id="vdom-selector" style="font-size:12px;padding:2px 4px;border-radius:4px;border:1px solid var(--border);background:var(--bg2);color:var(--text);cursor:pointer">
+             ${cfg.vdomList.map(v => `<option value="${v}"${v === cfg.selectedVdom ? ' selected' : ''}>${v}</option>`).join('')}
+           </select>
+           <span class="conf-stat-lbl" style="margin:0">VDOM</span>
+         </div>`
+      : cfg.vdom
+        ? `<div class="conf-stat" title="VDOM actif : ${cfg.selectedVdom || ''}"><span class="conf-stat-val">${cfg.selectedVdom || 'root'}</span><span class="conf-stat-lbl">VDOM</span></div>`
+        : ''}
     <button class="btn-sm" id="btn-reload-conf" style="margin-left:auto;align-self:center">↺ Recharger</button>
   </div>`;
 }
@@ -5863,6 +5940,11 @@ function _buildSrcAddrCell(p, idx) {
 }
 
 function _buildDstAddrCell(p, idx) {
+  // Mode "all" explicite — uniquement pour les policies WAN/internet
+  const _cellIsWan = p._isWan || p.dstType === 'public';
+  if (_cellIsWan && p._dstUseAll === true) {
+    return `<span class="inline-editable found" data-idx="${idx}" data-field="_dstAddrName">all ${badgeHtml('config')}</span>`;
+  }
   if (p._isMultiDst && p._multiDstSubnets?.length) {
     if (p._useDstGroup) {
       const dstGrpDisplay = p._dstAddrName || `GRP_${(p.policyIds||[])[0] || idx}_DST`;
@@ -5885,6 +5967,25 @@ function _buildDstAddrCell(p, idx) {
     return allDone
       ? `<span class="inline-editable found" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(names)}">${escHtml(names)}</span>`
       : `<span class="inline-editable missing" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(names)}">${escHtml(names)} ${badgeHtml('auto')}</span>`;
+  }
+  // WAN + IPs spécifiques
+  const isWan = p._isWan || p.dstType === 'public';
+  if (isWan && p._dstUseAll === false && p.dstHosts?.length > 0) {
+    const dhFoundSet = new Set(p._dstHostsFound || []);
+    const _autoHostName = h => `FF_HOST_${h.replace(/\./g, '_')}`;
+    const _hostNameOk = (h) => { const n = cleanHostName(h, p._dstHostNames?.[h]); return n && n !== _autoHostName(h); };
+    const dhNames = p.dstHosts.map(h => cleanHostName(h, p._dstHostNames?.[h]) || h);
+    const dhAllNamed = p.dstHosts.every(h => dhFoundSet.has(h) || _hostNameOk(h));
+    const dhDisplay = dhNames.join(', ');
+    return dhAllNamed
+      ? `<span class="inline-editable found" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(dhDisplay)}">${escHtml(dhDisplay)}</span>`
+      : `<span class="inline-editable missing" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(dhDisplay)}">${escHtml(dhDisplay)} ${badgeHtml('auto')}</span>`;
+  }
+  if (isWan && p._dstUseAll === false && p.dstTarget && p.dstTarget !== 'all') {
+    const ip = p.dstTarget;
+    const autoName = `FF_HOST_${ip.replace(/[\./]/g,'_')}`;
+    const name = p._dstAddrName || autoName;
+    return `<span class="inline-editable found" data-idx="${idx}" data-field="_dstAddrName">${escHtml(name)} ${badgeHtml('auto')}</span>`;
   }
   const _dstModeResolved = p._dstMode || (p._use32Dst ? 'hosts' : 'subnet');
   if (_dstModeResolved === 'hosts' && (p.dstHosts || []).length > 0) {
@@ -6027,7 +6128,8 @@ function isPolicyComplete(p, _debug) {
   // Destination addresses / hosts
   // _multiDstSubnets a la priorité — dstHosts peut contenir des hosts dont le subnet
   // a été switché en /24 (useSubnet !== false), il ne faut pas les vérifier
-  if (p._isMultiDst && p._multiDstSubnets?.length) {
+  const _isWanPolicy = p._isWan || p.dstType === 'public';
+  if (p._isMultiDst && p._multiDstSubnets?.length && !(_isWanPolicy && p._dstUseAll === true)) {
     const dstFoundSet = new Set(p._dstHostsFound || []);
     for (const s of p._multiDstSubnets) {
       if (s.useSubnet !== false) {
@@ -6038,15 +6140,23 @@ function isPolicyComplete(p, _debug) {
         }
       }
     }
-  } else {
+  } else if (!p._isMultiDst || !(_isWanPolicy && p._dstUseAll === true)) {
     const _dstModeResolved = p._dstMode || (p._use32Dst ? 'hosts' : 'subnet');
-    if (_dstModeResolved === 'hosts' && (p.dstHosts || []).length > 0) {
+    const isWanSpecific = (p._isWan || p.dstType === 'public') && p._dstUseAll === false;
+    if (isWanSpecific && p.dstHosts?.length > 0) {
       const foundSet = new Set(p._dstHostsFound || []);
       for (const h of (p.dstHosts || [])) {
-        if (!foundSet.has(h) && !hostNameOk(h, p._dstHostNames)) { dbg(`FAIL: dst host ${h} not found/named`); return false; }
+        if (!foundSet.has(h) && !hostNameOk(h, p._dstHostNames)) { dbg(`FAIL: dst host ${h} not found/named (WAN specific)`); return false; }
       }
-    } else if (p.dstType !== 'public') {
-      if (!a.dstAddr?.found && !p._dstAddrName) { dbg('FAIL: dstAddr not found/named'); return false; }
+    } else if (!isWanSpecific) {
+      if (_dstModeResolved === 'hosts' && (p.dstHosts || []).length > 0) {
+        const foundSet = new Set(p._dstHostsFound || []);
+        for (const h of (p.dstHosts || [])) {
+          if (!foundSet.has(h) && !hostNameOk(h, p._dstHostNames)) { dbg(`FAIL: dst host ${h} not found/named`); return false; }
+        }
+      } else if (p.dstType !== 'public') {
+        if (!a.dstAddr?.found && !p._dstAddrName) { dbg('FAIL: dstAddr not found/named'); return false; }
+      }
     }
   }
 

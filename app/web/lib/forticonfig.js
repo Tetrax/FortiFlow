@@ -231,13 +231,81 @@ function isPrivateIP(ip) {
   catch { return false; }
 }
 
+// ─── Multi-VDOM helpers ───────────────────────────────────────────────────────
+
+// Returns the list of VDOM names found in a multi-VDOM config.
+// Returns [] if the config is not in multi-VDOM mode.
+function extractVdomNames(lines) {
+  const names = [];
+  let inVdom = false;
+  let depth  = 0;
+  for (const rawLine of lines) {
+    const t = rawLine.trim();
+    if (!t || t.startsWith('#')) continue;
+    if (!inVdom) {
+      if (t === 'config vdom') { inVdom = true; depth = 0; }
+      continue;
+    }
+    // depth 0 inside config vdom = top-level edits (one per VDOM)
+    if (depth === 0 && t.startsWith('edit ')) {
+      names.push(t.slice(5).trim().replace(/^"|"$/g, ''));
+      continue;
+    }
+    if (t.startsWith('config ')) { depth++; continue; }
+    if (t === 'end') { if (depth-- === 0) break; continue; }
+  }
+  return names;
+}
+
+// Extracts the inner lines of a specific VDOM block.
+// The result looks like a flat (non-VDOM) FortiGate config and can be
+// fed directly to extractSections / parseSdwanMembers / etc.
+function extractVdomLines(lines, vdomName) {
+  let phase  = 0; // 0: find config vdom, 1: find edit vdomName, 2: collect
+  let depth  = 0;
+  const result = [];
+  for (const rawLine of lines) {
+    const t = rawLine.trim();
+    if (!t || t.startsWith('#')) continue;
+    if (phase === 0) {
+      if (t === 'config vdom') { phase = 1; depth = 0; }
+      continue;
+    }
+    if (phase === 1) {
+      if (depth === 0 && (t === `edit "${vdomName}"` || t === `edit ${vdomName}`)) {
+        phase = 2; depth = 0; continue;
+      }
+      if (t.startsWith('config ')) { depth++; continue; }
+      if (t === 'end') { if (depth-- === 0) break; continue; }
+      continue;
+    }
+    // phase 2: collect
+    if (t.startsWith('config ')) { depth++; result.push(rawLine); }
+    else if (t === 'end')        { depth--; result.push(rawLine); }
+    else if (t === 'next' && depth === 0) break; // end of this VDOM's edit block
+    else                         { result.push(rawLine); }
+  }
+  return result;
+}
+
 // ─── Main config parser ───────────────────────────────────────────────────────
 
-function parseFortiConfig(text) {
+function parseFortiConfig(text, selectedVdom = null) {
   const lines = text.split(/\r?\n/);
 
+  // ── Multi-VDOM: if present, extract the target VDOM block and parse it ──
+  const vdomList = extractVdomNames(lines);
+  let parseLines = lines;
+  let parseText  = text;
+  let activeVdom = null;
+  if (vdomList.length > 0) {
+    activeVdom = (selectedVdom && vdomList.includes(selectedVdom)) ? selectedVdom : vdomList[0];
+    parseLines = extractVdomLines(lines, activeVdom);
+    parseText  = parseLines.join('\n');
+  }
+
   // ── Raw section extraction — single pass for all sections ──
-  const _sections     = extractSections(lines, [
+  const _sections     = extractSections(parseLines, [
     'firewall address',
     'firewall service custom',
     'firewall addrgrp',
@@ -258,14 +326,14 @@ function parseFortiConfig(text) {
   const rawZones      = _sections['system zone'];
 
   // SDWAN : FortiOS 7.x uses "system sdwan", 6.x uses "system virtual-wan-link"
-  const sdwanMembers  = parseSdwanMembers(text);
+  const sdwanMembers  = parseSdwanMembers(parseText);
   const sdwanEnabled  = sdwanMembers.length > 0;
   // Virtual interface/zone name used in policies for SD-WAN traffic
   // FortiOS 6.x: "virtual-wan-link", FortiOS 7.x: zone name (often "virtual-wan-link" or custom)
   // Parse ALL SDWAN zone names from config system sdwan > config zone
   const sdwanZoneNames = (() => {
     if (!sdwanEnabled) return [];
-    const zonesBlock = text.match(/config system sdwan[\s\S]*?config zone([\s\S]*?)^\s*end/m);
+    const zonesBlock = parseText.match(/config system sdwan[\s\S]*?config zone([\s\S]*?)^\s*end/m);
     if (!zonesBlock) return [];
     const names = [];
     for (const m of zonesBlock[1].matchAll(/edit\s+"?([^\s"]+)"?/g)) names.push(m[1]);
@@ -274,7 +342,7 @@ function parseFortiConfig(text) {
   // Default SDWAN zone: prefer zone that has members assigned (set zone "X" in members)
   const sdwanZoneName = (() => {
     if (!sdwanEnabled) return null;
-    const membersBlock = text.match(/config system sdwan[\s\S]*?config members([\s\S]*?)^\s*end/m);
+    const membersBlock = parseText.match(/config system sdwan[\s\S]*?config members([\s\S]*?)^\s*end/m);
     if (membersBlock) {
       const zm = membersBlock[1].match(/set zone\s+"?([^\s"]+)"?/);
       if (zm) return zm[1];
@@ -408,7 +476,7 @@ function parseFortiConfig(text) {
 
   // ── SDWAN zones (config system sdwan > config members: set interface / set zone) ──
   // These are NOT in config system zone, so we parse them separately
-  const sdwanMembersBlock = text.match(/config system sdwan[\s\S]*?config members([\s\S]*?)^\s*end/m);
+  const sdwanMembersBlock = parseText.match(/config system sdwan[\s\S]*?config members([\s\S]*?)^\s*end/m);
   if (sdwanMembersBlock) {
     // Split by "edit N" to get individual member entries
     const entries = sdwanMembersBlock[1].split(/^\s*edit\s+\d+/m).filter(Boolean);
@@ -432,9 +500,9 @@ function parseFortiConfig(text) {
   const staticRoutes = parseStaticRoutes(_sections['router static']);
 
   // ── BGP ──
-  const bgpNeighborIntfs = parseBgpNeighborIntfs(text);
+  const bgpNeighborIntfs = parseBgpNeighborIntfs(parseText);
   // BGP actif seulement si des voisins avec remote-as sont configurés
-  const hasBgp = bgpNeighborIntfs.size > 0 || hasBgpNeighbors(text);
+  const hasBgp = bgpNeighborIntfs.size > 0 || hasBgpNeighbors(parseText);
 
   // Ajouter les voisins BGP comme pseudo-routes /32 (host routes)
   for (const [ip, intf] of bgpNeighborIntfs) {
@@ -467,11 +535,8 @@ function parseFortiConfig(text) {
   // Effective SD-WAN interface name to use in policies
   const sdwanIntfName = sdwanEnabled ? (sdwanZoneName || 'virtual-wan-link') : null;
 
-  // VDOM detection (multi-VDOM FortiGate) — parseur partiel, warning UI seulement
-  const hasVdom = /^config vdom\s*$/m.test(text);
-
   // OSPF detection — vérifie la présence de networks configurés
-  const hasOspf = /config router ospf[\s\S]*?set router-id\s+\d/m.test(text);
+  const hasOspf = /config router ospf[\s\S]*?set router-id\s+\d/m.test(parseText);
 
   // ── Security profiles ──
   const securityProfiles = {
@@ -482,7 +547,7 @@ function parseFortiConfig(text) {
     profileGroup: Object.keys(_sections['firewall profile-group'] || {}),
   };
 
-  return { addresses, addressGroups, customServices, serviceGroups, interfaces, zones, sdwanMembers, sdwanZoneNames, sdwanEnabled, sdwanIntfName, hasVdom, staticRoutes, fullRoutes, hasBgp, hasOspf, existingPolicies, securityProfiles };
+  return { addresses, addressGroups, customServices, serviceGroups, interfaces, zones, sdwanMembers, sdwanZoneNames, sdwanEnabled, sdwanIntfName, vdomList, selectedVdom: activeVdom, hasVdom: vdomList.length > 0, staticRoutes, fullRoutes, hasBgp, hasOspf, existingPolicies, securityProfiles };
 }
 
 // ─── Static routes + BGP parser ──────────────────────────────────────────────
@@ -1300,8 +1365,36 @@ function generateConfig(selectedPolicies, opts = {}) {
 
     // Destination address
     let dstAddrName;
-    // ── WAN policy : dstaddr toujours "all" ──
-    if (p._isWan || p.dstType === 'public') {
+    // ── WAN policy : dstaddr "all" par défaut, ou IPs spécifiques si _dstUseAll=false ──
+    if ((p._isWan || p.dstType === 'public') && p._dstUseAll !== false) {
+      dstAddrName = 'all';
+    } else if ((p._isWan || p.dstType === 'public') && p._dstUseAll === false) {
+      // Mode IPs spécifiques pour policy WAN
+      if (p._use32Dst && p.dstHosts?.length > 0) {
+        const hostNames = p.dstHosts.map(h => {
+          const { name, isNew } = resolveHost32(h, p._dstHostNames);
+          if (isNew) newAddresses.set(`${h}/32`, name);
+          return name;
+        });
+        dstAddrName = hostNames.length === 1 ? hostNames[0] : hostNames;
+      } else if (p.dstHosts?.length > 0) {
+        const hostNames = p.dstHosts.map(h => {
+          const { name, isNew } = resolveHost32(h, p._dstHostNames);
+          if (isNew) newAddresses.set(`${h}/32`, name);
+          return name;
+        });
+        dstAddrName = hostNames.length === 1 ? hostNames[0] : hostNames;
+      } else if (p.dstTarget && p.dstTarget !== 'all') {
+        const ip = p.dstTarget;
+        const cidr = ip.includes('/') ? ip : `${ip}/32`;
+        const name = p._dstAddrName || p.dstAddrName || suggestAddrName(cidr);
+        newAddresses.set(cidr, name);
+        dstAddrName = name;
+      } else {
+        dstAddrName = 'all';
+      }
+    // ── Multi-dst : "all" si _dstUseAll=true ──
+    } else if (p._isMultiDst && p._dstUseAll === true) {
       dstAddrName = 'all';
     // ── Multi-dst policy : destinations diverses avec seuil /24 vs /32 ──
     } else if (p._isMultiDst && p._multiDstSubnets?.length > 0) {
