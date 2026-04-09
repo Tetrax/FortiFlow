@@ -3738,15 +3738,15 @@ async function deploy() {
             <div class="dropdown-menu" style="min-width:210px;padding:10px 12px">
               <div style="font-size:10px;font-weight:700;color:var(--text2);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px">Périmètre</div>
               <div style="display:flex;gap:4px;margin-bottom:10px">
-                <button class="btn-sm merge-scope-btn ${deployState.mergeScope==='all'?'active':''}" data-scope="all">Tout</button>
-                <button class="btn-sm merge-scope-btn ${deployState.mergeScope==='internet'?'active':''}" data-scope="internet">Internet</button>
-                <button class="btn-sm merge-scope-btn ${deployState.mergeScope==='lan'?'active':''}" data-scope="lan">LAN</button>
+                <button class="btn-sm merge-scope-btn ${deployState.mergeScope==='all'?'btn-accent':''}" data-scope="all">Tout</button>
+                <button class="btn-sm merge-scope-btn ${deployState.mergeScope==='internet'?'btn-accent':''}" data-scope="internet">Internet</button>
+                <button class="btn-sm merge-scope-btn ${deployState.mergeScope==='lan'?'btn-accent':''}" data-scope="lan">LAN</button>
               </div>
               <div style="font-size:10px;font-weight:700;color:var(--text2);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px">Stratégie</div>
               <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:12px">
-                <button class="btn-sm merge-strategy-btn ${deployState.mergeStrategy==='max'?'active':''}" data-strategy="max">Par source</button>
-                <button class="btn-sm merge-strategy-btn ${deployState.mergeStrategy==='service'?'active':''}" data-strategy="service">Par service</button>
-                <button class="btn-sm merge-strategy-btn ${deployState.mergeStrategy==='policy'?'active':''}" data-strategy="policy">Par src/dst</button>
+                <button class="btn-sm merge-strategy-btn ${deployState.mergeStrategy==='max'?'btn-accent':''}" data-strategy="max">Par source</button>
+                <button class="btn-sm merge-strategy-btn ${deployState.mergeStrategy==='service'?'btn-accent':''}" data-strategy="service">Par service</button>
+                <button class="btn-sm merge-strategy-btn ${deployState.mergeStrategy==='policy'?'btn-accent':''}" data-strategy="policy">Par src/dst</button>
               </div>
               <button class="btn-sm btn-accent" style="width:100%;margin-bottom:8px" data-merge="apply">▶ Appliquer</button>
               <div class="dropdown-sep" style="margin:4px -4px"></div>
@@ -4026,7 +4026,7 @@ async function deploy() {
     if (scopeBtn) {
       e.stopImmediatePropagation(); // empêche la fermeture du dropdown
       deployState.mergeScope = scopeBtn.dataset.scope;
-      document.querySelectorAll('.merge-scope-btn').forEach(b => b.classList.toggle('active', b.dataset.scope === deployState.mergeScope));
+      document.querySelectorAll('.merge-scope-btn').forEach(b => b.classList.toggle('btn-accent', b.dataset.scope === deployState.mergeScope));
       return;
     }
     // Merge strategy toggle
@@ -4034,7 +4034,7 @@ async function deploy() {
     if (strategyBtn) {
       e.stopImmediatePropagation(); // empêche la fermeture du dropdown
       deployState.mergeStrategy = strategyBtn.dataset.strategy;
-      document.querySelectorAll('.merge-strategy-btn').forEach(b => b.classList.toggle('active', b.dataset.strategy === deployState.mergeStrategy));
+      document.querySelectorAll('.merge-strategy-btn').forEach(b => b.classList.toggle('btn-accent', b.dataset.strategy === deployState.mergeStrategy));
       return;
     }
     // Merge action from dropdown
