@@ -2141,7 +2141,7 @@ function showMergeDiff(scope, strategy) {
   const original = deployState._analyzedOriginal || deployState.analyzed;
   if (!original) return;
   const preview = computeMerge(original, scope, strategy);
-  const label = `${scope === 'all' ? 'Tout' : scope === 'internet' ? 'Internet' : 'LAN'} · ${strategy === 'max' ? 'Par source' : strategy === 'service' ? 'Par service' : 'Par src/dst'}`;
+  const label = `${scope === 'all' ? 'Tout' : scope === 'internet' ? 'Internet' : 'LAN'} · ${strategy === 'max' ? 'Par source' : strategy === 'service' ? 'Par service' : 'Par interface'}`;
 
   const beforeCount = original.length;
   const afterCount  = preview.length;
@@ -3746,7 +3746,7 @@ async function deploy() {
               <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:12px">
                 <button class="btn-sm merge-strategy-btn ${deployState.mergeStrategy==='max'?'btn-accent':''}" data-strategy="max">Par source</button>
                 <button class="btn-sm merge-strategy-btn ${deployState.mergeStrategy==='service'?'btn-accent':''}" data-strategy="service">Par service</button>
-                <button class="btn-sm merge-strategy-btn ${deployState.mergeStrategy==='policy'?'btn-accent':''}" data-strategy="policy">Par src/dst</button>
+                <button class="btn-sm merge-strategy-btn ${deployState.mergeStrategy==='policy'?'btn-accent':''}" data-strategy="policy">Par interface</button>
               </div>
               <button class="btn-sm btn-accent" style="width:100%;margin-bottom:8px" data-merge="apply">▶ Appliquer</button>
               <div class="dropdown-sep" style="margin:4px -4px"></div>
