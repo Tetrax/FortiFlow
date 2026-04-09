@@ -3735,7 +3735,7 @@ async function deploy() {
           <span id="deploy-merge-info" style="font-size:11px;color:var(--text2)"></span>
           <div class="dropdown-wrap" id="merge-dropdown-wrap">
             <button class="btn-sm dropdown-trigger">⚡ Fusion ▾</button>
-            <div class="dropdown-menu" style="min-width:210px;padding:10px 12px" onclick="event.stopPropagation()">
+            <div class="dropdown-menu" style="min-width:210px;padding:10px 12px">
               <div style="font-size:10px;font-weight:700;color:var(--text2);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px">Périmètre</div>
               <div style="display:flex;gap:4px;margin-bottom:10px">
                 <button class="btn-sm merge-scope-btn ${deployState.mergeScope==='all'?'active':''}" data-scope="all">Tout</button>
@@ -4024,6 +4024,7 @@ async function deploy() {
     // Merge scope toggle
     const scopeBtn = e.target.closest('.merge-scope-btn');
     if (scopeBtn) {
+      e.stopImmediatePropagation(); // empêche la fermeture du dropdown
       deployState.mergeScope = scopeBtn.dataset.scope;
       document.querySelectorAll('.merge-scope-btn').forEach(b => b.classList.toggle('active', b.dataset.scope === deployState.mergeScope));
       return;
@@ -4031,6 +4032,7 @@ async function deploy() {
     // Merge strategy toggle
     const strategyBtn = e.target.closest('.merge-strategy-btn');
     if (strategyBtn) {
+      e.stopImmediatePropagation(); // empêche la fermeture du dropdown
       deployState.mergeStrategy = strategyBtn.dataset.strategy;
       document.querySelectorAll('.merge-strategy-btn').forEach(b => b.classList.toggle('active', b.dataset.strategy === deployState.mergeStrategy));
       return;
