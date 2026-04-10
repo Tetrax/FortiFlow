@@ -1,0 +1,34 @@
+{
+  "always_critical": {
+    "21": "FTP — données en clair",
+    "22": "SSH",
+    "23": "Telnet — données en clair",
+    "69": "TFTP — sans authentification",
+    "512": "rexec — exécution distante non chiffrée",
+    "513": "rlogin — données en clair",
+    "514": "rsh — shell non chiffré",
+    "3389": "RDP"
+  },
+  "always_high": {
+    "161": "SNMP",
+    "162": "SNMP Trap"
+  },
+  "critical_if_wan": {
+    "445": "SMB",
+    "1433": "MSSQL",
+    "1521": "Oracle DB",
+    "3306": "MySQL",
+    "3389": "RDP",
+    "5432": "PostgreSQL",
+    "5900": "VNC",
+    "6379": "Redis",
+    "27017": "MongoDB"
+  },
+  "high_if_wan": {
+    "22": "SSH",
+    "80": "HTTP non chiffré",
+    "5985": "WinRM HTTP",
+    "5986": "WinRM HTTPS",
+    "9200": "Elasticsearch"
+  }
+}

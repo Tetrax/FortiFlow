@@ -2133,7 +2133,9 @@ function computeMerge(original, scope, strategy) {
   } else {
     inScope = clone(original.filter(p => !isInternet(p))); outScope = clone(original.filter(isInternet));
   }
-  const merged = strategy === 'service' ? mergeByService(inScope) : mergeByPolicyId(inScope);
+  const merged = strategy === 'service'      ? mergeByService(inScope)
+               : strategy === 'destination'  ? mergeByDestination(inScope)
+               :                               mergeByPolicyId(inScope);
   return [...merged, ...outScope].sort((a, b) => (b.sessions || 0) - (a.sessions || 0));
 }
 
@@ -2141,7 +2143,7 @@ function showMergeDiff(scope, strategy) {
   const original = deployState._analyzedOriginal || deployState.analyzed;
   if (!original) return;
   const preview = computeMerge(original, scope, strategy);
-  const label = `${scope === 'all' ? 'Tout' : scope === 'internet' ? 'Internet' : 'LAN'} · ${strategy === 'max' ? 'Par source' : strategy === 'service' ? 'Par service' : 'Par interface'}`;
+  const label = `${scope === 'all' ? 'Tout' : scope === 'internet' ? 'Internet' : 'LAN'} · ${strategy === 'max' ? 'Par source' : strategy === 'service' ? 'Par service' : strategy === 'destination' ? 'Par destination' : 'Par interface'}`;
 
   const beforeCount = original.length;
   const afterCount  = preview.length;
@@ -3743,11 +3745,18 @@ async function deploy() {
                 <button class="btn-sm merge-scope-btn ${deployState.mergeScope==='lan'?'btn-accent':''}" data-scope="lan">LAN</button>
               </div>
               <div style="font-size:10px;font-weight:700;color:var(--text2);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px">Stratégie</div>
-              <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:12px">
+              <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px">
                 <button class="btn-sm merge-strategy-btn ${deployState.mergeStrategy==='max'?'btn-accent':''}" data-strategy="max">Par source</button>
                 <button class="btn-sm merge-strategy-btn ${deployState.mergeStrategy==='service'?'btn-accent':''}" data-strategy="service">Par service</button>
+                <button class="btn-sm merge-strategy-btn ${deployState.mergeStrategy==='destination'?'btn-accent':''}" data-strategy="destination">Par destination</button>
                 <button class="btn-sm merge-strategy-btn ${deployState.mergeStrategy==='policy'?'btn-accent':''}" data-strategy="policy">Par interface</button>
               </div>
+              <div class="merge-strategy-hint">${{
+                max:         '↳ Réduction maximale : tous les subnets d\'un même flux → une règle par source (peut casser la granularité)',
+                service:     '↳ Même services + même interfaces → fusionne multi-sources et multi-destinations automatiquement',
+                destination: '↳ Même destination + même interfaces → fusionne les sources différentes en règles multi-sources',
+                policy:      '↳ Même policy ID d\'origine → regroupe par paire d\'interfaces, indépendamment des services',
+              }[deployState.mergeStrategy] || ''}</div>
               <button class="btn-sm btn-accent" style="width:100%;margin-bottom:8px" data-merge="apply">▶ Appliquer</button>
               <div class="dropdown-sep" style="margin:4px -4px"></div>
               <div class="dropdown-item" data-merge="selection">⚡ Fusionner la sélection</div>
@@ -4035,6 +4044,13 @@ async function deploy() {
       e.stopImmediatePropagation(); // empêche la fermeture du dropdown
       deployState.mergeStrategy = strategyBtn.dataset.strategy;
       document.querySelectorAll('.merge-strategy-btn').forEach(b => b.classList.toggle('btn-accent', b.dataset.strategy === deployState.mergeStrategy));
+      const hintEl = document.querySelector('.merge-strategy-hint');
+      if (hintEl) hintEl.textContent = {
+        max:         '↳ Réduction maximale : tous les subnets d\'un même flux → une règle par source (peut casser la granularité)',
+        service:     '↳ Même services + même interfaces → fusionne multi-sources et multi-destinations automatiquement',
+        destination: '↳ Même destination + même interfaces → fusionne les sources différentes en règles multi-sources',
+        policy:      '↳ Même policy ID d\'origine → regroupe par paire d\'interfaces, indépendamment des services',
+      }[deployState.mergeStrategy] || '';
       return;
     }
     // Merge action from dropdown
@@ -5619,6 +5635,120 @@ function mergeByService(policies) {
   return merged;
 }
 
+// Regroupe par même destination + même interfaces → multi-source rules
+function mergeByDestination(policies) {
+  const groups = new Map(); // dstTarget||srcintf||dstintf → [policies]
+
+  for (const p of policies) {
+    const dst    = p.dstTarget || '';
+    const src    = p._srcintf || p.analysis?.srcIface || '';
+    const dstI   = p._dstintf || p.analysis?.dstIface || '';
+    const isWan  = p.dstType === 'public' || p.dstTarget === 'all' || p._isWan;
+    const key    = isWan ? `__wan__||${src}||${dstI}` : `${dst}||${src}||${dstI}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(p);
+  }
+
+  const merged = [];
+
+  for (const [, group] of groups) {
+    if (group.length === 1) { merged.push({ ...group[0] }); continue; }
+
+    const base          = group[0];
+    const allServices   = mergeServices(group);
+    const totalSessions = group.reduce((s, p) => s + (p.sessions || 0), 0);
+    const allPolicyIds  = [...new Set(group.flatMap(p => p.policyIds || []))].sort((a, b) => Number(a) - Number(b));
+
+    const isWan      = group.some(p => p.dstType === 'public' || p.dstTarget === 'all' || p._isWan);
+    const srcSubnets = [...new Set(group.map(p => p.srcSubnet).filter(Boolean))].sort();
+    const multiSrc   = srcSubnets.length > 1;
+
+    const allSrcHosts = [...new Set(group.flatMap(p => p.srcHosts || []))].sort();
+    const allDstHosts = [...new Set(group.flatMap(p => p.dstHosts || []))].sort();
+
+    const mergedSrcHostNames = {};
+    const mergedDstHostNames = {};
+    const mergedSrcHF = new Set();
+    const mergedDstHF = new Set();
+    for (const p of group) {
+      Object.assign(mergedSrcHostNames, p._srcHostNames || {});
+      Object.assign(mergedDstHostNames, p._dstHostNames || {});
+      (p._srcHostsFound || []).forEach(h => mergedSrcHF.add(h));
+      (p._dstHostsFound || []).forEach(h => mergedDstHF.add(h));
+    }
+
+    let multiSrcSubnets = null;
+    if (multiSrc) {
+      multiSrcSubnets = srcSubnets.map(subnet => {
+        const subnetPols = group.filter(p => p.srcSubnet === subnet);
+        const hosts      = [...new Set(subnetPols.flatMap(p => p.srcHosts || []))].sort();
+        const srcAddr    = subnetPols.find(p => p.analysis?.srcAddr?.found)?.analysis?.srcAddr
+                         || subnetPols[0]?.analysis?.srcAddr;
+        return { subnet, hosts, useSubnet: hosts.length >= 5,
+          addrName: srcAddr?.found ? srcAddr.name : '', addrFound: !!(srcAddr?.found) };
+      });
+    }
+
+    let existingSrcGrp = null;
+    if (multiSrc && deployState.addrGroups) {
+      const srcAddrNames = srcSubnets.map(s => {
+        const sp = group.find(p => p.srcSubnet === s);
+        return sp?.analysis?.srcAddr?.found ? sp.analysis.srcAddr.name : null;
+      });
+      if (srcAddrNames.every(Boolean)) {
+        const memberNames = new Set(srcAddrNames);
+        for (const [grpName, grp] of Object.entries(deployState.addrGroups)) {
+          const grpMembers = new Set(grp.members);
+          if (grpMembers.size === memberNames.size && [...memberNames].every(m => grpMembers.has(m))) {
+            existingSrcGrp = grpName; break;
+          }
+        }
+      }
+    }
+
+    merged.push({
+      ...base,
+      srcSubnet:        srcSubnets[0],
+      srcSubnets,
+      dstType:          isWan ? 'public' : base.dstType,
+      _isMultiDst:      false,
+      _multiDstSubnets: null,
+      _multiSrcSubnets: multiSrcSubnets,
+      sessions:         totalSessions,
+      serviceDesc:      allServices.map(s => s.label).join(', '),
+      policyIds:        allPolicyIds,
+      srcHosts:         allSrcHosts,
+      dstHosts:         allDstHosts,
+      _use32Src:        !multiSrc && allSrcHosts.length >= 1 && allSrcHosts.length <= AUTO32_THRESHOLD,
+      _use32Dst:        !isWan && allDstHosts.length >= 1 && allDstHosts.length <= AUTO32_THRESHOLD,
+      _isWan:           isWan,
+      _nat:             isWan,
+      _mergedCount:     group.length,
+      _isDstMerge:      true,
+      _mergedFrom:      group.map(p => ({ srcSubnet: p.srcSubnet, dstTarget: p.dstTarget, analysis: { services: p.analysis?.services } })),
+      _srcAddrName:     existingSrcGrp || '',
+      _srcAddrGrpFound: !!existingSrcGrp,
+      _useSrcGroup:     !!existingSrcGrp,
+      _dstAddrName:     isWan ? 'all' : (base.analysis?.dstAddr?.found ? base.analysis.dstAddr.name : ''),
+      _dstAddrGrpFound: !isWan && !!(base.analysis?.dstAddr?.found),
+      _useDstGroup:     !isWan && !!(base.analysis?.dstAddr?.found),
+      _policyName:      '',
+      _srcHostNames:    Object.keys(mergedSrcHostNames).length ? mergedSrcHostNames : undefined,
+      _dstHostNames:    Object.keys(mergedDstHostNames).length ? mergedDstHostNames : undefined,
+      _srcHostsFound:   mergedSrcHF.size ? [...mergedSrcHF] : undefined,
+      _dstHostsFound:   mergedDstHF.size ? [...mergedDstHF] : undefined,
+      srcAddrNames:     existingSrcGrp ? null : (multiSrc ? srcSubnets.map(s => `FF_${escSlug(s)}`) : null),
+      analysis: {
+        ...base.analysis,
+        services:  allServices,
+        needsWork: allServices.some(s => !s.found),
+      },
+    });
+  }
+
+  return merged;
+}
+
 function applyMerge(scope, strategy) {
   const mode = scope; // compat interne (reset utilise le 1er arg)
   if (!deployState.analyzed) return;
@@ -6607,8 +6737,42 @@ function wireDeployTable() {
     renderDeployPolicies(filterDeployPolicies(), false);
   });
 
+  // ── click: .btn-merge-group (fusionner un groupe spécifique) ──
+  container.addEventListener('click', e => {
+    const btn = e.target.closest('.btn-merge-group');
+    if (!btn) return;
+    e.stopPropagation();
+    const pair = btn.dataset.mergeGroup;
+    if (!pair || !deployState.analyzed) return;
+    _pushDeployHistory();
+    const strategy = deployState.mergeStrategy || 'service';
+    const pairPols = deployState.analyzed.filter(p => {
+      const src = p._srcintf || p.analysis?.srcIface || '';
+      const dst = p._dstintf || p.analysis?.dstIface || '';
+      return `${src} → ${dst}` === pair;
+    });
+    const rest     = deployState.analyzed.filter(p => {
+      const src = p._srcintf || p.analysis?.srcIface || '';
+      const dst = p._dstintf || p.analysis?.dstIface || '';
+      return `${src} → ${dst}` !== pair;
+    });
+    let merged;
+    if (strategy === 'max') {
+      merged = mergeAnalyzedPolicies(pairPols.map(p => ({ ...p })), 'all');
+    } else if (strategy === 'service') {
+      merged = mergeByService(pairPols.map(p => ({ ...p })));
+    } else if (strategy === 'destination') {
+      merged = mergeByDestination(pairPols.map(p => ({ ...p })));
+    } else {
+      merged = mergeByPolicyId(pairPols.map(p => ({ ...p })));
+    }
+    deployState.analyzed = [...merged, ...rest].sort((a, b) => (b.sessions || 0) - (a.sessions || 0));
+    renderDeployPolicies(filterDeployPolicies(), false);
+  });
+
   // ── click: .intf-pair-header (collapse/expand groups) ──
   container.addEventListener('click', e => {
+    if (e.target.closest('.btn-merge-group')) return; // handled above
     const header = e.target.closest('.intf-pair-header');
     if (!header) return;
     e.stopPropagation();
@@ -6832,6 +6996,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
           <span class="intf-pair-toggle">${collapsed ? '▸' : '▾'}</span>
           <span class="intf-pair-name">${escHtml(pair)}</span>
           <span class="intf-pair-count">${members.length} polic${members.length > 1 ? 'ies' : 'y'}</span>
+          ${members.length > 1 ? `<button class="btn-sm btn-merge-group" data-merge-group="${escHtml(pair)}" title="Fusionner ce groupe (stratégie courante)">⚡ Fusionner</button>` : ''}
         </div></td>
       </tr>`);
       if (!collapsed) {

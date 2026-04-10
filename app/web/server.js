@@ -1338,6 +1338,7 @@ app.post('/api/deploy/config-upload', upload.single('conffile'), async (req, res
     const text = await fs.promises.readFile(req.file.path, 'utf8');
     const fortiConfig = parseFortiConfig(text);
     s.fortiConfig = fortiConfig;
+    s.fortiConfigRawText = text;
     setFortiConfig(s.id, fortiConfig);
 
     // Re-analyze with real CIDR subnets from the FortiGate config (before freeing flows).
@@ -1369,6 +1370,8 @@ app.post('/api/deploy/config-upload', upload.single('conffile'), async (req, res
       zones:            Object.keys(fortiConfig.zones).length,
       sdwan:            fortiConfig.sdwanMembers.length > 0,
       vdom:             fortiConfig.hasVdom  || false,
+      vdomList:         fortiConfig.vdomList || [],
+      selectedVdom:     fortiConfig.selectedVdom || null,
       routes:           (fortiConfig.fullRoutes || fortiConfig.staticRoutes).length,
       bgp:              fortiConfig.hasBgp   || false,
       ospf:             fortiConfig.hasOspf  || false,
@@ -1378,6 +1381,47 @@ app.post('/api/deploy/config-upload', upload.single('conffile'), async (req, res
     res.status(500).json({ error: err.message });
   } finally {
     fs.unlink(req.file.path, () => {});
+  }
+});
+
+// POST /api/deploy/config-vdom — re-parse the stored config for a different VDOM
+app.post('/api/deploy/config-vdom', express.json(), (req, res) => {
+  const s = requireSession(req, res);
+  if (!s) return;
+  if (!s.fortiConfigRawText) return res.status(404).json({ error: 'Aucune config FortiGate chargée' });
+
+  const { vdom } = req.body || {};
+  if (!vdom) return res.status(400).json({ error: 'vdom requis' });
+
+  try {
+    const fortiConfig = parseFortiConfig(s.fortiConfigRawText, vdom);
+    s.fortiConfig = fortiConfig;
+    setFortiConfig(s.id, fortiConfig);
+
+    const policyMap = new Map();
+    for (const pol of fortiConfig.existingPolicies || []) {
+      policyMap.set(String(pol.policyid), pol);
+    }
+    s.policyMap = policyMap;
+
+    res.json({
+      addresses:        Object.keys(fortiConfig.addresses).length,
+      addrGroups:       Object.keys(fortiConfig.addressGroups || {}).length,
+      services:         Object.keys(fortiConfig.customServices).length,
+      serviceGroups:    Object.keys(fortiConfig.serviceGroups || {}).length,
+      interfaces:       Object.keys(fortiConfig.interfaces).length,
+      zones:            Object.keys(fortiConfig.zones).length,
+      sdwan:            fortiConfig.sdwanMembers.length > 0,
+      vdom:             fortiConfig.hasVdom || false,
+      vdomList:         fortiConfig.vdomList || [],
+      selectedVdom:     fortiConfig.selectedVdom || null,
+      routes:           (fortiConfig.fullRoutes || fortiConfig.staticRoutes).length,
+      bgp:              fortiConfig.hasBgp   || false,
+      ospf:             fortiConfig.hasOspf  || false,
+      existingPolicies: (fortiConfig.existingPolicies || []).length,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
