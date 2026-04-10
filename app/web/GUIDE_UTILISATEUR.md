@@ -23,8 +23,10 @@
    - Étape 1 : Config
    - Étape 2 : Interfaces
    - Étape 3 : Policies
-7. [Export et sauvegarde](#7-export-et-sauvegarde)
-8. [Questions fréquentes](#8-questions-fréquentes)
+7. [Workspaces — gestion des analyses](#7-workspaces--gestion-des-analyses)
+8. [Export et sauvegarde](#8-export-et-sauvegarde)
+9. [Page Admin](#9-page-admin)
+10. [Questions fréquentes](#10-questions-fréquentes)
 
 ---
 
@@ -159,6 +161,15 @@ Carte de chaleur (heatmap) des communications inter-sous-réseaux (trafic privé
 | **Clic sur une cellule** | Aller dans l'onglet Flows avec src/dst pré-filtrés |
 
 La cellule diagonale (même sous-réseau) est mise en évidence différemment.
+
+#### Export de la matrice
+
+Deux boutons d'export sont disponibles en haut de la matrice :
+
+| Bouton | Format | Description |
+|--------|--------|-------------|
+| **⬇ PNG** | Image | Capture la heatmap en PNG (nommée avec horodatage) |
+| **⬇ Excel** | `.xlsx` | Exporte les données brutes de la matrice dans un tableur |
 
 ---
 
@@ -297,6 +308,10 @@ Une fois chargé, un résumé affiche :
 
 Le bouton **↺ Recharger** permet de recharger le fichier config.
 
+#### Support multi-VDOM
+
+Si le fichier de configuration contient plusieurs **VDOM**, un sélecteur apparaît dans le résumé de configuration. Choisissez le VDOM cible dans la liste déroulante — FortiFlow rechargera automatiquement les interfaces, zones, adresses et policies du VDOM sélectionné pour l'ensemble du déploiement.
+
 ---
 
 ### Étape 2 — Interfaces & Zones
@@ -328,29 +343,106 @@ Naviguez avec **← Précédent** / **Suivant →**.
 | **Log** (dropdown) | `all` / `utm` / `disable` |
 | **Analyser les policies** | Lance la comparaison avec le fichier .conf importé |
 
-#### Options de fusion (bouton ⚡ Fusion ▾)
+#### Barre de recherche
 
-| Option | Description |
+Un champ de recherche libre filtre les policies en temps réel. Syntaxes supportées :
+
+| Syntaxe | Exemple | Effet |
+|---------|---------|-------|
+| Texte libre | `192.168.1` | Filtre par IP, subnet, service |
+| `srcintf:NOM` | `srcintf:port1` | Filtre par interface source exacte |
+| `dstintf:NOM` | `dstintf:wan1` | Filtre par interface destination exacte |
+
+#### Modes de vue des policies
+
+La toolbar contient un sélecteur pour basculer entre **deux modes de regroupement** des policies :
+
+| Mode | Libellé | Affichage | Utilité |
+|------|---------|-----------|---------|
+| **Par paire d'interfaces** | **(sélection par défaut)** | Groupe les policies par paire (srcintf → dstintf). Chaque groupe affiche un en-tête avec le nombre de policies et un bouton **⚡ Fusionner** pour fusionner UNIQUEMENT ce groupe selon la stratégie active. Idéal pour affiner la fusion par domaine. | Travail granulaire : fusionner groupe par groupe |
+| **Par séquence** | **(mode agrégé)** | Les policies sont agrégées en séquences (ensemble de policies avec les mêmes services). Affiche un badge **×N** pour indiquer le nombre de policies fusionnées. Vue compacte. | Visibilité globale et génération CLI plus rapide |
+
+Basculez entre ces deux modes en cliquant sur les boutons dans la toolbar. Chaque mode conserve ses propres paramètres de fusion.
+
+#### Menu ⚡ Fusion
+
+Le menu **Fusion** combine un **périmètre** et une **stratégie** de regroupement pour les policies **de l'étape 3**.
+
+**Périmètre :**
+
+| Bouton | Effet |
+|--------|-------|
+| **Tout** | Fusionne l'ensemble des policies |
+| **Internet** | Fusionne uniquement les policies WAN |
+| **LAN** | Fusionne uniquement les policies LAN |
+
+**Stratégie** (du plus granulaire au plus réducteur) :
+
+| Stratégie | Granularité | Description |
+|-----------|-------------|-------------|
+| **Par service** | Le plus granulaire | Regroupe par même ensemble de services + interfaces → règles multi-sources ET multi-destinations. Idéal pour construire des policies propres depuis une config permissive. |
+| **Par source** | Bon compromis | Regroupe par même flux src→dst → une règle par source. Bon équilibre entre granularité et volume. |
+| **Par destination** | Réducteur | Regroupe par même destination + interfaces → fusionne les sources différentes en règles multi-sources. Réduit bien sans trop élargir les règles. |
+| **Par interface** | Le plus réducteur | ⚠ Regroupe par policy d'origine. Peut recréer des règles très larges si la policy de départ était permissive (ex : any/any). |
+
+**Actions de fusion :**
+
+| Action | Description |
 |--------|-------------|
-| **Fusionner Internet** | Regroupe tous les flux WAN en une seule règle |
-| **Fusionner LAN** | Regroupe tous les flux LAN |
-| **Tout fusionner** | Fusion maximale |
-| **Par Policy ID** | Organisation par identifiant de policy source |
-| **↺ Réinitialiser** | Repart des policies originales |
+| **▶ Appliquer** | Exécute la fusion globale selon le périmètre et la stratégie active. Un aperçu des modifications est proposé avant confirmation. |
+| **⚡ Fusionner la sélection** | Fusionne uniquement les policies **cochées** dans le tableau (au lieu de toutes). Permet de cibler un sous-ensemble. |
+| **⚡ Fusionner ce groupe** *(mode par paire d'interfaces)* | Bouton contextuel visible en mode **« Par paire d'interfaces »**. Lorsqu'une paire (srcintf → dstintf) contient plusieurs policies, ce bouton fusionne **uniquement ce groupe** selon la stratégie courante, sans affecter les autres paires. Très utile pour affiner progressivement. |
+| **↺ Réinitialiser** | Repart des policies originales et annule toutes les fusions appliquées. |
 
-#### Options de vue (bouton ☰ Vue ▾)
+#### Menu ☰ Vue *(options de vue)*
 
-| Option | Description |
-|--------|-------------|
-| **☰ Liste classique** | Tableau plat, toutes les policies |
-| **⇄ Par interfaces** | Groupé par paire srcintf → dstintf |
-| **⊞ Séquences** | Agrégé par src/dst/services identiques |
+> Note : ce menu n'est pas intitulé « Vue » dans l'interface — les options de vue sont dans le même menu Fusion ou accessibles via d'autres contrôles. Se référer aux boutons disponibles dans la toolbar.
 
-#### Granularité
+#### Bouton Détailler
+
+Le bouton **Détailler ▾** cycle entre trois modes d'affichage des policies :
+
+| Mode | Libellé | Description |
+|------|---------|-------------|
+| **off** | Détailler ▾ | Affichage consolidé par défaut |
+| **service** | Par service ✓ | Éclate chaque policy en sous-policies par service |
+| **host** | Par hôte 1:1 ✓ | Éclate chaque policy en paires source/destination individuelles |
+
+#### Granularité /24 ↔ /32
 
 | Bouton | Description |
 |--------|-------------|
 | **/24 ↔ /32** | Basculer entre sous-réseau (/24) et hôtes individuels (/32) |
+
+#### Historique des modifications (Undo / Redo)
+
+Deux boutons **‹** (annuler) et **›** (rétablir) permettent de naviguer dans l'historique des modifications de la liste de policies (jusqu'à 10 états). Le raccourci **Ctrl+Z** est également supporté depuis le panneau de détail d'une policy.
+
+#### Flux sans réponse (scans potentiels)
+
+FortiFlow détecte automatiquement les policies dont **≥ 80 % des flux n'ont reçu aucune réponse** (typique des scans réseau). Ces policies sont **masquées par défaut**.
+
+Un bouton apparaît dans la toolbar pour les afficher/masquer, avec le nombre de policies concernées.
+
+#### Objets manquants
+
+Si des adresses ou services référencés n'existent pas dans le fichier `.conf`, une **barre d'avertissement** s'affiche en orange sous la toolbar. Cliquez dessus pour ouvrir la **modale de nommage des objets** :
+- Liste de tous les objets à créer (adresses, hôtes, services)
+- Champ de renommage pour chaque objet
+- Les objets renommés seront utilisés dans la config CLI générée
+
+#### Profils de sécurité
+
+Après l'analyse des policies, si le fichier `.conf` contient des profils de sécurité, une barre apparaît au-dessus du bouton de génération avec des listes déroulantes :
+
+| Sélecteur | Profil |
+|-----------|--------|
+| **AV** | Antivirus |
+| **WebFilter** | Filtrage web |
+| **IPS** | Système de prévention d'intrusion |
+| **SSL/SSH** | Inspection SSL/SSH |
+
+Les profils sélectionnés seront inclus dans la configuration CLI générée.
 
 #### Avertissements
 
@@ -362,7 +454,7 @@ Le bouton **⚠ …** apparaît si des adresses ou services référencés n'exis
 |---------|-------------|
 | **☐** | Sélectionner la policy pour la génération |
 | **Source** | Sous-réseau ou badge `[N hôtes]` (cliquable) |
-| **Destination** | IP/sous-réseau ou `all (internet)` |
+| **Destination** | IP/sous-réseau, `all (internet)`, ou **IPs spécifiques** (cliquable pour WAN multihost) |
 | **Services** | Description des services |
 | **Sessions / Octets** | Statistiques issues du log |
 | **NAT** | Checkbox individuelle par policy |
@@ -370,39 +462,179 @@ Le bouton **⚠ …** apparaît si des adresses ou services référencés n'exis
 | **Interface Out** | Interface destination FortiGate |
 | **Action** | ACCEPT ou DENY |
 
+##### Comportement automatique des destinations WAN
+
+Pour les policies WAN avec **plus de 10 hôtes ou sous-réseaux en destination**, le mode passe automatiquement en **"all"** au lieu de lister les IPs individuellement. Cette réduction rend les policies plus gérables.
+
+L'utilisateur peut toujours cliquer sur **« IPs spécifiques »** dans la colonne Destination pour basculer et affiner manuellement les destinations si nécessaire.
+
+#### Menu Analyse ▾
+
+Le menu **Analyse ▾** dans la toolbar donne accès à deux fonctionnalités d'analyse de la configuration FortiGate importée :
+
+| Option | Description |
+|--------|-------------|
+| **⚠ Risques** | Ouvre/ferme le panneau d'analyse de risques |
+| **⚙ Ports à risque** | Configure la classification des ports à risque |
+
+#### Panneau d'analyse de risques
+
+Le panneau de risques (accessible via **Analyse ▾ → ⚠ Risques**) présente deux sections :
+
+**1. Flux à risque** — Policies contenant des ports classifiés à risque :
+
+| Niveau | Description |
+|--------|-------------|
+| **CRITIQUE** | Ports toujours dangereux (ex : Telnet, RDP exposé) |
+| **ÉLEVÉ** | Ports à haut risque |
+| **MOYEN** | Ports risqués selon le contexte (WAN vs LAN) |
+
+Pour chaque flux à risque : subnet source, destination, ports concernés et nombre de sessions.
+
+**2. Policies trop permissives** *(nécessite un fichier .conf chargé)* — Détecte les policies de votre FortiGate existant qui sont trop larges (any/any, plages trop ouvertes), groupées par direction :
+- LAN → WAN
+- WAN → LAN
+- LAN → LAN
+
+Chaque entrée indique la raison (ex : source ou destination `all`, service `ALL`).
+
+#### Configuration des ports à risque
+
+Via **Analyse ▾ → ⚙ Ports à risque**, une modale permet de personnaliser la classification :
+
+| Catégorie | Comportement |
+|-----------|-------------|
+| **Toujours CRITIQUE** | Port classé CRITIQUE quelle que soit la destination |
+| **Toujours ÉLEVÉ** | Port classé ÉLEVÉ quelle que soit la destination |
+| **CRITIQUE si WAN, MOYEN si LAN** | Niveau adapté selon la nature de la destination |
+| **ÉLEVÉ si WAN, MOYEN si LAN** | Niveau adapté selon la nature de la destination |
+
+Vous pouvez ajouter, modifier ou supprimer des entrées, puis cliquer **💾 Sauvegarder et relancer** pour appliquer. Le bouton **↺ Réinitialiser** revient aux valeurs par défaut.
+
 #### Génération de la configuration CLI
 
 1. Cochez les policies souhaitées (ou utilisez la case "tout sélectionner").
 2. Cliquez sur **⬇ Générer config FortiGate**.
 3. Un aperçu **CLI** s'affiche en bas de page (section « Aperçu CLI »).
 4. Utilisez **📋 Copier** pour copier dans le presse-papier ou **⬇ Télécharger** pour sauvegarder un fichier `.conf`.
+5. Le bouton **⊕ Diff** (visible après génération) compare la config générée avec la config importée et met en évidence les policies nouvelles ou modifiées.
 
 ---
 
-## 7. Export et sauvegarde
+## 7. Workspaces — gestion des analyses
+
+### Qu'est-ce qu'un workspace ?
+
+Un **workspace** est une analyse sauvegardée nommée de votre choix. Après avoir importé et analysé un fichier, FortiFlow vous propose automatiquement de nommer ce workspace pour le retrouver facilement dans l'historique.
+
+### Créer un workspace
+
+1. Après l'**import d'un fichier**, une modale apparaît : **« 💾 Nommer ce workspace »**
+2. Entrez un nom explicite (ex : **« Client XYZ — Audit VPN »**, **« Prod — Logs du 2026-04-10 »**)
+3. Cliquez **« Sauvegarder »** pour l'ajouter à l'historique
+4. Vous pouvez aussi cliquer **« Passer »** pour ignorer (l'analyse reste active dans la session, mais ne sera pas sauvegardée)
+
+### Charger un workspace depuis l'historique
+
+Sur l'**écran d'accueil** (quand aucune session n'est active), la section **Historique** en bas à gauche affiche tous vos workspaces sauvegardés :
+
+- **Clic sur un workspace** → recharge immédiatement cette analyse avec tous les paramètres (flows, policies, config, etc.)
+- **Bouton ×** → supprime le workspace de l'historique
+- Chaque workspace affiche son **nom** et la date relative de création (« il y a 2h », « il y a 1j », etc.)
+
+### Reprendre un workspace depuis un fichier
+
+Vous pouvez aussi **exporter un workspace complet** en fichier (`.ffws` ou `.json`) et le **réimporter plus tard** :
+
+1. Depuis le **Dashboard**, cliquez **💾 Sauvegarder workspace** → télécharge un fichier d'export
+2. De retour sur l'écran d'accueil, **glissez-déposez ce fichier** (ou utilisez le bouton **« 💾 Reprendre un workspace »**) pour le recharger complètement
+
+> **Note :** Les workspaces sauvegardés en serveur expirent après **2 heures d'inactivité**. Utilisez l'export fichier si vous devez reprendre votre travail le lendemain.
+
+### Durée de vie d'une session
+
+- **Session serveur** : 2 heures d'inactivité → données serveur supprimées automatiquement
+- **Workspace sauvegardé** (historique) : conservé indéfiniment dans le serveur
+- **Workspace exporté** (fichier) : persiste localement, reproductible à l'infini
+
+---
+
+## 8. Export et sauvegarde
 
 | Bouton | Emplacement | Description |
 |--------|-------------|-------------|
 | **⬇ CSV** (flows) | Analyse > Flows | Exporte les flux filtrés |
+| **⬇ PNG** | Analyse > Matrice | Capture la heatmap en image PNG |
+| **⬇ Excel** | Analyse > Matrice | Exporte les données de la matrice en XLSX |
 | **⬇ Export CSV FortiGate** | Policies > Brutes | Exporte les policies brutes |
 | **⬇ CSV consolidé** | Policies > Consolidées | Exporte les policies consolidées |
+| **📊 Export Excel** | Déploiement > Étape 3 | Exporte les policies de déploiement en XLSX |
+| **📥 Import Excel** | Déploiement > Étape 3 | Réimporte les policies depuis un fichier XLSX modifié |
 | **⬇ Générer config** | Déploiement > Étape 3 | Génère le fichier CLI FortiGate |
 | **📋 Copier** | Déploiement > Étape 3 | Copie la config CLI |
 | **⬇ Télécharger** | Déploiement > Étape 3 | Télécharge la config CLI |
-| **💾 Sauvegarder** | Déploiement > Étape 3 | Exporte la session complète (JSON) |
-| **📂 Charger** | Déploiement > Étape 3 | Importe une session sauvegardée |
+| **💾 Sauvegarder workspace** | Dashboard | Exporte la session complète en fichier (`.ffws`) |
 
-> **Note :** Les sessions expirent automatiquement après **2 heures** d'inactivité. Utilisez **💾 Sauvegarder** si vous souhaitez reprendre votre travail plus tard.
+> **Note :** Les sessions expirent automatiquement après **2 heures** d'inactivité. Utilisez **💾 Sauvegarder workspace** si vous souhaitez reprendre votre travail plus tard (voir section [Workspaces](#7-workspaces--gestion-des-analyses)).
+
+### Export / Import Excel des policies
+
+Le couple **📊 Export Excel** / **📥 Import Excel** permet un flux de travail collaboratif :
+1. Exportez les policies en XLSX depuis l'étape 3.
+2. Modifiez les noms, actions ou commentaires dans le tableur.
+3. Réimportez le fichier pour appliquer vos modifications dans FortiFlow.
 
 ---
 
-## 8. Questions fréquentes
+## 9. Page Admin
+
+FortiFlow expose une **page d'administration** pour surveiller et gérer les sessions actives (accès direct uniquement, pas de contrôle d'accès).
+
+### Accès à la page Admin
+
+```
+https://devval.com/admin
+```
+
+### Fonctionnalités
+
+La page affiche un **tableau en temps réel** de toutes les sessions serveur actives :
+
+| Colonne | Description |
+|---------|-------------|
+| **Session ID** | Identifiant unique de la session (UUID) |
+| **Statut** | `ready` (analyse terminée), `parsing` (en cours), `error` (erreur) |
+| **Flows** | Nombre de flux uniques importés dans la session |
+| **FortiConfig** | ✓ si un fichier `.conf` a été chargé, — sinon |
+| **Créée** | Timestamp relatif de création (ex : « il y a 23 min ») |
+| **Dernier accès** | Timestamp du dernier appel API de cette session |
+| **Action** | Bouton ✕ pour supprimer manuellement une session |
+
+### Outils
+
+| Outil | Description |
+|-------|-------------|
+| **↻ Actualiser** | Recharge la liste des sessions (utile en mode manuel) |
+| **Auto 5 s** | Checkbox — rafraîchit automatiquement le tableau tous les 5 secondes |
+| **✕ Supprimer toutes** | Bouton dangereux — supprime TOUTES les sessions actives en une seule action |
+
+### Cas d'usage
+
+- **Monitoring** : vérifier quelles sessions sont actives et consomment de la RAM
+- **Maintenance** : nettoyer les sessions orphelines ou "bloquées"
+- **Debugging** : retrouver l'ID d'une session pour investigation
+
+> **Note :** La page Admin n'a **aucun contrôle d'accès**. Elle suppose un accès réseau restreint (VPN, intranet fermé). À utiliser en environnement de confiance uniquement.
+
+---
+
+## 10. Questions fréquentes
 
 **Q : Mon fichier est trop volumineux, que faire ?**
 R : FortiFlow accepte jusqu'à 300 Mo et supporte les archives `.gz` / `.zip`. Compressez votre fichier avant l'import.
 
 **Q : Les policies générées sont-elles directement applicables ?**
-R : Oui, à condition d'avoir importé votre fichier `.conf` à l'étape 1 du déploiement. FortiFlow vérifie les objets existants et vous avertit des manquants (bouton ⚠).
+R : Oui, à condition d'avoir importé votre fichier `.conf` à l'étape 1 du déploiement. FortiFlow vérifie les objets existants et vous avertit des manquants (barre orange → cliquer pour nommer les objets).
 
 **Q : Que signifie le taux d'acceptation affiché sur le Dashboard ?**
 R : C'est le pourcentage de sessions avec l'action `ACCEPT` par rapport au total (`ACCEPT + DENY + DROP`).
@@ -411,10 +643,40 @@ R : C'est le pourcentage de sessions avec l'action `ACCEPT` par rapport au total
 R : La matrice n'affiche que le trafic **privé → privé** (RFC1918). Si votre log ne contient que du trafic vers Internet, la matrice sera vide.
 
 **Q : Comment reprendre une analyse le lendemain ?**
-R : Depuis l'étape 3 du déploiement, utilisez **💾 Sauvegarder** pour exporter votre session. Rechargez-la le lendemain avec **📂 Charger** (la session serveur aura expiré, mais vos données locales seront intactes).
+R : Utilisez **💾 Sauvegarder workspace** depuis le Dashboard pour exporter votre session en fichier (`.ffws`). Le lendemain, glissez-déposez ce fichier sur l'écran d'accueil ou cliquez **« 💾 Reprendre un workspace »** pour le recharger. La session serveur aura expiré, mais vos données persisteront dans le fichier. Voir [Workspaces](#7-workspaces--gestion-des-analyses).
 
 **Q : L'interface source/destination dans le tableau de déploiement est incorrecte.**
 R : Retournez à l'**étape 2** et modifiez le type de l'interface concernée (LAN / WAN / VPN) via le bouton bascule.
+
+**Q : Que signifie le passage automatique à "all" pour les destinations WAN ?**
+R : Quand une policy WAN dépasse 10 destinations, FortiFlow regroupe automatiquement en `all (internet)` pour lisibilité. Vous pouvez cliquer sur « IPs spécifiques » pour voir/modifier la liste détaillée.
+
+**Q : Ma config FortiGate a plusieurs VDOM — comment choisir le bon ?**
+R : Après l'import du fichier `.conf` à l'étape 1, un sélecteur de VDOM apparaît si plusieurs VDOM sont détectés. Choisissez le VDOM cible dans la liste — FortiFlow recharge automatiquement les données du VDOM sélectionné.
+
+**Q : Certaines policies sont masquées par défaut — pourquoi ?**
+R : FortiFlow masque les policies où ≥ 80 % des flux n'ont reçu aucune réponse réseau (scans potentiels). Cliquez sur le bouton "sans réponse" dans la toolbar pour les afficher.
+
+**Q : Comment fonctionne l'analyse de risques ?**
+R : Elle détecte deux types de problèmes : (1) des flux vers des ports dangereux dans votre log (Telnet, RDP exposé, etc.) et (2) des policies trop permissives dans votre config FortiGate existante (any/any, service ALL). La classification des ports est entièrement personnalisable via **Analyse ▾ → ⚙ Ports à risque**.
+
+**Q : Quelle est la différence entre les stratégies de fusion ?**
+R : "Par service" est la plus précise (une règle par groupe de services), "Par source" est un bon compromis, "Par destination" regroupe plusieurs sources vers un même endroit, "Par interface" est la plus agressive et peut créer des règles très larges. En cas de doute, commencez par "Par service".
+
+**Q : Comment fusionner uniquement un groupe de policies ?**
+R : En mode **« Par paire d'interfaces »** (dans la toolbar de l'étape 3), chaque groupe srcintf→dstintf affiche un bouton **⚡ Fusionner**. Cliquez pour fusionner UNIQUEMENT ce groupe selon la stratégie active, sans toucher aux autres paires. Idéal pour un contrôle granulaire.
+
+**Q : À quoi sert le bouton "Fusionner la sélection" ?**
+R : Il fusionne uniquement les policies que vous avez **cochées** dans le tableau (au lieu de toutes les policies). Cochez les policies concernées, puis utilisez ce bouton pour une fusion ciblée.
+
+**Q : Quelle est la différence entre "Par paire d'interfaces" et "Par séquence" ?**
+R : **Par paire** groupe les policies par (srcintf → dstintf), avec un bouton Fusionner par groupe — idéal pour affiner progressivement. **Par séquence** agrège les policies avec les mêmes services en une liste compacte — idéal pour une vue globale avant génération. Basculez entre les deux en cliquant les boutons de la toolbar (Étape 3).
+
+**Q : Comment reprendre une analyse sauvegardée plus tard ?**
+R : Deux options : (1) **Depuis l'historique serveur** : sur l'écran d'accueil, cliquez sur le workspace dans la section « Historique ». (2) **Depuis un fichier exporté** : glissez-déposez le fichier `.ffws` téléchargé précédemment sur l'écran d'accueil. Voir [Workspaces](#7-workspaces--gestion-des-analyses) pour plus de détails.
+
+**Q : Où puis-je voir toutes les sessions actives en mémoire ?**
+R : La page **/admin** affiche un tableau de toutes les sessions actives, avec des informations sur leur statut, le nombre de flows, la présence d'une config FortiGate, et les timestamps. Accès direct uniquement (pas de contrôle d'accès). Voir [Page Admin](#9-page-admin).
 
 ---
 
