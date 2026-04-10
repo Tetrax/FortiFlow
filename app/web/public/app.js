@@ -3746,16 +3746,16 @@ async function deploy() {
               </div>
               <div style="font-size:10px;font-weight:700;color:var(--text2);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px">Stratégie</div>
               <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px">
-                <button class="btn-sm merge-strategy-btn ${deployState.mergeStrategy==='max'?'btn-accent':''}" data-strategy="max">Par source</button>
                 <button class="btn-sm merge-strategy-btn ${deployState.mergeStrategy==='service'?'btn-accent':''}" data-strategy="service">Par service</button>
+                <button class="btn-sm merge-strategy-btn ${deployState.mergeStrategy==='max'?'btn-accent':''}" data-strategy="max">Par source</button>
                 <button class="btn-sm merge-strategy-btn ${deployState.mergeStrategy==='destination'?'btn-accent':''}" data-strategy="destination">Par destination</button>
                 <button class="btn-sm merge-strategy-btn ${deployState.mergeStrategy==='policy'?'btn-accent':''}" data-strategy="policy">Par interface</button>
               </div>
               <div class="merge-strategy-hint">${{
-                max:         '↳ Réduction maximale : tous les subnets d\'un même flux → une règle par source (peut casser la granularité)',
-                service:     '↳ Même services + même interfaces → fusionne multi-sources et multi-destinations automatiquement',
-                destination: '↳ Même destination + même interfaces → fusionne les sources différentes en règles multi-sources',
-                policy:      '↳ Même policy ID d\'origine → regroupe par paire d\'interfaces, indépendamment des services',
+                service:     '↳ Le plus granulaire : même services + interfaces → règles multi-src/dst précises. Idéal pour construire des policies propres.',
+                max:         '↳ Même flux src→dst → une règle par source. Bon compromis granularité / volume.',
+                destination: '↳ Même destination + interfaces → fusionne les sources. Réduit bien sans trop élargir les règles.',
+                policy:      '↳ ⚠️ Le plus réducteur : regroupe par policy d\'origine. Peut recréer des règles très larges si la policy de départ était permissive.',
               }[deployState.mergeStrategy] || ''}</div>
               <button class="btn-sm btn-accent" style="width:100%;margin-bottom:8px" data-merge="apply">▶ Appliquer</button>
               <div class="dropdown-sep" style="margin:4px -4px"></div>
@@ -4046,10 +4046,10 @@ async function deploy() {
       document.querySelectorAll('.merge-strategy-btn').forEach(b => b.classList.toggle('btn-accent', b.dataset.strategy === deployState.mergeStrategy));
       const hintEl = document.querySelector('.merge-strategy-hint');
       if (hintEl) hintEl.textContent = {
-        max:         '↳ Réduction maximale : tous les subnets d\'un même flux → une règle par source (peut casser la granularité)',
-        service:     '↳ Même services + même interfaces → fusionne multi-sources et multi-destinations automatiquement',
-        destination: '↳ Même destination + même interfaces → fusionne les sources différentes en règles multi-sources',
-        policy:      '↳ Même policy ID d\'origine → regroupe par paire d\'interfaces, indépendamment des services',
+        service:     '↳ Le plus granulaire : même services + interfaces → règles multi-src/dst précises. Idéal pour construire des policies propres.',
+        max:         '↳ Même flux src→dst → une règle par source. Bon compromis granularité / volume.',
+        destination: '↳ Même destination + interfaces → fusionne les sources. Réduit bien sans trop élargir les règles.',
+        policy:      '↳ ⚠️ Le plus réducteur : regroupe par policy d\'origine. Peut recréer des règles très larges si la policy de départ était permissive.',
       }[deployState.mergeStrategy] || '';
       return;
     }
@@ -5941,6 +5941,12 @@ async function analyzeDeployPolicies() {
     // Initialize per-policy mode from _use32 flags
     p._srcMode = p._use32Src ? 'hosts' : 'subnet';
     p._dstMode = p._use32Dst ? 'hosts' : 'subnet';
+    // Auto "all" : si destination WAN avec beaucoup d'hôtes ou sous-réseaux → mode all par défaut
+    const _isWanP = p._isWan || p.dstType === 'public';
+    if (_isWanP && p._dstUseAll === undefined) {
+      const dstCount = p._isMultiDst ? (p._multiDstSubnets?.length || 0) : (p.dstHosts?.length || 0);
+      if (dstCount > 10) p._dstUseAll = true;
+    }
   }
 
   deployState.analyzed              = analyzed;
@@ -6133,8 +6139,8 @@ function _buildDstAddrCell(p, idx) {
     });
     const names = subs.map(s => {
       if (s.useSubnet !== false) return s.addrName || s.subnet;
-      return (s.hosts || []).map(h => cleanHostName(h, p._dstHostNames?.[h]) || h).join(', ');
-    }).join(', ');
+      return (s.hosts || []).map(h => cleanHostName(h, p._dstHostNames?.[h]) || h).filter(Boolean).join(', ');
+    }).filter(Boolean).join(', ');
     return allDone
       ? `<span class="inline-editable found" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(names)}">${escHtml(names)}</span>`
       : `<span class="inline-editable missing" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(names)}">${escHtml(names)} ${badgeHtml('auto')}</span>`;
