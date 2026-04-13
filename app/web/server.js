@@ -1636,11 +1636,32 @@ app.post('/api/deploy/generate', (req, res) => {
       }
     }
 
+    // Build exact hostPairServices index from raw flows: "srcip|dstip" → [service, ...]
+    // Used by the frontend to filter services per specific IP pair when detailing 1:1
+    const hostPairServices = {};
+    if (s.data?.flows) {
+      // Only index hosts that appear in analyzed policies (avoids sending unnecessary data)
+      const relevantSrcs = new Set();
+      const relevantDsts = new Set();
+      for (const p of analyzed) {
+        for (const h of (p.srcHosts || [])) relevantSrcs.add(h);
+        for (const h of (p.dstHosts || [])) relevantDsts.add(h);
+      }
+      for (const f of s.data.flows) {
+        if (!f.srcip || !f.dstip || !f.service) continue;
+        if (!relevantSrcs.has(f.srcip) || !relevantDsts.has(f.dstip)) continue;
+        const key = f.srcip + '|' + f.dstip;
+        if (!hostPairServices[key]) hostPairServices[key] = [];
+        const svcUpper = f.service.toUpperCase();
+        if (!hostPairServices[key].includes(svcUpper)) hostPairServices[key].push(svcUpper);
+      }
+    }
+
     if (download) {
       res.send(cli);
     } else {
       const existingPoliciesCli = formatExistingPolicies(s.fortiConfig?.existingPolicies || []);
-      res.json({ cli, analyzed, addrGroups: s.fortiConfig.addressGroups || {}, warnings, resolvedHosts, existingPoliciesCli });
+      res.json({ cli, analyzed, addrGroups: s.fortiConfig.addressGroups || {}, warnings, resolvedHosts, existingPoliciesCli, hostPairServices });
     }
   } catch (err) {
     res.status(500).json({ error: err.message });

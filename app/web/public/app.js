@@ -4158,9 +4158,9 @@ async function deploy() {
     }
     const orig = deployState._analyzedOriginal || [];
     if (deployState.bruteMode === 'service') {
-      deployState.analyzed = splitPoliciesByService(orig, deployState.baseAnalyzedPolicies);
+      deployState.analyzed = splitPoliciesByService(orig, deployState.baseAnalyzedPolicies, deployState.hostPairServices);
     } else if (deployState.bruteMode === 'host') {
-      deployState.analyzed = splitPoliciesByHostAndService(orig, deployState.baseAnalyzedPolicies);
+      deployState.analyzed = splitPoliciesByHostAndService(orig, deployState.baseAnalyzedPolicies, deployState.hostPairServices);
     } else {
       deployState.analyzed = orig.map(p => ({ ...p }));
     }
@@ -4458,31 +4458,27 @@ async function uploadConf(file) {
 // Mode 'service' : 1 policy par service (sources groupées)
 // Mode 'host'    : 1 policy par source /32 × service (vrai 1:1)
 
-function splitPoliciesByService(analyzedPolicies, baseAnalyzed) {
+function splitPoliciesByService(analyzedPolicies, baseAnalyzed, hostPairServices) {
   const result = [];
   const forceHosts = { _use32Src: true, _use32Dst: true, _srcMode: 'hosts', _dstMode: 'hosts' };
-  const pairSvcIdx = baseAnalyzed && baseAnalyzed.length ? _buildHostPairServiceIndex(baseAnalyzed) : null;
+  const subnetIdx = baseAnalyzed && baseAnalyzed.length ? _buildSubnetServiceIndex(baseAnalyzed) : null;
 
   for (const p of analyzedPolicies) {
-    // Collecte les services réels depuis les données brutes pour toutes les paires (src, dst) de cette policy
+    // Union des services réels pour toutes les paires (srcHost, dstHost) de cette policy
+    const srcHosts = p.srcHosts || [];
+    const dstHosts = p.dstHosts || [];
     let services;
-    if (pairSvcIdx) {
-      const srcHosts = p.srcHosts || [];
-      const dstHosts = p.dstHosts || [];
-      if (srcHosts.length > 0 && dstHosts.length > 0) {
-        const svcMap = new Map();
-        for (const src of srcHosts) {
-          for (const dst of dstHosts) {
-            const pairMap = pairSvcIdx.get(src + '|' + dst);
-            if (pairMap) {
-              for (const [name, svc] of pairMap) svcMap.set(name, svc);
-            }
+    if (srcHosts.length > 0 && dstHosts.length > 0) {
+      const svcMap = new Map();
+      for (const src of srcHosts) {
+        for (const dst of dstHosts) {
+          for (const svc of _getServicesForPair(src, dst, p, hostPairServices, subnetIdx)) {
+            svcMap.set(svc.label || svc.name, svc);
           }
         }
-        if (svcMap.size > 0) services = [...svcMap.values()];
       }
+      if (svcMap.size > 0) services = [...svcMap.values()];
     }
-    // Fallback : services de la policy courante
     if (!services) services = p.analysis?.services || [];
 
     if (services.length <= 1) {
@@ -4501,8 +4497,35 @@ function splitPoliciesByService(analyzedPolicies, baseAnalyzed) {
   return result;
 }
 
-// Construit un index srcHost→dstHost→services[] depuis les policies brutes (pré-fusion)
-function _buildHostPairServiceIndex(baseAnalyzed) {
+// Retourne les services réels pour une paire (srcHost, dstHost) spécifique.
+// Priorité 1 : hostPairServices (index exact par IP depuis les flows bruts)
+// Priorité 2 : index subnet depuis baseAnalyzed (pré-fusion, moins précis)
+// Fallback   : services de la policy courante (comportement d'origine)
+function _getServicesForPair(srcHost, dstHost, p, hostPairServices, subnetIdx) {
+  // Niveau 1 : flows bruts — service exactement observé pour cette paire IP
+  if (hostPairServices && srcHost && dstHost) {
+    const flowSvcs = hostPairServices[srcHost + '|' + dstHost];
+    if (flowSvcs && flowSvcs.length > 0) {
+      const flowSvcSet = new Set(flowSvcs.map(s => s.toUpperCase()));
+      // Filtre les objets service complets de la policy (conserve les métadonnées : found, suggestedName, port…)
+      const filtered = (p.analysis?.services || []).filter(s =>
+        flowSvcSet.has((s.label || s.name || '').toUpperCase())
+      );
+      if (filtered.length > 0) return filtered;
+    }
+  }
+  // Niveau 2 : index subnet pré-fusion
+  if (subnetIdx && srcHost && dstHost) {
+    const pairMap = subnetIdx.get(srcHost + '|' + dstHost);
+    if (pairMap && pairMap.size > 0) return [...pairMap.values()];
+  }
+  // Fallback
+  return p.analysis?.services || [];
+}
+
+// Construit un index subnet srcHost→dstHost→services[] depuis les policies brutes (pré-fusion)
+// Utilisé comme fallback quand les flows bruts ne sont pas disponibles
+function _buildSubnetServiceIndex(baseAnalyzed) {
   const idx = new Map(); // "srcHost|dstHost" → Map<svcName, svc>
   for (const p of (baseAnalyzed || [])) {
     const srcHosts = p.srcHosts || [];
@@ -4522,11 +4545,10 @@ function _buildHostPairServiceIndex(baseAnalyzed) {
   return idx;
 }
 
-function splitPoliciesByHostAndService(analyzedPolicies, baseAnalyzed) {
+function splitPoliciesByHostAndService(analyzedPolicies, baseAnalyzed, hostPairServices) {
   const result = [];
   const forceHosts = { _use32Src: true, _use32Dst: true, _srcMode: 'hosts', _dstMode: 'hosts' };
-  // Index pré-fusion : pour chaque paire (srcHost, dstHost), services réellement observés
-  const pairSvcIdx = baseAnalyzed && baseAnalyzed.length ? _buildHostPairServiceIndex(baseAnalyzed) : null;
+  const subnetIdx = baseAnalyzed && baseAnalyzed.length ? _buildSubnetServiceIndex(baseAnalyzed) : null;
 
   for (const p of analyzedPolicies) {
     const srcHosts = p.srcHosts || [];
@@ -4539,17 +4561,8 @@ function splitPoliciesByHostAndService(analyzedPolicies, baseAnalyzed) {
     for (const srcHost of srcList) {
       const hostNoRcvd = srcHost ? (noRcvdSrcSet.has(srcHost) ? 1 : 0) : (p.noRcvdFlows || 0);
       for (const dstHost of dstList) {
-        // Cherche les services réels pour cette paire dans les données brutes
-        let svcList;
-        if (pairSvcIdx && srcHost && dstHost) {
-          const pairMap = pairSvcIdx.get(srcHost + '|' + dstHost);
-          svcList = pairMap && pairMap.size > 0 ? [...pairMap.values()] : null;
-        }
-        // Fallback : services de la policy courante (comportement pré-fix)
-        if (!svcList) {
-          const services = p.analysis?.services || [];
-          svcList = services.length > 0 ? services : [null];
-        }
+        const svcs = _getServicesForPair(srcHost, dstHost, p, hostPairServices, subnetIdx);
+        const svcList = svcs.length > 0 ? svcs : [null];
 
         const splitCount  = srcList.length * dstList.length * svcList.length;
         const sessionsPer = Math.max(1, Math.round((p.sessions || 0) / splitCount));
@@ -5932,9 +5945,10 @@ async function analyzeDeployPolicies() {
     }
     const respData = await r.json();
     analyzed = respData.analyzed;
-    deployState.addrGroups   = respData.addrGroups   || {};
-    deployState.warnings     = respData.warnings     || [];
-    deployState.resolvedHosts = respData.resolvedHosts || {};
+    deployState.addrGroups      = respData.addrGroups      || {};
+    deployState.warnings        = respData.warnings        || [];
+    deployState.resolvedHosts   = respData.resolvedHosts   || {};
+    deployState.hostPairServices = respData.hostPairServices || {};
     setLoadingPct(95);
     setLoadingText('Enrichissement des données…');
   } catch (err) { resetAnalyzeBtn(); alert(err.message); return; }
