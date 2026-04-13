@@ -4158,9 +4158,9 @@ async function deploy() {
     }
     const orig = deployState._analyzedOriginal || [];
     if (deployState.bruteMode === 'service') {
-      deployState.analyzed = splitPoliciesByService(orig);
+      deployState.analyzed = splitPoliciesByService(orig, deployState.baseAnalyzedPolicies);
     } else if (deployState.bruteMode === 'host') {
-      deployState.analyzed = splitPoliciesByHostAndService(orig);
+      deployState.analyzed = splitPoliciesByHostAndService(orig, deployState.baseAnalyzedPolicies);
     } else {
       deployState.analyzed = orig.map(p => ({ ...p }));
     }
@@ -4458,13 +4458,35 @@ async function uploadConf(file) {
 // Mode 'service' : 1 policy par service (sources groupées)
 // Mode 'host'    : 1 policy par source /32 × service (vrai 1:1)
 
-function splitPoliciesByService(analyzedPolicies) {
+function splitPoliciesByService(analyzedPolicies, baseAnalyzed) {
   const result = [];
+  const forceHosts = { _use32Src: true, _use32Dst: true, _srcMode: 'hosts', _dstMode: 'hosts' };
+  const pairSvcIdx = baseAnalyzed && baseAnalyzed.length ? _buildHostPairServiceIndex(baseAnalyzed) : null;
+
   for (const p of analyzedPolicies) {
-    const services = p.analysis?.services || [];
-    const forceHosts = { _use32Src: true, _use32Dst: true, _srcMode: 'hosts', _dstMode: 'hosts' };
+    // Collecte les services réels depuis les données brutes pour toutes les paires (src, dst) de cette policy
+    let services;
+    if (pairSvcIdx) {
+      const srcHosts = p.srcHosts || [];
+      const dstHosts = p.dstHosts || [];
+      if (srcHosts.length > 0 && dstHosts.length > 0) {
+        const svcMap = new Map();
+        for (const src of srcHosts) {
+          for (const dst of dstHosts) {
+            const pairMap = pairSvcIdx.get(src + '|' + dst);
+            if (pairMap) {
+              for (const [name, svc] of pairMap) svcMap.set(name, svc);
+            }
+          }
+        }
+        if (svcMap.size > 0) services = [...svcMap.values()];
+      }
+    }
+    // Fallback : services de la policy courante
+    if (!services) services = p.analysis?.services || [];
+
     if (services.length <= 1) {
-      result.push({ ...p, ...forceHosts });
+      result.push({ ...p, ...forceHosts, analysis: services.length === 1 ? { ...p.analysis, services } : p.analysis });
     } else {
       for (const svc of services) {
         result.push({
@@ -4479,25 +4501,59 @@ function splitPoliciesByService(analyzedPolicies) {
   return result;
 }
 
-function splitPoliciesByHostAndService(analyzedPolicies) {
-  const result = [];
-  const forceHosts = { _use32Src: true, _use32Dst: true, _srcMode: 'hosts', _dstMode: 'hosts' };
-
-  for (const p of analyzedPolicies) {
-    const services = p.analysis?.services || [];
+// Construit un index srcHost→dstHost→services[] depuis les policies brutes (pré-fusion)
+function _buildHostPairServiceIndex(baseAnalyzed) {
+  const idx = new Map(); // "srcHost|dstHost" → Map<svcName, svc>
+  for (const p of (baseAnalyzed || [])) {
     const srcHosts = p.srcHosts || [];
     const dstHosts = p.dstHosts || [];
-    const svcList  = services.length > 0 ? services : [null];
+    const services = p.analysis?.services || [];
+    for (const src of srcHosts) {
+      for (const dst of dstHosts) {
+        const key = src + '|' + dst;
+        if (!idx.has(key)) idx.set(key, new Map());
+        const svcMap = idx.get(key);
+        for (const svc of services) {
+          svcMap.set(svc.name || svc.label, svc);
+        }
+      }
+    }
+  }
+  return idx;
+}
+
+function splitPoliciesByHostAndService(analyzedPolicies, baseAnalyzed) {
+  const result = [];
+  const forceHosts = { _use32Src: true, _use32Dst: true, _srcMode: 'hosts', _dstMode: 'hosts' };
+  // Index pré-fusion : pour chaque paire (srcHost, dstHost), services réellement observés
+  const pairSvcIdx = baseAnalyzed && baseAnalyzed.length ? _buildHostPairServiceIndex(baseAnalyzed) : null;
+
+  for (const p of analyzedPolicies) {
+    const srcHosts = p.srcHosts || [];
+    const dstHosts = p.dstHosts || [];
     const srcList  = srcHosts.length > 0 ? srcHosts : [null];
     const dstList  = dstHosts.length > 0 ? dstHosts : [null];
 
     const noRcvdSrcSet = new Set(p.noRcvdSrcHosts || []);
-    const splitCount   = srcList.length * dstList.length * svcList.length;
-    const sessionsPer  = Math.max(1, Math.round((p.sessions || 0) / splitCount));
+
     for (const srcHost of srcList) {
-      // Pour ce srcHost, détermine si il avait des flows sans réponse
       const hostNoRcvd = srcHost ? (noRcvdSrcSet.has(srcHost) ? 1 : 0) : (p.noRcvdFlows || 0);
       for (const dstHost of dstList) {
+        // Cherche les services réels pour cette paire dans les données brutes
+        let svcList;
+        if (pairSvcIdx && srcHost && dstHost) {
+          const pairMap = pairSvcIdx.get(srcHost + '|' + dstHost);
+          svcList = pairMap && pairMap.size > 0 ? [...pairMap.values()] : null;
+        }
+        // Fallback : services de la policy courante (comportement pré-fix)
+        if (!svcList) {
+          const services = p.analysis?.services || [];
+          svcList = services.length > 0 ? services : [null];
+        }
+
+        const splitCount  = srcList.length * dstList.length * svcList.length;
+        const sessionsPer = Math.max(1, Math.round((p.sessions || 0) / splitCount));
+
         for (const svc of svcList) {
           result.push({
             ...p,
