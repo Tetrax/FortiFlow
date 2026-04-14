@@ -4561,6 +4561,9 @@ function splitPoliciesByHostAndService(analyzedPolicies, baseAnalyzed, hostPairS
     for (const srcHost of srcList) {
       const hostNoRcvd = srcHost ? (noRcvdSrcSet.has(srcHost) ? 1 : 0) : (p.noRcvdFlows || 0);
       for (const dstHost of dstList) {
+        // Si l'index exact est disponible, ignorer les paires non observées dans les flows bruts
+        // (artefacts du produit cartésien après fusion — ne correspondent à aucun trafic réel)
+        if (hostPairServices && srcHost && dstHost && !hostPairServices[srcHost + '|' + dstHost]) continue;
         const svcs = _getServicesForPair(srcHost, dstHost, p, hostPairServices, subnetIdx);
         const svcList = svcs.length > 0 ? svcs : [null];
 
