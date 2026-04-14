@@ -160,6 +160,17 @@ function requireSession(req, res) {
   return s;
 }
 
+// Vérifie si une valeur IP correspond au terme recherché.
+// Utilise une limite de fin de chiffre pour éviter que "10.1.6.19" matche "10.1.6.192".
+function ipTermMatches(value, term) {
+  if (!value) return false;
+  if (/^\d+(\.\d+)*$/.test(term)) {
+    const escaped = term.replace(/\./g, '\\.');
+    return new RegExp(escaped + '(?!\\d)').test(value);
+  }
+  return value.includes(term);
+}
+
 function applyFlowFilters(flows, q) {
   // Single-pass filter: all conditions evaluated in one .filter() call
   if (!q.srcip && !q.dstip && !q.port && !q.proto && !q.action &&
@@ -167,8 +178,8 @@ function applyFlowFilters(flows, q) {
     return flows;
   }
   return flows.filter(f => {
-    if (q.srcip     && !f.srcip.includes(q.srcip))                                               return false;
-    if (q.dstip     && !f.dstip.includes(q.dstip))                                               return false;
+    if (q.srcip     && !ipTermMatches(f.srcip, q.srcip))                                         return false;
+    if (q.dstip     && !ipTermMatches(f.dstip, q.dstip))                                         return false;
     if (q.port      && f.dstport !== q.port && f.srcport !== q.port)                             return false;
     if (q.proto     && f.proto !== q.proto && f.protoName?.toLowerCase() !== q.proto.toLowerCase()) return false;
     if (q.action    && f.action !== q.action)                                                     return false;

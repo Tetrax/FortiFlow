@@ -4807,7 +4807,14 @@ function filterDeployPolicies() {
         ...(p._dstIPs || []),
         ...(p._tags || []),
       ].join(' ').toLowerCase();
-      return terms.every(t => haystack.includes(t));
+      return terms.every(t => {
+        // Pour les termes de type IP (ex: 10.1.6.19), éviter de matcher 10.1.6.192
+        if (/^\d+(\.\d+)+$/.test(t)) {
+          const escaped = t.replace(/\./g, '\\.');
+          return new RegExp(escaped + '(?!\\d)').test(haystack);
+        }
+        return haystack.includes(t);
+      });
     });
   }
 
