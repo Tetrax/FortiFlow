@@ -4594,6 +4594,8 @@ function splitPoliciesByHostAndService(analyzedPolicies, baseAnalyzed, hostPairS
 
 // Mode 'src-agg-dst-detail' : source agrégée en subnet /24, destination détaillée par IP /32
 // Cas d'usage : flux utilisateurs (mêmes droits → subnet) vers serveurs (distincts → IP individuelle)
+// srcHosts est filtré aux seuls hôtes ayant réellement communiqué avec dstHost+service
+// → si l'utilisateur bascule en /32, seuls ces hôtes apparaissent
 function splitPoliciesBySrcAggDstDetail(analyzedPolicies, baseAnalyzed, hostPairServices) {
   const result = [];
   const subnetIdx = baseAnalyzed && baseAnalyzed.length ? _buildSubnetServiceIndex(baseAnalyzed) : null;
@@ -4604,17 +4606,17 @@ function splitPoliciesBySrcAggDstDetail(analyzedPolicies, baseAnalyzed, hostPair
     const dstList  = dstHosts.length > 0 ? dstHosts : [null];
 
     for (const dstHost of dstList) {
-      // Filtre les destinations sans trafic réel observé depuis ce subnet
-      // (vérifie qu'au moins un srcHost du subnet a communiqué avec ce dstHost)
+      // Hôtes sources ayant réellement du trafic vers cette destination
+      let realSrcHosts = srcHosts;
       if (hostPairServices && dstHost && srcHosts.length > 0) {
-        const hasRealTraffic = srcHosts.some(src => hostPairServices[src + '|' + dstHost]);
-        if (!hasRealTraffic) continue;
+        realSrcHosts = srcHosts.filter(src => hostPairServices[src + '|' + dstHost]);
+        if (realSrcHosts.length === 0) continue;
       }
 
-      // Agrège les services de toutes les paires (srcHost → dstHost) du subnet
+      // Agrège les services de toutes les paires réelles (srcHost → dstHost)
       const svcMap = new Map();
-      if (srcHosts.length > 0 && dstHost) {
-        for (const src of srcHosts) {
+      if (realSrcHosts.length > 0 && dstHost) {
+        for (const src of realSrcHosts) {
           for (const svc of _getServicesForPair(src, dstHost, p, hostPairServices, subnetIdx)) {
             svcMap.set(svc.label || svc.name, svc);
           }
@@ -4627,12 +4629,24 @@ function splitPoliciesBySrcAggDstDetail(analyzedPolicies, baseAnalyzed, hostPair
       const sessionsPer = Math.max(1, Math.round((p.sessions || 0) / splitCount));
 
       for (const svc of svcList) {
+        // Pour ce service précis, ne garder que les hôtes sources qui l'ont réellement utilisé
+        let svcSrcHosts = realSrcHosts;
+        if (svc && hostPairServices && dstHost && realSrcHosts.length > 0) {
+          const svcName = (svc.label || svc.name || '').toUpperCase();
+          const filtered = realSrcHosts.filter(src => {
+            const flowSvcs = hostPairServices[src + '|' + dstHost];
+            return flowSvcs && flowSvcs.some(s => s.toUpperCase() === svcName);
+          });
+          if (filtered.length > 0) svcSrcHosts = filtered;
+        }
+
         result.push({
           ...p,
           _use32Src: false,
           _use32Dst: true,
           _srcMode: 'subnet',
           _dstMode: 'hosts',
+          srcHosts:    svcSrcHosts,
           dstTarget:   dstHost ? dstHost + '/32' : p.dstTarget,
           dstHosts:    dstHost ? [dstHost] : (p.dstHosts || []),
           serviceDesc: svc ? (svc.label || svc.name || '') : p.serviceDesc,
