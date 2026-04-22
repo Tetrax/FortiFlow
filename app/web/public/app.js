@@ -3771,7 +3771,25 @@ async function deploy() {
               <div class="dropdown-item" id="btn-risk-ports">⚙ Ports à risque</div>
             </div>
           </div>
-          <button class="btn-sm" id="btn-brute-mode" title="Détailler : par service / par hôte 1:1 / src subnet + dst IP individuelle">Détailler ▾</button>
+          <div class="dropdown-wrap" id="detail-dropdown-wrap">
+            <button class="btn-sm dropdown-trigger ${deployState.bruteMode !== 'off' ? 'btn-active' : ''}" id="btn-brute-mode">${{ off: 'Détailler ▾', service: 'Par service ✓', host: 'Par hôte 1:1 ✓', 'src-agg-dst-detail': 'Src /24 · Dst /32 ✓' }[deployState.bruteMode] || 'Détailler ▾'}</button>
+            <div class="dropdown-menu" style="min-width:270px;padding:10px 12px">
+              <div style="font-size:10px;font-weight:700;color:var(--text2);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px">Mode de détail</div>
+              <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px">
+                <button class="btn-sm detail-mode-btn ${deployState.bruteMode==='service'?'btn-accent':''}" data-detail-mode="service">Par service</button>
+                <button class="btn-sm detail-mode-btn ${deployState.bruteMode==='host'?'btn-accent':''}" data-detail-mode="host">Par hôte 1:1</button>
+                <button class="btn-sm detail-mode-btn ${deployState.bruteMode==='src-agg-dst-detail'?'btn-accent':''}" data-detail-mode="src-agg-dst-detail">Src /24 · Dst /32</button>
+              </div>
+              <div class="detail-mode-hint">${{
+                service:              '↳ 1 policy par service — sources et destinations restent groupées. Vue propre par protocole.',
+                host:                 '↳ 1:1 complet : 1 policy par hôte src /32 × hôte dst /32 × service. Maximum de granularité.',
+                'src-agg-dst-detail': '↳ Hybride : sources en subnet /24, destinations en IP /32. Idéal pour flux utilisateurs → serveurs (WSUS, DC, VEEAM…).',
+              }[deployState.bruteMode] || ''}</div>
+              <button class="btn-sm btn-accent" style="width:100%;margin-bottom:8px" data-detail-action="apply">▶ Appliquer</button>
+              <div class="dropdown-sep" style="margin:4px -4px"></div>
+              <div class="dropdown-item" data-detail-action="reset">↺ Désactiver le détail</div>
+            </div>
+          </div>
           <button class="btn-sm btn-accent" id="btn-merge-selection" style="display:none" title="Fusionner les policies sélectionnées en une seule">⚡ Fusionner la sélection (<span id="merge-sel-count">0</span>)</button>
           <span class="toolbar-sep"></span>
           <span class="history-btn-group" title="Historique des modifications (10 max)">
@@ -4082,6 +4100,31 @@ async function deploy() {
       if (deployState.riskPanelOpen) loadRiskPanel();
       return;
     }
+
+    // Detail mode selection (dropdown — mode sélectionné sans appliquer)
+    const detailModeBtn = e.target.closest('.detail-mode-btn');
+    if (detailModeBtn) {
+      e.stopImmediatePropagation();
+      deployState.bruteMode = detailModeBtn.dataset.detailMode;
+      document.querySelectorAll('.detail-mode-btn').forEach(b => b.classList.toggle('btn-accent', b.dataset.detailMode === deployState.bruteMode));
+      const hintEl = document.querySelector('.detail-mode-hint');
+      if (hintEl) hintEl.textContent = {
+        service:              '↳ 1 policy par service — sources et destinations restent groupées. Vue propre par protocole.',
+        host:                 '↳ 1:1 complet : 1 policy par hôte src /32 × hôte dst /32 × service. Maximum de granularité.',
+        'src-agg-dst-detail': '↳ Hybride : sources en subnet /24, destinations en IP /32. Idéal pour flux utilisateurs → serveurs (WSUS, DC, VEEAM…).',
+      }[deployState.bruteMode] || '';
+      return;
+    }
+
+    // Detail action (appliquer / réinitialiser)
+    const detailAction = e.target.closest('[data-detail-action]');
+    if (detailAction) {
+      const action = detailAction.dataset.detailAction;
+      document.querySelectorAll('.dropdown-wrap.open').forEach(w => w.classList.remove('open'));
+      if (action === 'reset') deployState.bruteMode = 'off';
+      _applyDetailMode();
+      return;
+    }
   });
 
   // Close dropdowns on outside click (guard: single listener)
@@ -4143,14 +4186,12 @@ async function deploy() {
   // Export/Import session
   // (missing objects bar is now info-only — no modal, edit via drawer)
 
-  // Brute /32 toggle — cycle: off → service → host → src-agg-dst-detail → off
-  el('btn-brute-mode')?.addEventListener('click', () => {
-    const cycle = { 'off': 'service', 'service': 'host', 'host': 'src-agg-dst-detail', 'src-agg-dst-detail': 'off' };
-    deployState.bruteMode = cycle[deployState.bruteMode] || 'service';
+  // Applique le bruteMode courant (appelé par le dropdown Détailler → Appliquer / Réinitialiser)
+  function _applyDetailMode() {
+    const labels = { 'off': 'Détailler ▾', 'service': 'Par service ✓', 'host': 'Par hôte 1:1 ✓', 'src-agg-dst-detail': 'Src /24 · Dst /32 ✓' };
     const btn = el('btn-brute-mode');
     if (btn) {
-      const labels = { 'off': 'Détailler ▾', 'service': 'Par service ✓', 'host': 'Par hôte 1:1 ✓', 'src-agg-dst-detail': 'Src /24 · Dst /32 ✓' };
-      btn.textContent = labels[deployState.bruteMode];
+      btn.textContent = labels[deployState.bruteMode] || 'Détailler ▾';
       btn.classList.toggle('btn-active', deployState.bruteMode !== 'off');
     }
     if (!deployState._analyzedOriginal && deployState.analyzed) {
@@ -4168,10 +4209,10 @@ async function deploy() {
     }
     deployState.selected = defaultSelectedSet(deployState.analyzed || []);
     deployState.mergeSelected = new Set();
-    deployState._noRcvdCount = undefined; // force recalcul du compteur après split
+    deployState._noRcvdCount = undefined;
     _updateMergeSelectionBtn();
     renderDeployPolicies(filterDeployPolicies(), false);
-  });
+  }
 
   // Merge selection button
   el('btn-merge-selection')?.addEventListener('click', () => {
