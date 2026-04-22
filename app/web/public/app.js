@@ -3771,7 +3771,7 @@ async function deploy() {
               <div class="dropdown-item" id="btn-risk-ports">⚙ Ports à risque</div>
             </div>
           </div>
-          <button class="btn-sm" id="btn-brute-mode" title="Détailler les policies par service ou par hôte">Détailler ▾</button>
+          <button class="btn-sm" id="btn-brute-mode" title="Détailler : par service / par hôte 1:1 / src subnet + dst IP individuelle">Détailler ▾</button>
           <button class="btn-sm btn-accent" id="btn-merge-selection" style="display:none" title="Fusionner les policies sélectionnées en une seule">⚡ Fusionner la sélection (<span id="merge-sel-count">0</span>)</button>
           <span class="toolbar-sep"></span>
           <span class="history-btn-group" title="Historique des modifications (10 max)">
@@ -4143,13 +4143,13 @@ async function deploy() {
   // Export/Import session
   // (missing objects bar is now info-only — no modal, edit via drawer)
 
-  // Brute /32 toggle — cycle: off → service → host → off
+  // Brute /32 toggle — cycle: off → service → host → src-agg-dst-detail → off
   el('btn-brute-mode')?.addEventListener('click', () => {
-    const cycle = { 'off': 'service', 'service': 'host', 'host': 'off' };
+    const cycle = { 'off': 'service', 'service': 'host', 'host': 'src-agg-dst-detail', 'src-agg-dst-detail': 'off' };
     deployState.bruteMode = cycle[deployState.bruteMode] || 'service';
     const btn = el('btn-brute-mode');
     if (btn) {
-      const labels = { 'off': 'Détailler ▾', 'service': 'Par service ✓', 'host': 'Par hôte 1:1 ✓' };
+      const labels = { 'off': 'Détailler ▾', 'service': 'Par service ✓', 'host': 'Par hôte 1:1 ✓', 'src-agg-dst-detail': 'Src /24 · Dst /32 ✓' };
       btn.textContent = labels[deployState.bruteMode];
       btn.classList.toggle('btn-active', deployState.bruteMode !== 'off');
     }
@@ -4161,6 +4161,8 @@ async function deploy() {
       deployState.analyzed = splitPoliciesByService(orig, deployState.baseAnalyzedPolicies, deployState.hostPairServices);
     } else if (deployState.bruteMode === 'host') {
       deployState.analyzed = splitPoliciesByHostAndService(orig, deployState.baseAnalyzedPolicies, deployState.hostPairServices);
+    } else if (deployState.bruteMode === 'src-agg-dst-detail') {
+      deployState.analyzed = splitPoliciesBySrcAggDstDetail(orig, deployState.baseAnalyzedPolicies, deployState.hostPairServices);
     } else {
       deployState.analyzed = orig.map(p => ({ ...p }));
     }
@@ -4584,6 +4586,59 @@ function splitPoliciesByHostAndService(analyzedPolicies, baseAnalyzed, hostPairS
             sessions:     sessionsPer,
           });
         }
+      }
+    }
+  }
+  return result;
+}
+
+// Mode 'src-agg-dst-detail' : source agrégée en subnet /24, destination détaillée par IP /32
+// Cas d'usage : flux utilisateurs (mêmes droits → subnet) vers serveurs (distincts → IP individuelle)
+function splitPoliciesBySrcAggDstDetail(analyzedPolicies, baseAnalyzed, hostPairServices) {
+  const result = [];
+  const subnetIdx = baseAnalyzed && baseAnalyzed.length ? _buildSubnetServiceIndex(baseAnalyzed) : null;
+
+  for (const p of analyzedPolicies) {
+    const srcHosts = p.srcHosts || [];
+    const dstHosts = p.dstHosts || [];
+    const dstList  = dstHosts.length > 0 ? dstHosts : [null];
+
+    for (const dstHost of dstList) {
+      // Filtre les destinations sans trafic réel observé depuis ce subnet
+      // (vérifie qu'au moins un srcHost du subnet a communiqué avec ce dstHost)
+      if (hostPairServices && dstHost && srcHosts.length > 0) {
+        const hasRealTraffic = srcHosts.some(src => hostPairServices[src + '|' + dstHost]);
+        if (!hasRealTraffic) continue;
+      }
+
+      // Agrège les services de toutes les paires (srcHost → dstHost) du subnet
+      const svcMap = new Map();
+      if (srcHosts.length > 0 && dstHost) {
+        for (const src of srcHosts) {
+          for (const svc of _getServicesForPair(src, dstHost, p, hostPairServices, subnetIdx)) {
+            svcMap.set(svc.label || svc.name, svc);
+          }
+        }
+      }
+      const svcs = svcMap.size > 0 ? [...svcMap.values()] : (p.analysis?.services || [null]);
+      const svcList = svcs.length > 0 ? svcs : [null];
+
+      const splitCount  = dstList.length * svcList.length;
+      const sessionsPer = Math.max(1, Math.round((p.sessions || 0) / splitCount));
+
+      for (const svc of svcList) {
+        result.push({
+          ...p,
+          _use32Src: false,
+          _use32Dst: true,
+          _srcMode: 'subnet',
+          _dstMode: 'hosts',
+          dstTarget:   dstHost ? dstHost + '/32' : p.dstTarget,
+          dstHosts:    dstHost ? [dstHost] : (p.dstHosts || []),
+          serviceDesc: svc ? (svc.label || svc.name || '') : p.serviceDesc,
+          analysis:    svc ? { ...p.analysis, services: [svc] } : p.analysis,
+          sessions:    sessionsPer,
+        });
       }
     }
   }
