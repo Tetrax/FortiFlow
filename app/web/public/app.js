@@ -6138,6 +6138,29 @@ async function analyzeDeployPolicies() {
   // Tri par volume de sessions décroissant (policies les plus actives en premier)
   analyzed.sort((a, b) => (b.sessions || 0) - (a.sessions || 0));
 
+  // ── Normalisation srcHosts ────────────────────────────────────────────────────
+  // Filtre srcHosts de chaque policy aux seuls hôtes ayant réellement utilisé
+  // les services de cette policy vers ses destinations, selon les flows bruts.
+  // Garantit que tous les modes de fusion et de détail travaillent sur des données propres,
+  // sans résidus d'agrégation (ex : 122 hôtes identiques pour SMB, SSH, DCE-RPC…).
+  const _hps = deployState.hostPairServices;
+  if (_hps && Object.keys(_hps).length > 0) {
+    analyzed = analyzed.map(p => {
+      const srcHosts = p.srcHosts || [];
+      const dstHosts = p.dstHosts || [];
+      if (srcHosts.length === 0 || dstHosts.length === 0) return p;
+      const svcNames = new Set((p.analysis?.services || []).map(s => (s.label || s.name || '').toUpperCase()));
+      if (svcNames.size === 0) return p;
+      const filtered = srcHosts.filter(src =>
+        dstHosts.some(dst => {
+          const flowSvcs = _hps[src + '|' + dst];
+          return flowSvcs && flowSvcs.some(s => svcNames.has(s.toUpperCase()));
+        })
+      );
+      return filtered.length > 0 ? { ...p, srcHosts: filtered } : p;
+    });
+  }
+
   // Auto /32 : peu d'hôtes réels = utiliser les /32 par défaut (≤ AUTO32_THRESHOLD hôtes)
   for (const p of analyzed) {
     if ((p.srcHosts || []).length >= 1 && (p.srcHosts || []).length <= AUTO32_THRESHOLD) p._use32Src = true;
