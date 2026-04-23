@@ -4528,11 +4528,25 @@ function splitPoliciesByService(analyzedPolicies, baseAnalyzed, hostPairServices
       result.push({ ...p, ...forceHosts, analysis: services.length === 1 ? { ...p.analysis, services } : p.analysis });
     } else {
       for (const svc of services) {
+        // Filtre srcHosts aux seuls hôtes ayant réellement utilisé ce service vers au moins un dstHost.
+        // Garantit que le passage en /32 ne montre que des hôtes réels, même après une fusion.
+        let svcSrcHosts = srcHosts;
+        if (hostPairServices && srcHosts.length > 0 && dstHosts.length > 0) {
+          const svcName = (svc.label || svc.name || '').toUpperCase();
+          const filtered = srcHosts.filter(src =>
+            dstHosts.some(dst => {
+              const flowSvcs = hostPairServices[src + '|' + dst];
+              return flowSvcs && flowSvcs.some(s => s.toUpperCase() === svcName);
+            })
+          );
+          if (filtered.length > 0) svcSrcHosts = filtered;
+        }
         result.push({
           ...p,
           ...forceHosts,
+          srcHosts:    svcSrcHosts,
           serviceDesc: svc.label || svc.name || '',
-          analysis: { ...p.analysis, services: [svc] },
+          analysis:    { ...p.analysis, services: [svc] },
         });
       }
     }
