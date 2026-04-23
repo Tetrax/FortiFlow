@@ -3764,21 +3764,14 @@ async function deploy() {
               <div class="dropdown-item" data-merge="reset">↺ Réinitialiser</div>
             </div>
           </div>
-          <div class="dropdown-wrap" id="analyse-dropdown">
-            <button class="btn-sm dropdown-trigger ${deployState.riskPanelOpen ? 'btn-accent' : ''}" id="btn-analyse-menu">Analyse ▾</button>
-            <div class="dropdown-menu" style="min-width:160px">
-              <div class="dropdown-item" id="btn-risk-toggle">⚠ Risques</div>
-              <div class="dropdown-item" id="btn-risk-ports">⚙ Ports à risque</div>
-            </div>
-          </div>
           <div class="dropdown-wrap" id="detail-dropdown-wrap">
-            <button class="btn-sm dropdown-trigger ${deployState.bruteMode !== 'off' ? 'btn-active' : ''}" id="btn-brute-mode">${{ off: 'Détailler ▾', service: 'Par service ✓', host: 'Par hôte 1:1 ✓', 'src-agg-dst-detail': 'Src /24 · Dst /32 ✓' }[deployState.bruteMode] || 'Détailler ▾'}</button>
+            <button class="btn-sm dropdown-trigger ${deployState.bruteMode !== 'off' ? 'btn-active' : ''}" id="btn-brute-mode">${{ off: 'Détailler ▾', service: 'Services ✓', host: 'IP à IP ✓', 'src-agg-dst-detail': 'Réseau → Serveur ✓' }[deployState.bruteMode] || 'Détailler ▾'}</button>
             <div class="dropdown-menu" style="min-width:270px;padding:10px 12px">
               <div style="font-size:10px;font-weight:700;color:var(--text2);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px">Mode de détail</div>
               <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px">
-                <button class="btn-sm detail-mode-btn ${deployState.bruteMode==='service'?'btn-accent':''}" data-detail-mode="service">Par service</button>
-                <button class="btn-sm detail-mode-btn ${deployState.bruteMode==='host'?'btn-accent':''}" data-detail-mode="host">Par hôte 1:1</button>
-                <button class="btn-sm detail-mode-btn ${deployState.bruteMode==='src-agg-dst-detail'?'btn-accent':''}" data-detail-mode="src-agg-dst-detail">Src /24 · Dst /32</button>
+                <button class="btn-sm detail-mode-btn ${deployState.bruteMode==='service'?'btn-accent':''}" data-detail-mode="service">Services</button>
+                <button class="btn-sm detail-mode-btn ${deployState.bruteMode==='host'?'btn-accent':''}" data-detail-mode="host">IP à IP</button>
+                <button class="btn-sm detail-mode-btn ${deployState.bruteMode==='src-agg-dst-detail'?'btn-accent':''}" data-detail-mode="src-agg-dst-detail">Réseau → Serveur</button>
               </div>
               <div class="detail-mode-hint">${{
                 service:              '↳ 1 policy par service — sources et destinations restent groupées. Vue propre par protocole.',
@@ -3788,6 +3781,13 @@ async function deploy() {
               <button class="btn-sm btn-accent" style="width:100%;margin-bottom:8px" data-detail-action="apply">▶ Appliquer</button>
               <div class="dropdown-sep" style="margin:4px -4px"></div>
               <div class="dropdown-item" data-detail-action="reset">↺ Désactiver le détail</div>
+            </div>
+          </div>
+          <div class="dropdown-wrap" id="analyse-dropdown">
+            <button class="btn-sm dropdown-trigger ${deployState.riskPanelOpen ? 'btn-accent' : ''}" id="btn-analyse-menu">Analyse ▾</button>
+            <div class="dropdown-menu" style="min-width:160px">
+              <div class="dropdown-item" id="btn-risk-toggle">⚠ Risques</div>
+              <div class="dropdown-item" id="btn-risk-ports">⚙ Ports à risque</div>
             </div>
           </div>
           <button class="btn-sm btn-accent" id="btn-merge-selection" style="display:none" title="Fusionner les policies sélectionnées en une seule">⚡ Fusionner la sélection (<span id="merge-sel-count">0</span>)</button>
@@ -4188,7 +4188,7 @@ async function deploy() {
 
   // Applique le bruteMode courant (appelé par le dropdown Détailler → Appliquer / Réinitialiser)
   function _applyDetailMode() {
-    const labels = { 'off': 'Détailler ▾', 'service': 'Par service ✓', 'host': 'Par hôte 1:1 ✓', 'src-agg-dst-detail': 'Src /24 · Dst /32 ✓' };
+    const labels = { 'off': 'Détailler ▾', 'service': 'Services ✓', 'host': 'IP à IP ✓', 'src-agg-dst-detail': 'Réseau → Serveur ✓' };
     const btn = el('btn-brute-mode');
     if (btn) {
       btn.textContent = labels[deployState.bruteMode] || 'Détailler ▾';
