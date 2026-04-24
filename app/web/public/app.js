@@ -3797,12 +3797,19 @@ async function deploy() {
             <button class="btn-sm btn-history" id="btn-policy-redo" disabled title="Rétablir">›</button>
           </span>
           <span style="margin-left:auto"></span>
-          <button id="no-rcvd-toggle" class="no-rcvd-toggle-btn" style="display:none;flex-shrink:0" title="Flows sans r\u00e9ponse — cliquer pour afficher/masquer"></button>
           <input type="text" id="deploy-search" class="deploy-search-input" placeholder="Rechercher (IP, subnet, service, srcintf:X, dstintf:Y...)" value="${escHtml(deployState.searchFilter || '')}" title="Filtrer par texte libre. Syntaxe spéciale : srcintf:NOM ou dstintf:NOM pour filtrer par interface exacte">
         </div>
         <div class="missing-bar" id="deploy-missing-bar" style="display:none;cursor:pointer" onclick="showObjectsModal()" title="Cliquer pour nommer les objets manquants">
           <span id="deploy-missing-text"></span>
           <span style="margin-left:auto;font-size:10px;opacity:0.7">→ Cliquer pour nommer</span>
+        </div>
+        <div class="missing-bar" id="no-rcvd-bar" style="display:none">
+          <span id="no-rcvd-bar-text" style="flex:1"></span>
+          <button id="no-rcvd-toggle" class="missing-bar-btn"></button>
+        </div>
+        <div class="missing-bar info-bar-danger" id="unknown-svc-bar" style="display:none;cursor:pointer" onclick="showQualifyServicesModal()">
+          <span id="unknown-svc-bar-text" style="flex:1"></span>
+          <span style="font-size:10px;opacity:0.8;white-space:nowrap">→ Qualifier</span>
         </div>
         <div class="deploy-legend" id="deploy-legend" style="display:none">
           <div class="deploy-legend-item"><span class="deploy-legend-dot found"></span> Objet existant</div>
@@ -4724,6 +4731,187 @@ function _updateMergeSelectionBtn() {
   if (countEl) countEl.textContent = n;
 }
 
+// ─── Services inconnus ────────────────────────────────────────────────────────
+
+const _COMMON_PORTS = {
+  '80/TCP':'HTTP','443/TCP':'HTTPS','8080/TCP':'HTTP-ALT','8443/TCP':'HTTPS-ALT',
+  '8888/TCP':'HTTP-ALT','4443/TCP':'HTTPS-ALT','9090/TCP':'HTTP-MGMT',
+  '22/TCP':'SSH','21/TCP':'FTP','23/TCP':'TELNET',
+  '25/TCP':'SMTP','587/TCP':'SMTP-TLS','465/TCP':'SMTPS',
+  '143/TCP':'IMAP','993/TCP':'IMAPS','110/TCP':'POP3','995/TCP':'POP3S',
+  '3389/TCP':'RDP','5985/TCP':'WINRM-HTTP','5986/TCP':'WINRM-HTTPS',
+  '1433/TCP':'MSSQL','3306/TCP':'MYSQL','5432/TCP':'POSTGRESQL',
+  '1521/TCP':'ORACLE-DB','27017/TCP':'MONGODB','6379/TCP':'REDIS',
+  '389/TCP':'LDAP','636/TCP':'LDAPS','88/TCP':'KERBEROS','88/UDP':'KERBEROS',
+  '135/TCP':'MSRPC','445/TCP':'SMB','139/TCP':'NETBIOS-SSN',
+  '161/UDP':'SNMP','162/UDP':'SNMP-TRAP',
+  '123/UDP':'NTP','53/TCP':'DNS','53/UDP':'DNS',
+  '514/UDP':'SYSLOG','514/TCP':'SYSLOG-TCP','6514/TCP':'SYSLOG-TLS',
+  '5060/TCP':'SIP','5060/UDP':'SIP','5061/TCP':'SIP-TLS',
+  '9100/TCP':'PRINTER-RAW','631/TCP':'IPP',
+  '2049/TCP':'NFS','111/TCP':'PORTMAPPER',
+  '9389/TCP':'ADWS','3268/TCP':'LDAP-GC','3269/TCP':'LDAPS-GC',
+  '1883/TCP':'MQTT','8883/TCP':'MQTT-TLS',
+  '9200/TCP':'ELASTICSEARCH','9300/TCP':'ES-CLUSTER','5044/TCP':'LOGSTASH',
+};
+
+function _isUnqualifiedSvc(svc) {
+  if (svc.found) return false;
+  const autoLabel      = svc.isNamed ? svc.label : `FF_SVC_${svc.port}_${svc.proto}`;
+  const isPortNotation = /^(TCP|UDP)\/\d+$/i.test(svc.suggestedName || '');
+  const customName     = svc.suggestedName && !isPortNotation && svc.suggestedName !== autoLabel
+    ? svc.suggestedName : '';
+  return !customName;
+}
+
+function _collectUnqualifiedSvcs(policies) {
+  const portMap = new Map();
+  for (const p of (policies || [])) {
+    for (const svc of (p.analysis?.services || [])) {
+      if (!_isUnqualifiedSvc(svc)) continue;
+      const key = svc.isNamed
+        ? `label:${svc.label}`
+        : `${svc.port}/${(svc.proto || 'tcp').toUpperCase()}`;
+      if (!portMap.has(key)) {
+        portMap.set(key, { key, port: svc.port, proto: svc.proto, label: svc.label, isNamed: svc.isNamed, count: 0 });
+      }
+      portMap.get(key).count++;
+    }
+  }
+  return portMap;
+}
+
+function syncUnknownSvcBar() {
+  if (!deployState.analyzed) return;
+  const portMap     = _collectUnqualifiedSvcs(deployState.analyzed);
+  const bar         = document.getElementById('unknown-svc-bar');
+  const barText     = document.getElementById('unknown-svc-bar-text');
+  if (!bar) return;
+  const portCount   = portMap.size;
+  const policyCount = deployState.analyzed.filter(p =>
+    (p.analysis?.services || []).some(_isUnqualifiedSvc)).length;
+  if (portCount === 0) { bar.style.display = 'none'; return; }
+  bar.style.display = '';
+  if (barText) {
+    barText.textContent = `\u26a0 ${portCount} service${portCount > 1 ? 's' : ''} non qualifi\u00e9${portCount > 1 ? 's' : ''}`
+      + ` dans ${policyCount} police${policyCount > 1 ? 's' : ''} \u2014 type de trafic inconnu, nommer avant export`;
+  }
+}
+
+function _applyServiceQualification(nameMap) {
+  if (!nameMap || !Object.keys(nameMap).length) return;
+  for (const p of (deployState.analyzed || [])) {
+    for (const svc of (p.analysis?.services || [])) {
+      if (!_isUnqualifiedSvc(svc)) continue;
+      const key = svc.isNamed
+        ? `label:${svc.label}`
+        : `${svc.port}/${(svc.proto || 'tcp').toUpperCase()}`;
+      if (nameMap[key]) svc.suggestedName = nameMap[key];
+    }
+  }
+}
+
+function showQualifyServicesModal() {
+  const portMap = _collectUnqualifiedSvcs(deployState.analyzed);
+  if (portMap.size === 0) return;
+  const entries = [...portMap.values()].sort((a, b) => b.count - a.count);
+
+  // Construction du modal par DOM pour éviter toute injection
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+
+  const box = document.createElement('div');
+  box.className = 'modal-box';
+  box.style.cssText = 'max-width:580px;width:95%';
+
+  const title = document.createElement('div');
+  title.className = 'modal-title';
+  title.textContent = '\u26a0 Qualifier les services inconnus';
+
+  const desc = document.createElement('p');
+  desc.style.cssText = 'font-size:12px;color:var(--text2);margin:0 0 14px';
+  desc.textContent = "Ces ports n\u2019ont pas de correspondance dans la config FortiGate import\u00e9e. "
+    + "Donnez un nom m\u00e9tier \u00e0 chacun \u2014 il sera utilis\u00e9 dans le .conf g\u00e9n\u00e9r\u00e9. "
+    + "Laisser vide = nom auto g\u00e9n\u00e9r\u00e9 (ex: FF_SVC_8080_TCP).";
+
+  const table = document.createElement('table');
+  table.style.cssText = 'width:100%;border-collapse:collapse';
+
+  const thead = document.createElement('thead');
+  const hrow  = document.createElement('tr');
+  ['Port','Policies','Nom \u00e0 donner'].forEach(label => {
+    const th = document.createElement('th');
+    th.textContent = label;
+    th.style.cssText = 'text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:.5px;'
+      + 'color:var(--text2);padding:0 10px 8px 0';
+    hrow.appendChild(th);
+  });
+  thead.appendChild(hrow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  let firstEmpty = null;
+  for (const e of entries) {
+    const portLabel  = e.isNamed ? e.label : `${(e.proto || 'TCP').toUpperCase()}/${e.port}`;
+    const suggestion = (!e.isNamed && e.port && e.proto)
+      ? (_COMMON_PORTS[`${e.port}/${(e.proto || 'tcp').toUpperCase()}`] || '') : '';
+
+    const tr  = document.createElement('tr');
+    const td1 = document.createElement('td');
+    td1.textContent = portLabel;
+    td1.style.cssText = 'font-family:monospace;font-size:12px;color:var(--warn);padding:6px 10px 6px 0;white-space:nowrap';
+
+    const td2 = document.createElement('td');
+    td2.textContent = `${e.count} police${e.count > 1 ? 's' : ''}`;
+    td2.style.cssText = 'padding:6px 10px 6px 0;font-size:11px;color:var(--text2);white-space:nowrap';
+
+    const td3 = document.createElement('td');
+    td3.style.cssText = 'padding:6px 0';
+    const input = document.createElement('input');
+    input.type         = 'text';
+    input.className    = 'svc-qualify-input';
+    input.dataset.portKey = e.key;
+    input.value        = suggestion;
+    input.placeholder  = 'Nom m\u00e9tier (ex: BACKUP, MONITORING\u2026)';
+    input.style.cssText = 'width:100%;box-sizing:border-box;padding:5px 8px;font-size:12px;'
+      + 'border:1px solid var(--border);border-radius:4px;background:var(--bg2);color:var(--text)';
+    if (!suggestion && !firstEmpty) firstEmpty = input;
+    td3.appendChild(input);
+
+    tr.append(td1, td2, td3);
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+
+  const footer  = document.createElement('div');
+  footer.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:16px';
+  const btnCancel = document.createElement('button');
+  btnCancel.className   = 'btn-sm';
+  btnCancel.textContent = 'Annuler';
+  btnCancel.onclick     = () => overlay.remove();
+  const btnApply = document.createElement('button');
+  btnApply.className   = 'btn-accent';
+  btnApply.textContent = '\u2713 Appliquer \u00e0 toutes les policies';
+  btnApply.onclick = () => {
+    const nameMap = {};
+    overlay.querySelectorAll('.svc-qualify-input').forEach(inp => {
+      const name = inp.value.trim().toUpperCase().replace(/\s+/g, '-');
+      if (name) nameMap[inp.dataset.portKey] = name;
+    });
+    _applyServiceQualification(nameMap);
+    overlay.remove();
+    syncUnknownSvcBar();
+    renderDeployPolicies(filterDeployPolicies(), false);
+  };
+  footer.append(btnCancel, btnApply);
+
+  box.append(title, desc, table, footer);
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  if (firstEmpty) setTimeout(() => firstEmpty.focus(), 50);
+}
+
 function mergeSelectedDeployPolicies() {
   const sel = [...deployState.mergeSelected];
   if (sel.length < 2) {
@@ -4872,20 +5060,17 @@ function mergeServices(group) {
   return [...seen.values()];
 }
 
-// Filtre les policies analysées selon le texte de recherche
-// Met à jour le libellé du bouton toggle "sans réponse"
+// Met à jour la barre "destination silencieuse" et son bouton toggle
 function updateNoRcvdToggleBtn() {
-  const btn = document.getElementById('no-rcvd-toggle');
-  if (!btn) return;
-  const count = deployState._noRcvdCount || 0;
-  if (deployState.hideNoRcvd) {
-    btn.textContent = '\u26a0 ' + count + ' sans r\u00e9ponse masqu\u00e9' + (count > 1 ? 's' : '') + ' \u2014 Afficher';
-    btn.style.color = 'var(--warn)';
-    btn.style.opacity = '0.85';
-  } else {
-    btn.textContent = '\u26a0 ' + count + ' sans r\u00e9ponse \u2014 Masquer';
-    btn.style.color = 'var(--warn)';
-    btn.style.opacity = '1';
+  const btn     = document.getElementById('no-rcvd-toggle');
+  const barText = document.getElementById('no-rcvd-bar-text');
+  const count   = deployState._noRcvdCount || 0;
+  if (barText) {
+    barText.textContent = `⚠ ${count} police${count > 1 ? 's' : ''} avec destination silencieuse`
+      + ` (≥80% flows sans réponse) — port fermé ou hôte injoignable`;
+  }
+  if (btn) {
+    btn.textContent = deployState.hideNoRcvd ? 'Afficher' : 'Masquer';
   }
 }
 
@@ -7207,7 +7392,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
         <td><button class="btn-toggle-policy" data-idx="${idx}" title="${p._disabled ? 'Policy désactivée — cliquer pour activer' : 'Policy activée — cliquer pour désactiver'}"><span class="policy-status-badge ${p._disabled ? 'badge-disabled' : 'badge-enabled'}">${p._disabled ? 'DIS' : 'ENA'}</span></button></td>
         <td class="impact-cell"><div class="impact-bar" style="width:${barW}%"></div><span class="impact-val">${fmtNum(p.sessions || 0)}</span></td>
         <td>${actionBadge}${dirBadge}</td>
-        <td>${warnBadge}${seqBadge}${isScan ? '<span class="scan-badge" title="Trafic sans réponse (≥80% de flows sans retour) — aucune règle nécessaire">⚠ sans réponse</span>' : ''}${srcSubnetText}${srcModeBadge}</td>
+        <td>${warnBadge}${seqBadge}${isScan ? '<span class="scan-badge" title="Destination silencieuse : ≥80% des flows n\'ont reçu aucune réponse. Port fermé, hôte injoignable, ou flux déjà bloqué ailleurs. Vérifier avant de créer une règle.">⚠ silencieux</span>' : ''}${srcSubnetText}${srcModeBadge}</td>
         <td>${srcAddrCell}</td>
         ${allSrcAutoFlag ? '' : `<td>${srcIntf}</td>`}
         <td>${dstTargetCell(p, idx)}</td>
@@ -7356,23 +7541,38 @@ function renderDeployPolicies(analyzed, resetPage = true) {
   syncNoRcvdInfoBtn();
 }
 
-// Injecte ou met à jour le bouton toggle "sans réponse" dans le conteneur dédié (droite de toolbar)
+// Synchronise la barre "destination silencieuse"
 function syncNoRcvdInfoBtn() {
   if (!deployState.analyzed) return;
-
   if (deployState._noRcvdCount === undefined) {
     deployState._noRcvdCount = deployState.analyzed.filter(isScanPolicy).length;
   }
   const count = deployState._noRcvdCount;
-
-  let btn = document.getElementById('no-rcvd-toggle');
-  if (!btn) return; // bouton statique manquant
-  btn.style.display = count === 0 ? 'none' : '';
+  const bar = document.getElementById('no-rcvd-bar');
+  if (bar) bar.style.display = count === 0 ? 'none' : '';
   if (count > 0) updateNoRcvdToggleBtn();
+  syncUnknownSvcBar();
 }
 
 async function generateDeployConf() {
   if (!deployState.analyzed) return;
+
+  // Vérification services non qualifiés dans la sélection
+  const _selectedForCheck = deployState.analyzed.filter((_, i) => deployState.selected.has(i));
+  const _unqualMap = _collectUnqualifiedSvcs(_selectedForCheck);
+  if (_unqualMap.size > 0) {
+    const lines = [..._unqualMap.values()]
+      .sort((a, b) => b.count - a.count).slice(0, 12)
+      .map(e => `  \u2022 ${e.isNamed ? e.label : `${(e.proto||'TCP').toUpperCase()}/${e.port}`} (${e.count} police${e.count > 1 ? 's' : ''})`)
+      .join('\n');
+    const more = _unqualMap.size > 12 ? `\n  \u2026 et ${_unqualMap.size - 12} autre(s)` : '';
+    const ok = confirm(
+      `\u26a0 ${_unqualMap.size} service(s) non qualifi\u00e9(s) dans la s\u00e9lection :\n\n${lines}${more}\n\n`
+      + `Ces services seront cr\u00e9\u00e9s avec un nom auto-g\u00e9n\u00e9r\u00e9 (FF_SVC_...) dans le .conf.\n\n`
+      + `Cliquer "Annuler" pour les qualifier d\u2019abord, ou "OK" pour continuer quand m\u00eame.`
+    );
+    if (!ok) return;
+  }
 
   let selectedPolicies;
   if (deployState.viewMode === 'sequence') {

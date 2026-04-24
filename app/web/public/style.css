@@ -1436,6 +1436,11 @@ td:has([data-tip]) { overflow: visible; }
   margin-left: auto; transition: background 0.15s;
 }
 .missing-bar-btn:hover { background: rgba(200,133,58,0.25); }
+.info-bar-danger {
+  background: rgba(239,68,68,0.07) !important; border-color: rgba(239,68,68,0.25) !important;
+  color: #ef4444 !important;
+}
+.info-bar-danger:hover { background: rgba(239,68,68,0.13) !important; }
 
 /* ── Micro-legend ────────────────────────────────────────────────────────────── */
 .deploy-legend {
