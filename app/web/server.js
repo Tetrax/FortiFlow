@@ -188,6 +188,7 @@ function applyFlowFilters(flows, q) {
     if (q.subnet    && f.srcSubnet !== q.subnet && f.dstSubnet !== q.subnet)                      return false;
     if (q.srcSubnet && f.srcSubnet !== q.srcSubnet)                                               return false;
     if (q.dstTarget && f.dstSubnet !== q.dstTarget && f.dstip !== q.dstTarget)                   return false;
+    if (q.service   && f.service?.toUpperCase() !== q.service.toUpperCase())                     return false;
     return true;
   });
 }

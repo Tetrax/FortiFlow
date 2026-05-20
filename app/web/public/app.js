@@ -20,7 +20,7 @@ const state = {
   stats:    null,
   meta:     null,
   view:     'dashboard',
-  flows:    { page: 1, filters: {}, sort: 'count', order: 'desc', total: 0 },
+  flows:    { page: 1, filters: {}, sort: 'count', order: 'desc', total: 0, _fromPolicy: null },
   policies: { dst_type: '', viewMode: 'aggregated', includeNoRcvd: false },
   matrix:   { action: 'accept' },
   subView:  { analyse: 'flows', polices: 'policies' },
@@ -498,6 +498,7 @@ async function flows() {
         <a class="export-btn" id="btn-export-flows" href="#">⬇ CSV</a>
       </span>
     </div>
+    <div id="policy-filter-banner"></div>
     <div id="flows-table-wrap"></div>
     <div class="pagination" id="flows-pagination"></div>`;
 
@@ -516,14 +517,50 @@ async function flows() {
 
   el('btn-reset-filter').addEventListener('click', () => {
     state.flows.filters = {};
+    state.flows._fromPolicy = null;
     state.flows.page = 1;
     ['f-srcip','f-dstip','f-port','f-proto','f-action','f-dst-type'].forEach(id => {
       const e = el(id);
       if (e.tagName === 'SELECT') e.value = '';
       else e.value = '';
     });
+    const banner = el('policy-filter-banner');
+    if (banner) banner.textContent = '';
     loadFlows();
   }, { signal });
+
+  // Bannière filtre depuis déploiement
+  if (state.flows._fromPolicy) {
+    const banner = el('policy-filter-banner');
+    if (banner) {
+      const f = state.flows.filters;
+      const parts = [];
+      if (f.srcSubnet) parts.push(`src : ${f.srcSubnet}`);
+      if (f.dstTarget) parts.push(`dst : ${f.dstTarget}`);
+      if (f.service)   parts.push(`svc : ${f.service}`);
+      const wrap = document.createElement('div');
+      wrap.style.cssText = 'background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.27);border-radius:6px;padding:6px 12px;margin-bottom:6px;font-size:12px;display:flex;justify-content:space-between;align-items:center;gap:8px';
+      const info = document.createElement('span');
+      const bold = document.createElement('strong');
+      bold.textContent = state.flows._fromPolicy;
+      const hint = document.createElement('span');
+      hint.style.cssText = 'color:var(--text3);margin-left:8px';
+      hint.textContent = parts.join(' · ');
+      info.append('Filtré depuis deploy — ', bold, hint);
+      const clearBtn = document.createElement('button');
+      clearBtn.className = 'btn-sm';
+      clearBtn.textContent = '✕ Effacer';
+      clearBtn.addEventListener('click', () => {
+        state.flows.filters = {};
+        state.flows._fromPolicy = null;
+        state.flows.page = 1;
+        banner.textContent = '';
+        loadFlows();
+      }, { signal });
+      wrap.append(info, clearBtn);
+      banner.append(wrap);
+    }
+  }
 
   el('btn-export-flows').addEventListener('click', e => {
     e.preventDefault();
@@ -1091,10 +1128,31 @@ function renderHostPanel(hosts, subnet) {
 
 function filterFlowsByHost(ip) {
   state.flows.filters = { srcip: ip };
+  state.flows._fromPolicy = null;
   state.flows.page = 1;
   navigateTo('flows');
 }
 window.filterFlowsByHost = filterFlowsByHost;
+
+function filterFlowsByPolicy(idx) {
+  const p = deployState.analyzed?.[idx];
+  if (!p) return;
+  const filters = {};
+  if (!p._multiSrcSubnets?.length && p.srcSubnet) filters.srcSubnet = p.srcSubnet;
+  if (p.dstTarget) filters.dstTarget = p.dstTarget;
+  const svcs = p.analysis?.services || [];
+  const svcLabel = svcs.length === 1
+    ? (svcs[0].label || svcs[0].name || '')
+    : (p.serviceDesc || '');
+  if (svcLabel) filters.service = svcLabel.toUpperCase();
+  state.flows.filters = filters;
+  state.flows._fromPolicy = p._policyName || (p.policyIds || [])[0] || `#${idx}`;
+  state.flows.page = 1;
+  state.subView.analyse = 'flows';
+  closeDrawer();
+  navigateTo('analyse');
+}
+window.filterFlowsByPolicy = filterFlowsByPolicy;
 
 // ═══════════════════════════════════════════════════════════════
 // View: Policies
@@ -3539,6 +3597,9 @@ function populateDrawer(idx) {
       </div>
       <div class="drawer-field"><span class="drawer-field-label">NAT</span><label style="display:flex;align-items:center;gap:6px"><input type="checkbox" class="drawer-nat" ${p._nat ? 'checked' : ''}> <span style="font-size:11px;color:var(--text2)">Activer le NAT</span></label></div>
       <div class="drawer-field"><span class="drawer-field-label">Nom policy</span><input class="drawer-input drawer-policy-name" value="${escHtml(p._policyName || '')}" placeholder="FF_POLICY_..."></div>
+      <div class="drawer-field" style="margin-top:4px">
+        <button class="btn-sm" onclick="filterFlowsByPolicy(${idx})" style="width:100%;justify-content:center">→ Voir les flux</button>
+      </div>
     </div>
     ${srcSection}
     ${dstSection}
@@ -4531,23 +4592,31 @@ function splitPoliciesByService(analyzedPolicies, baseAnalyzed, hostPairServices
       result.push({ ...p, ...forceHosts, analysis: services.length === 1 ? { ...p.analysis, services } : p.analysis });
     } else {
       for (const svc of services) {
-        // Filtre srcHosts aux seuls hôtes ayant réellement utilisé ce service vers au moins un dstHost.
-        // Garantit que le passage en /32 ne montre que des hôtes réels, même après une fusion.
+        // Filtre srcHosts ET dstHosts aux seuls hôtes ayant réellement utilisé ce service.
         let svcSrcHosts = srcHosts;
+        let svcDstHosts = dstHosts;
         if (hostPairServices && srcHosts.length > 0 && dstHosts.length > 0) {
           const svcName = (svc.label || svc.name || '').toUpperCase();
-          const filtered = srcHosts.filter(src =>
+          const filteredSrc = srcHosts.filter(src =>
             dstHosts.some(dst => {
               const flowSvcs = hostPairServices[src + '|' + dst];
               return flowSvcs && flowSvcs.some(s => s.toUpperCase() === svcName);
             })
           );
-          if (filtered.length > 0) svcSrcHosts = filtered;
+          const filteredDst = dstHosts.filter(dst =>
+            srcHosts.some(src => {
+              const flowSvcs = hostPairServices[src + '|' + dst];
+              return flowSvcs && flowSvcs.some(s => s.toUpperCase() === svcName);
+            })
+          );
+          if (filteredSrc.length > 0) svcSrcHosts = filteredSrc;
+          if (filteredDst.length > 0) svcDstHosts = filteredDst;
         }
         result.push({
           ...p,
           ...forceHosts,
           srcHosts:    svcSrcHosts,
+          dstHosts:    svcDstHosts,
           serviceDesc: svc.label || svc.name || '',
           analysis:    { ...p.analysis, services: [svc] },
         });
@@ -6169,11 +6238,10 @@ async function analyzeDeployPolicies() {
   // Tri par volume de sessions décroissant (policies les plus actives en premier)
   analyzed.sort((a, b) => (b.sessions || 0) - (a.sessions || 0));
 
-  // ── Normalisation srcHosts ────────────────────────────────────────────────────
-  // Filtre srcHosts de chaque policy aux seuls hôtes ayant réellement utilisé
-  // les services de cette policy vers ses destinations, selon les flows bruts.
-  // Garantit que tous les modes de fusion et de détail travaillent sur des données propres,
-  // sans résidus d'agrégation (ex : 122 hôtes identiques pour SMB, SSH, DCE-RPC…).
+  // ── Normalisation srcHosts + dstHosts ─────────────────────────────────────────
+  // Filtre srcHosts ET dstHosts de chaque policy aux seuls hôtes ayant réellement
+  // participé aux services de cette policy, selon les flows bruts (hostPairServices).
+  // Garantit que tous les modes de fusion et de détail travaillent sur des données propres.
   const _hps = deployState.hostPairServices;
   if (_hps && Object.keys(_hps).length > 0) {
     analyzed = analyzed.map(p => {
@@ -6182,13 +6250,22 @@ async function analyzeDeployPolicies() {
       if (srcHosts.length === 0 || dstHosts.length === 0) return p;
       const svcNames = new Set((p.analysis?.services || []).map(s => (s.label || s.name || '').toUpperCase()));
       if (svcNames.size === 0) return p;
-      const filtered = srcHosts.filter(src =>
+      const filteredSrc = srcHosts.filter(src =>
         dstHosts.some(dst => {
           const flowSvcs = _hps[src + '|' + dst];
           return flowSvcs && flowSvcs.some(s => svcNames.has(s.toUpperCase()));
         })
       );
-      return filtered.length > 0 ? { ...p, srcHosts: filtered } : p;
+      const filteredDst = dstHosts.filter(dst =>
+        srcHosts.some(src => {
+          const flowSvcs = _hps[src + '|' + dst];
+          return flowSvcs && flowSvcs.some(s => svcNames.has(s.toUpperCase()));
+        })
+      );
+      const newP = { ...p };
+      if (filteredSrc.length > 0) newP.srcHosts = filteredSrc;
+      if (filteredDst.length > 0) newP.dstHosts = filteredDst;
+      return newP;
     });
   }
 
