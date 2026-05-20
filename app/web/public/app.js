@@ -3794,6 +3794,7 @@ async function deploy() {
             <button class="btn-accent" id="btn-analyze">⚡ Analyser les policies</button>
           </div>
         </div>
+        <div id="deploy-hps-warn" style="display:none;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);border-radius:6px;padding:5px 12px;font-size:12px;color:var(--danger,#ef4444);margin-bottom:4px"></div>
         <div class="deploy-toolbar" id="deploy-merge-bar" style="display:none">
           <span id="deploy-merge-info" style="font-size:11px;color:var(--text2)"></span>
           <div class="dropdown-wrap" id="merge-dropdown-wrap">
@@ -4262,6 +4263,18 @@ async function deploy() {
       deployState._analyzedOriginal = deployState.analyzed.map(p => ({ ...p }));
     }
     const orig = deployState._analyzedOriginal || [];
+    const hpsAvailable = deployState.hostPairServices && Object.keys(deployState.hostPairServices).length > 0;
+    if (!hpsAvailable && deployState.bruteMode !== 'off') {
+      // Sans l'index de flows bruts, les modes de détail /32 produiraient des associations fictives
+      const warn = el('deploy-hps-warn');
+      if (warn) {
+        warn.textContent = '⚠ Index de flows absent — résultats potentiellement imprécis. Relancez l\'analyse pour des données exactes.';
+        warn.style.display = '';
+      }
+    } else {
+      const warn = el('deploy-hps-warn');
+      if (warn) warn.style.display = 'none';
+    }
     if (deployState.bruteMode === 'service') {
       deployState.analyzed = splitPoliciesByService(orig, deployState.baseAnalyzedPolicies, deployState.hostPairServices);
     } else if (deployState.bruteMode === 'host') {
@@ -4839,8 +4852,29 @@ function mergeSelectedDeployPolicies() {
   const allSvcs  = mergeServices(toMerge);
   const sessions = toMerge.reduce((s, p) => s + (p.sessions || 0), 0);
   const policyIds = [...new Set(toMerge.flatMap(p => p.policyIds || []))].sort((a, b) => +a - +b);
-  const allSrcHosts = [...new Set(toMerge.flatMap(p => p.srcHosts || []))];
-  const allDstHosts = [...new Set(toMerge.flatMap(p => p.dstHosts || []))];
+  let allSrcHosts = [...new Set(toMerge.flatMap(p => p.srcHosts || []))];
+  let allDstHosts = [...new Set(toMerge.flatMap(p => p.dstHosts || []))];
+
+  // Re-filtrer via hostPairServices pour éliminer les combinaisons src×dst fictives
+  // (croisements entre policies d'origines différentes qui n'ont jamais eu lieu)
+  const _hpsManual = deployState.hostPairServices;
+  if (_hpsManual && Object.keys(_hpsManual).length > 0 && allSrcHosts.length > 0 && allDstHosts.length > 0) {
+    const svcNames = new Set(allSvcs.map(s => (s.label || s.name || '').toUpperCase()));
+    const fSrc = allSrcHosts.filter(src =>
+      allDstHosts.some(dst => {
+        const svcs = _hpsManual[src + '|' + dst];
+        return svcs && (svcNames.size === 0 || svcs.some(s => svcNames.has(s.toUpperCase())));
+      })
+    );
+    const fDst = allDstHosts.filter(dst =>
+      allSrcHosts.some(src => {
+        const svcs = _hpsManual[src + '|' + dst];
+        return svcs && (svcNames.size === 0 || svcs.some(s => svcNames.has(s.toUpperCase())));
+      })
+    );
+    if (fSrc.length > 0) allSrcHosts = fSrc;
+    if (fDst.length > 0) allDstHosts = fDst;
+  }
 
   const merged = {
     ...base,
@@ -4920,8 +4954,10 @@ function mergeAnalyzedPolicies(policies, mode) {
     const allServices   = mergeServices(group);
     const totalSessions = group.reduce((s, p) => s + (p.sessions || 0), 0);
     const allPolicyIds  = [...new Set(group.flatMap(p => p.policyIds || []))].sort((a, b) => Number(a) - Number(b));
+    const allSrcHosts   = [...new Set(group.flatMap(p => p.srcHosts || []))];
     merged.push({
       ...base,
+      srcHosts:     allSrcHosts,
       dstTarget:    'all',
       dstType:      'public',
       sessions:     totalSessions,
@@ -4947,8 +4983,12 @@ function mergeAnalyzedPolicies(policies, mode) {
     const allServices   = mergeServices(group);
     const totalSessions = group.reduce((s, p) => s + (p.sessions || 0), 0);
     const allPolicyIds  = [...new Set(group.flatMap(p => p.policyIds || []))].sort((a, b) => Number(a) - Number(b));
+    const allSrcHosts   = [...new Set(group.flatMap(p => p.srcHosts || []))];
+    const allDstHosts   = [...new Set(group.flatMap(p => p.dstHosts || []))];
     merged.push({
       ...base,
+      srcHosts:     allSrcHosts,
+      dstHosts:     allDstHosts,
       sessions:     totalSessions,
       serviceDesc:  allServices.map(s => s.label).join(', '),
       policyIds:    allPolicyIds,
@@ -6265,6 +6305,8 @@ async function analyzeDeployPolicies() {
       const newP = { ...p };
       if (filteredSrc.length > 0) newP.srcHosts = filteredSrc;
       if (filteredDst.length > 0) newP.dstHosts = filteredDst;
+      // Si aucune paire trouvée dans hostPairServices, signaler pour affichage UI
+      if (filteredSrc.length === 0 && filteredDst.length === 0) newP._hpsUnverified = true;
       return newP;
     });
   }
@@ -7315,7 +7357,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
         <td><button class="btn-toggle-policy" data-idx="${idx}" title="${p._disabled ? 'Policy désactivée — cliquer pour activer' : 'Policy activée — cliquer pour désactiver'}"><span class="policy-status-badge ${p._disabled ? 'badge-disabled' : 'badge-enabled'}">${p._disabled ? 'DIS' : 'ENA'}</span></button></td>
         <td class="impact-cell"><div class="impact-bar" style="width:${barW}%"></div><span class="impact-val">${fmtNum(p.sessions || 0)}</span></td>
         <td>${actionBadge}${dirBadge}</td>
-        <td>${warnBadge}${seqBadge}${isScan ? '<span class="scan-badge" title="Destination silencieuse : ≥80% des flows n\'ont reçu aucune réponse. Port fermé, hôte injoignable, ou flux déjà bloqué ailleurs. Vérifier avant de créer une règle.">⚠ silencieux</span>' : ''}${srcSubnetText}${srcModeBadge}</td>
+        <td>${warnBadge}${seqBadge}${isScan ? '<span class="scan-badge" title="Destination silencieuse : ≥80% des flows n\'ont reçu aucune réponse. Port fermé, hôte injoignable, ou flux déjà bloqué ailleurs. Vérifier avant de créer une règle.">⚠ silencieux</span>' : ''}${p._hpsUnverified ? '<span class="scan-badge" title="Aucune paire src→dst trouvée dans l\'index de flows pour les services de cette policy. Les hôtes affichés n\'ont pas pu être vérifiés — possible désaccord de nommage entre logs et objets FortiGate.">⚠ non vérifié</span>' : ''}${srcSubnetText}${srcModeBadge}</td>
         <td>${srcAddrCell}</td>
         ${allSrcAutoFlag ? '' : `<td>${srcIntf}</td>`}
         <td>${dstTargetCell(p, idx)}</td>
