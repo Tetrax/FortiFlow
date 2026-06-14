@@ -131,7 +131,14 @@ function isValidIPv4(ip) {
 // On ne fabrique jamais de date — si la source ne fournit rien, ts reste null (#1).
 function flowTimestamp(fields) {
   const et = parseInt(fields.eventtime || '', 10);
-  if (et) return et > 1e12 ? et : et * 1000;   // normaliser s → ms
+  if (et) {
+    // eventtime FortiOS varie selon la version : secondes / ms / µs / NANOSECONDES (19 chiffres).
+    // Normaliser en millisecondes d'après l'ordre de grandeur (sinon Date hors plage → crash rendu).
+    if (et >= 1e18) return Math.floor(et / 1e6);   // nanosecondes → ms
+    if (et >= 1e15) return Math.floor(et / 1e3);   // microsecondes → ms
+    if (et >= 1e12) return et;                      // millisecondes
+    return et * 1000;                               // secondes → ms
+  }
   const d = (fields.date || '').trim();
   if (d) {
     const t = (fields.time || '').trim();

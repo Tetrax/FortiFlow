@@ -7433,14 +7433,20 @@ function thSort(label, col) {
   return `<th class="sortable-th${active ? ' sort-active' : ''}" data-sort="${col}" style="cursor:pointer;user-select:none">${label}${arrow}</th>`;
 }
 
+// Formate un epoch ms en YYYY-MM-DD, ou '?' si invalide — ne lève JAMAIS (garde anti-crash rendu).
+function _fmtDay(ms) {
+  const d = new Date(ms);
+  return isNaN(d.getTime()) ? '?' : d.toISOString().slice(0, 10);
+}
+
 // #1: bannière fenêtre d'observation globale (honnête — indispo si pas d'horodatage).
 function _captureBanner() {
   const cw = deployState.captureWindow;
   if (!cw || !cw.available) {
     return `<span style="color:var(--text2)" title="Les logs importés ne contiennent pas d'horodatage (eventtime/date) — impossible d'évaluer la récurrence du trafic.">📅 logs sans horodatage — confiance temporelle indisponible</span>`;
   }
-  const d0 = new Date(cw.start).toISOString().slice(0, 10);
-  const d1 = new Date(cw.end).toISOString().slice(0, 10);
+  const d0 = _fmtDay(cw.start);
+  const d1 = _fmtDay(cw.end);
   let s = `📅 Observation : ${d0} → ${d1} (${cw.days} jour${cw.days > 1 ? 's' : ''})`;
   if (cw.days <= 1) s += ` · <span style="color:var(--warn,#d97706)">récurrence non évaluable (capture ≤ 1 jour)</span>`;
   return `<span style="color:var(--text2)">${s}</span>`;
@@ -7456,10 +7462,10 @@ function _confidenceBadge(p) {
   if (c !== 'high' && c !== 'medium' && c !== 'low') return '';
   const days = p.daysObserved;
   const cw = deployState.captureWindow || {};
-  const fmtAgo = (ts) => { if (!ts) return ''; const d = Math.floor((Date.now() - ts) / 86400000); return d <= 0 ? "aujourd'hui" : `il y a ${d}j`; };
+  const fmtAgo = (ts) => { const d = Math.floor((Date.now() - ts) / 86400000); return !isFinite(d) ? '' : d <= 0 ? "aujourd'hui" : `il y a ${d}j`; };
   const tip = `Observé sur ${days} jour(s)${cw.days ? ` / ${cw.days} de capture` : ''}`
-    + (p.firstSeen ? ` · 1er ${new Date(p.firstSeen).toISOString().slice(0, 10)}` : '')
-    + (p.lastSeen ? ` · dernier ${new Date(p.lastSeen).toISOString().slice(0, 10)} (${fmtAgo(p.lastSeen)})` : '');
+    + (p.firstSeen ? ` · 1er ${_fmtDay(p.firstSeen)}` : '')
+    + (p.lastSeen ? ` · dernier ${_fmtDay(p.lastSeen)} (${fmtAgo(p.lastSeen)})` : '');
   const color = c === 'high' ? '#16a34a' : c === 'low' ? '#d97706' : 'var(--text2)';
   const label = c === 'high' ? `✓${days}j` : c === 'low' ? `⚠${days}j` : `${days}j`;
   return ` <span style="font-size:9px;color:${color}" title="${escHtml(tip)}">${label}</span>`;
