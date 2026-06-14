@@ -7,13 +7,11 @@ const zlib     = require('zlib');
 
 // ─── Key=Value parser ─────────────────────────────────────────────────────────
 
-const KV_RE = /(\w+)=("(?:[^"\\]|\\.)*"|[^\s"]\S*)/g;
-
 function parseKV(line) {
+  // R1: regex locale + matchAll — aucun état `lastIndex` partagé entre appels/streams concurrents.
+  const re = /(\w+)=("(?:[^"\\]|\\.)*"|[^\s"]\S*)/g;
   const fields = {};
-  KV_RE.lastIndex = 0;
-  let m;
-  while ((m = KV_RE.exec(line)) !== null) {
+  for (const m of line.matchAll(re)) {
     let val = m[2];
     if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1);
     fields[m[1]] = val;
@@ -101,12 +99,14 @@ const UDP_SERVICES = new Set([
 // ─── Format detection ─────────────────────────────────────────────────────────
 
 function detectFormat(firstLine) {
-  const hasKV = /\w+=/.test(firstLine);
-  if (hasKV) return { format: 'kv', sep: null };
-  const tabs   = (firstLine.match(/\t/g) || []).length;
-  const commas = (firstLine.match(/,/g) || []).length;
-  if (tabs > 3)   return { format: 'csv', sep: '\t' };
-  if (commas > 2) return { format: 'csv', sep: ',' };
+  // R2: un vrai log KV FortiAnalyzer contient de nombreux couples key=val (date=, srcip=, …).
+  // Exiger ≥3 couples évite qu'une ligne CSV contenant un seul '=' (commentaire, valeur) bascule en KV.
+  const kvCount = (firstLine.match(/\b\w+=\S/g) || []).length;
+  const tabs    = (firstLine.match(/\t/g) || []).length;
+  const commas  = (firstLine.match(/,/g) || []).length;
+  if (kvCount >= 3) return { format: 'kv', sep: null };
+  if (tabs > 3)     return { format: 'csv', sep: '\t' };
+  if (commas > 2)   return { format: 'csv', sep: ',' };
   return { format: 'kv', sep: null };
 }
 

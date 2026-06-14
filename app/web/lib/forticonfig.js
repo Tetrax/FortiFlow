@@ -386,11 +386,16 @@ function parseFortiConfig(text, selectedVdom = null) {
     const proto = (props.protocol || 'TCP/UDP/SCTP').toUpperCase();
     const icmptype = props.icmptype !== undefined && props.icmptype !== '' ? parseInt(props.icmptype, 10) : null;
     const icmpcode = props.icmpcode !== undefined && props.icmpcode !== '' ? parseInt(props.icmpcode, 10) : null;
+    const tcpPorts = parsePorts(props['tcp-portrange'] || '');
+    const udpPorts = parsePorts(props['udp-portrange'] || '');
     customServices[name] = {
       name,
       proto,
-      tcpPorts: parsePorts(props['tcp-portrange'] || ''),
-      udpPorts: parsePorts(props['udp-portrange'] || ''),
+      tcpPorts,
+      udpPorts,
+      // P1: Sets pré-calculés pour un lookup O(1) dans findService (au lieu de ports.includes O(n))
+      _tcpSet: new Set(tcpPorts),
+      _udpSet: new Set(udpPorts),
       icmptype,
       icmpcode,
     };
@@ -812,7 +817,9 @@ function findAddressGroup(cidrs, addressGroups, addresses) {
   if (!cidrs || cidrs.length < 2 || !addressGroups) return null;
   const sortedCidrs = [...cidrs].sort();
   for (const [name, grp] of Object.entries(addressGroups)) {
-    const grpCidrs = expandGroupCidrs(grp.members, addressGroups, addresses, new Set([name]))
+    // P4: réutiliser le cache expandedCidrs calculé au parse (parseFortiConfig) au lieu de
+    // ré-expanser récursivement chaque groupe à chaque appel.
+    const grpCidrs = (grp.expandedCidrs || expandGroupCidrs(grp.members, addressGroups, addresses, new Set([name])))
       .filter(Boolean)
       .sort();
     if (grpCidrs.length === sortedCidrs.length && grpCidrs.every((c, i) => c === sortedCidrs[i])) {
@@ -955,8 +962,9 @@ function findService(port, protoName, customServices, opts) {
 
   // Check custom services from config (may be multiple)
   for (const [name, svc] of Object.entries(customServices)) {
-    const ports = isUdp ? svc.udpPorts : svc.tcpPorts;
-    if (ports.length <= maxPortCount && ports.includes(p)) {
+    const ports   = isUdp ? svc.udpPorts : svc.tcpPorts;
+    const portSet = isUdp ? svc._udpSet  : svc._tcpSet;   // P1: lookup O(1)
+    if (ports.length <= maxPortCount && (portSet ? portSet.has(p) : ports.includes(p))) {
       matches.push({ name, source: 'custom', portCount: ports.length });
     }
   }
@@ -1236,7 +1244,26 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
 // ─── CLI config generator ─────────────────────────────────────────────────────
 
 // Sanitise une valeur pour insertion dans une commande CLI FortiGate (entre quotes)
-function safeCli(str) { return (str || '').replace(/["\\]/g, '_').replace(/[\r\n]/g, ''); }
+// M7: neutralise aussi ? * # (wildcards / commentaire interprétés par le CLI FortiGate)
+function safeCli(str) { return (str || '').replace(/["\\?*#]/g, '_').replace(/[\r\n]/g, ''); }
+
+// M8: enregistre un groupe d'adresses en évitant les collisions de noms.
+// Deux policies au même 1er subnet peuvent produire le même nom de groupe avec des membres
+// différents → sans dédup, le 2e .set() écrase le 1er silencieusement (membres erronés).
+// Si le nom existe avec des membres identiques → réutilise ; sinon suffixe _2, _3…
+// Retourne le nom effectivement utilisé (à référencer dans la policy).
+function registerAddrGroup(map, baseName, members) {
+  const sig = (arr) => [...arr].sort().join('');
+  const wanted = sig(members);
+  let name = baseName;
+  let n = 1;
+  while (map.has(name)) {
+    if (sig(map.get(name)) === wanted) return name;  // déjà exactement ce groupe
+    name = `${baseName}_${++n}`;
+  }
+  map.set(name, members);
+  return name;
+}
 
 // Consolidate sorted port numbers into compact range notation for FortiGate CLI
 // e.g. [1046,1047,1131,1132,1133] → "1046-1047 1131-1133"
@@ -1314,16 +1341,16 @@ function generateConfig(selectedPolicies, opts = {}) {
       }
       srcAddrNames = allSrcNames;
       if (p._useSrcGroup) {
-        srcAddrGrpName = p._srcAddrName || `FF_GRP_SRC_${suggestAddrName(p._multiSrcSubnets[0].subnet)}`;
-        newAddrGroups.set(srcAddrGrpName, allSrcNames);
+        srcAddrGrpName = registerAddrGroup(newAddrGroups,
+          p._srcAddrName || `FF_GRP_SRC_${suggestAddrName(p._multiSrcSubnets[0].subnet)}`, allSrcNames);
       }
     } else if (p._isSvcMerge && p._mergedSrcSubnets && p._mergedSrcSubnets.length > 1) {
       // Fusion par service : créer un groupe d'adresses pour les sources fusionnées
       const subnetNames = p._mergedSrcSubnets.map(s => suggestAddrName(s));
       p._mergedSrcSubnets.forEach((cidr, i) => newAddresses.set(cidr, subnetNames[i]));
-      srcAddrGrpName = p._srcAddrName || `FF_SVC_GRP_${suggestAddrName(p._mergedSrcSubnets[0])}`;
       srcAddrNames = subnetNames;
-      newAddrGroups.set(srcAddrGrpName, subnetNames);
+      srcAddrGrpName = registerAddrGroup(newAddrGroups,
+        p._srcAddrName || `FF_SVC_GRP_${suggestAddrName(p._mergedSrcSubnets[0])}`, subnetNames);
     } else if (p._use32Src && p.srcHosts && p.srcHosts.length > 0) {
       // Mode /32 : utiliser les hôtes réels plutôt que le subnet /24
       const hostNames = p.srcHosts.map(h => {
@@ -1335,9 +1362,9 @@ function generateConfig(selectedPolicies, opts = {}) {
         srcAddrName = hostNames[0];
       } else if (p._useSrcGroup) {
         // Utilisateur a demandé un groupe
-        srcAddrGrpName = p.srcAddrName || `FF_HOSTS_${suggestAddrName(p.srcSubnet)}`;
         srcAddrNames = hostNames;
-        newAddrGroups.set(srcAddrGrpName, hostNames);
+        srcAddrGrpName = registerAddrGroup(newAddrGroups,
+          p.srcAddrName || `FF_HOSTS_${suggestAddrName(p.srcSubnet)}`, hostNames);
       } else {
         // Par défaut : lister inline dans set srcaddr
         srcAddrName = hostNames;
@@ -1351,8 +1378,8 @@ function generateConfig(selectedPolicies, opts = {}) {
         newAddresses.set(cidr, name);
       });
       // Créer un groupe d'adresses
-      srcAddrGrpName = p.srcAddrName || p.policyName || `FF_GRP_${suggestAddrName(subnets[0])}`;
-      newAddrGroups.set(srcAddrGrpName, srcAddrNames);
+      srcAddrGrpName = registerAddrGroup(newAddrGroups,
+        p.srcAddrName || p.policyName || `FF_GRP_${suggestAddrName(subnets[0])}`, srcAddrNames);
     } else if (p._srcAddrGrpFound) {
       // Groupe existant trouvé → l'utiliser directement
       srcAddrName = p.srcAddrName || p._srcAddrName;
@@ -1429,9 +1456,8 @@ function generateConfig(selectedPolicies, opts = {}) {
           dstAddrName = existingGrp.name;
         } else if (p._useDstGroup) {
           // Utilisateur a demandé un groupe → le créer
-          const grpName = p.dstAddrName || `GRP_${(p.policyIds||['0'])[0]}_DST`;
-          newAddrGroups.set(grpName, uniqueDstNames);
-          dstAddrName = grpName;
+          dstAddrName = registerAddrGroup(newAddrGroups,
+            p.dstAddrName || `GRP_${(p.policyIds||['0'])[0]}_DST`, uniqueDstNames);
         } else {
           // Par défaut : lister inline dans set dstaddr
           dstAddrName = uniqueDstNames;
