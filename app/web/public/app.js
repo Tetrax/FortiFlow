@@ -6418,24 +6418,36 @@ async function analyzeDeployPolicies() {
   // Garantit que tous les modes de fusion et de détail travaillent sur des données propres.
   const _hps = deployState.hostPairServices;
   if (_hps && Object.keys(_hps).length > 0) {
+    // Index src → [[dst, servicesUpper]] (une fois) — évite le produit cartésien srcHosts×dstHosts
+    // par policy (catastrophique sur les policies de scan : gel de l'onglet sur gros dataset).
+    const idxSrc = Object.create(null);
+    for (const key in _hps) {
+      const bar = key.indexOf('|');
+      if (bar < 0) continue;
+      const s = key.slice(0, bar), d = key.slice(bar + 1);
+      (idxSrc[s] || (idxSrc[s] = [])).push([d, _hps[key]]);  // services déjà en majuscules côté serveur
+    }
     analyzed = analyzed.map(p => {
       const srcHosts = p.srcHosts || [];
       const dstHosts = p.dstHosts || [];
       if (srcHosts.length === 0 || dstHosts.length === 0) return p;
       const svcNames = new Set((p.analysis?.services || []).map(s => (s.label || s.name || '').toUpperCase()));
       if (svcNames.size === 0) return p;
-      const filteredSrc = srcHosts.filter(src =>
-        dstHosts.some(dst => {
-          const flowSvcs = _hps[src + '|' + dst];
-          return flowSvcs && flowSvcs.some(s => svcNames.has(s.toUpperCase()));
-        })
-      );
-      const filteredDst = dstHosts.filter(dst =>
-        srcHosts.some(src => {
-          const flowSvcs = _hps[src + '|' + dst];
-          return flowSvcs && flowSvcs.some(s => svcNames.has(s.toUpperCase()));
-        })
-      );
+      // Une seule passe sur les paires réellement observées → marque src ET dst valides.
+      const dstSet = new Set(dstHosts);
+      const validSrc = new Set(), validDst = new Set();
+      for (const src of srcHosts) {
+        const entries = idxSrc[src];
+        if (!entries) continue;
+        for (let i = 0; i < entries.length; i++) {
+          const dst = entries[i][0];
+          if (!dstSet.has(dst)) continue;
+          const svcs = entries[i][1];
+          if (svcs && svcs.some(s => svcNames.has(s))) { validSrc.add(src); validDst.add(dst); }
+        }
+      }
+      const filteredSrc = srcHosts.filter(s => validSrc.has(s));  // préserve l'ordre
+      const filteredDst = dstHosts.filter(d => validDst.has(d));
       const newP = { ...p };
       if (filteredSrc.length > 0) newP.srcHosts = filteredSrc;
       if (filteredDst.length > 0) newP.dstHosts = filteredDst;
@@ -7453,9 +7465,26 @@ function _confidenceBadge(p) {
   return ` <span style="font-size:9px;color:${color}" title="${escHtml(tip)}">${label}</span>`;
 }
 
-// #3: agrège la couverture d'une policy sur ses paires src×dst réelles (hostPairCoverage).
-// Conservateur : 'allowed' seulement si TOUTES les paires sont prouvées autorisées.
-// Marche pour base/fusion/détail (basé sur les paires, comme hostPairServices).
+// Index mémoïsé src → [[dst, entry]] depuis hostPairCoverage (reconstruit si l'objet change).
+// Évite d'itérer le produit cartésien srcHosts×dstHosts (catastrophique sur des policies de scan).
+function _covIndexBySrc() {
+  const cov = deployState.hostPairCoverage;
+  if (deployState._covIndexFor === cov && deployState._covIndex) return deployState._covIndex;
+  const idx = Object.create(null);
+  for (const key in cov) {
+    const bar = key.indexOf('|');
+    if (bar < 0) continue;
+    const s = key.slice(0, bar), d = key.slice(bar + 1);
+    (idx[s] || (idx[s] = [])).push([d, cov[key]]);
+  }
+  deployState._covIndex = idx;
+  deployState._covIndexFor = cov;
+  return idx;
+}
+
+// #3: agrège la couverture d'une policy sur ses paires RÉELLEMENT OBSERVÉES (hostPairCoverage).
+// On n'itère que les paires ayant eu du trafic (pas le cartésien : les paires sans flux ne veulent
+// rien dire). Verdict 'allowed' seulement si TOUTES les paires observées sont prouvées autorisées.
 function _policyCoverage(p) {
   const cov = deployState.hostPairCoverage;
   if (!deployState.coverageAvailable || !cov) return null;
@@ -7463,26 +7492,34 @@ function _policyCoverage(p) {
   let dsts = (p.dstHosts && p.dstHosts.length) ? p.dstHosts : [];
   if (!dsts.length && p._isMultiDst && p._multiDstSubnets) dsts = p._multiDstSubnets.flatMap(s => s.hosts || []);
   if (!dsts.length && p.dstTarget && p.dstTarget !== 'all') dsts = [p.dstTarget];
-  if (!srcs.length || !dsts.length) return null;  // pas de paires concrètes → pas de verdict fiable
+  if (!srcs.length || !dsts.length) return null;
+  const dstSet = new Set(dsts);
+  const idx = _covIndexBySrc();
   const t = { allowed: 0, blocked: 0, new: 0, uncertain: 0, partial: 0 };
   const ruleIds = new Set(), blockIds = new Set();
-  let total = 0;
-  for (const s of srcs) for (const d of dsts) {
-    total++;
-    const e = cov[s + '|' + d];
-    if (!e) { t.new++; continue; }   // aucune trace accept observée → nouveau
-    t[e.verdict] = (t[e.verdict] || 0) + 1;
-    (e.ruleIds  || []).forEach(r => ruleIds.add(r));
-    (e.blockIds || []).forEach(r => blockIds.add(r));
+  let observed = 0;
+  for (const s of srcs) {
+    const entries = idx[s];
+    if (!entries) continue;
+    for (let i = 0; i < entries.length; i++) {
+      const d = entries[i][0];
+      if (!dstSet.has(d)) continue;
+      observed++;
+      const e = entries[i][1];
+      t[e.verdict] = (t[e.verdict] || 0) + 1;
+      (e.ruleIds  || []).forEach(r => ruleIds.add(r));
+      (e.blockIds || []).forEach(r => blockIds.add(r));
+    }
   }
+  if (!observed) return null;   // aucune paire observée → pas de verdict (pas de badge)
   let status;
-  if (t.allowed === total) status = 'allowed';
-  else if (t.blocked === total) status = 'blocked';
-  else if (t.new === total) status = 'new';
-  else if (t.uncertain === total) status = 'uncertain';
+  if (t.allowed === observed) status = 'allowed';
+  else if (t.blocked === observed) status = 'blocked';
+  else if (t.new === observed) status = 'new';
+  else if (t.uncertain === observed) status = 'uncertain';
   else if (t.allowed || t.blocked || t.partial) status = 'partial';
   else status = t.uncertain ? 'uncertain' : 'new';
-  return { status, ruleIds: [...ruleIds], blockIds: [...blockIds], counts: t, total };
+  return { status, ruleIds: [...ruleIds], blockIds: [...blockIds], counts: t, total: observed };
 }
 
 function _coverageBadge(p) {
