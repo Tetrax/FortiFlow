@@ -977,8 +977,9 @@ function findService(port, protoName, customServices, opts) {
 
 // ─── Policy analysis ──────────────────────────────────────────────────────────
 
-function suggestAddrName(cidr) {
-  return 'FF_' + (cidr || '').replace(/\//g, '_').replace(/\./g, '_');
+// #5: préfixe de nommage configurable (défaut 'FF' → sortie identique à l'historique).
+function suggestAddrName(cidr, prefix = 'FF') {
+  return prefix + '_' + (cidr || '').replace(/\//g, '_').replace(/\./g, '_');
 }
 
 function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
@@ -1292,7 +1293,11 @@ function generateConfig(selectedPolicies, opts = {}) {
     addresses      = {},
     addressGroups  = {},
     zones          = {},
+    namingPrefix   = 'FF',
   } = opts;
+
+  // #5: préfixe de nommage (assaini) — défaut 'FF'. Utilisé pour TOUS les objets générés.
+  const NP = safeCli(String(namingPrefix || 'FF')).replace(/_+$/, '') || 'FF';
 
   // Helper: resolve a /32 host — use existing object if found, otherwise suggest a new name
   function resolveHost32(ip, customNames) {
@@ -1303,7 +1308,7 @@ function generateConfig(selectedPolicies, opts = {}) {
     const raw = customNames?.[ip];
     const pfx = ip + '=';
     const cleanedName = raw && raw.startsWith(pfx) ? raw.slice(pfx.length) : raw;
-    const name = cleanedName || `FF_HOST_${ip.replace(/\./g, '_')}`;
+    const name = cleanedName || `${NP}_HOST_${ip.replace(/\./g, '_')}`;
     return { name, isNew: true };
   }
 
@@ -1326,7 +1331,7 @@ function generateConfig(selectedPolicies, opts = {}) {
           if (s.addrFound) {
             allSrcNames.push(s.addrName);
           } else {
-            const name = s.addrName || suggestAddrName(s.subnet);
+            const name = s.addrName || suggestAddrName(s.subnet, NP);
             allSrcNames.push(name);
             newAddresses.set(s.subnet, name);
           }
@@ -1342,15 +1347,15 @@ function generateConfig(selectedPolicies, opts = {}) {
       srcAddrNames = allSrcNames;
       if (p._useSrcGroup) {
         srcAddrGrpName = registerAddrGroup(newAddrGroups,
-          p._srcAddrName || `FF_GRP_SRC_${suggestAddrName(p._multiSrcSubnets[0].subnet)}`, allSrcNames);
+          p._srcAddrName || `${NP}_GRP_SRC_${suggestAddrName(p._multiSrcSubnets[0].subnet, NP)}`, allSrcNames);
       }
     } else if (p._isSvcMerge && p._mergedSrcSubnets && p._mergedSrcSubnets.length > 1) {
       // Fusion par service : créer un groupe d'adresses pour les sources fusionnées
-      const subnetNames = p._mergedSrcSubnets.map(s => suggestAddrName(s));
+      const subnetNames = p._mergedSrcSubnets.map(s => suggestAddrName(s, NP));
       p._mergedSrcSubnets.forEach((cidr, i) => newAddresses.set(cidr, subnetNames[i]));
       srcAddrNames = subnetNames;
       srcAddrGrpName = registerAddrGroup(newAddrGroups,
-        p._srcAddrName || `FF_SVC_GRP_${suggestAddrName(p._mergedSrcSubnets[0])}`, subnetNames);
+        p._srcAddrName || `${NP}_SVC_GRP_${suggestAddrName(p._mergedSrcSubnets[0], NP)}`, subnetNames);
     } else if (p._use32Src && p.srcHosts && p.srcHosts.length > 0) {
       // Mode /32 : utiliser les hôtes réels plutôt que le subnet /24
       const hostNames = p.srcHosts.map(h => {
@@ -1364,7 +1369,7 @@ function generateConfig(selectedPolicies, opts = {}) {
         // Utilisateur a demandé un groupe
         srcAddrNames = hostNames;
         srcAddrGrpName = registerAddrGroup(newAddrGroups,
-          p.srcAddrName || `FF_HOSTS_${suggestAddrName(p.srcSubnet)}`, hostNames);
+          p.srcAddrName || `${NP}_HOSTS_${suggestAddrName(p.srcSubnet, NP)}`, hostNames);
       } else {
         // Par défaut : lister inline dans set srcaddr
         srcAddrName = hostNames;
@@ -1374,19 +1379,19 @@ function generateConfig(selectedPolicies, opts = {}) {
       srcAddrNames = p.srcAddrNames;
       const subnets = p.srcSubnets || [p.srcSubnet];
       subnets.forEach((cidr, i) => {
-        const name = p.srcAddrNames[i] || suggestAddrName(cidr);
+        const name = p.srcAddrNames[i] || suggestAddrName(cidr, NP);
         newAddresses.set(cidr, name);
       });
       // Créer un groupe d'adresses
       srcAddrGrpName = registerAddrGroup(newAddrGroups,
-        p.srcAddrName || p.policyName || `FF_GRP_${suggestAddrName(subnets[0])}`, srcAddrNames);
+        p.srcAddrName || p.policyName || `${NP}_GRP_${suggestAddrName(subnets[0], NP)}`, srcAddrNames);
     } else if (p._srcAddrGrpFound) {
       // Groupe existant trouvé → l'utiliser directement
       srcAddrName = p.srcAddrName || p._srcAddrName;
     } else if (analysis.srcAddr.found) {
       srcAddrName = analysis.srcAddr.name;
     } else {
-      srcAddrName = p.srcAddrName || analysis.srcAddr.suggestedName;
+      srcAddrName = p.srcAddrName || suggestAddrName(analysis.srcAddr.cidr, NP);
       newAddresses.set(analysis.srcAddr.cidr, srcAddrName);
     }
 
@@ -1414,7 +1419,7 @@ function generateConfig(selectedPolicies, opts = {}) {
       } else if (p.dstTarget && p.dstTarget !== 'all') {
         const ip = p.dstTarget;
         const cidr = ip.includes('/') ? ip : `${ip}/32`;
-        const name = p._dstAddrName || p.dstAddrName || suggestAddrName(cidr);
+        const name = p._dstAddrName || p.dstAddrName || suggestAddrName(cidr, NP);
         newAddresses.set(cidr, name);
         dstAddrName = name;
       } else {
@@ -1432,7 +1437,7 @@ function generateConfig(selectedPolicies, opts = {}) {
           if (s.addrFound) {
             dstNames.push(s.addrName);
           } else {
-            const name = s.addrName || suggestAddrName(s.subnet);
+            const name = s.addrName || suggestAddrName(s.subnet, NP);
             dstNames.push(name);
             newAddresses.set(s.subnet, name);
           }
@@ -1475,7 +1480,7 @@ function generateConfig(selectedPolicies, opts = {}) {
     } else if (analysis.dstAddr.found) {
       dstAddrName = analysis.dstAddr.name;
     } else {
-      dstAddrName = p.dstAddrName || analysis.dstAddr.suggestedName;
+      dstAddrName = p.dstAddrName || suggestAddrName(analysis.dstAddr.cidr, NP);
       if (dstAddrName !== 'all') newAddresses.set(analysis.dstAddr.cidr, dstAddrName);
     }
 

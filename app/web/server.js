@@ -1626,6 +1626,7 @@ app.post('/api/deploy/generate', (req, res) => {
       addressGroups:     s.fortiConfig.addressGroups || {},
       zones:             s.fortiConfig.zones || {},
       securityProfiles:  o.securityProfiles || {},
+      namingPrefix:      o.namingPrefix || 'FF',   // #5: préfixe de nommage configurable
     };
     const cli = generateConfig(analyzed, genOpts);
 

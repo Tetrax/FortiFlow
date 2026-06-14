@@ -1924,6 +1924,7 @@ const deployState = {
   bruteMode:     'off',            // 'off' | 'service' (split by svc) | 'host' (split by src+svc)
   _detailOriginal: null,           // M3: snapshot pré-détail (≠ _analyzedOriginal pré-fusion)
   captureWindow: null,             // #1: { start, end, days, available } — fenêtre d'observation
+  namingPrefix:  'FF',             // #5: préfixe de nommage des objets générés (configurable)
   hostPairCoverage: {},            // #3: "srcip|dstip" → { verdict, ruleIds, blockIds }
   coverageAvailable: false,        // #3: une config FortiGate existante est-elle chargée ?
   coverageFilter: 'all',           // #3: 'all' | 'new' — filtrer le tableau
@@ -2076,6 +2077,7 @@ async function exportSession() {
         addrGroups:           deployState.addrGroups,
         warnings:             deployState.warnings,
         viewMode:             deployState.viewMode,
+        namingPrefix:         deployState.namingPrefix,   // #5
       },
     };
     // Compression gzip via l'API native (zéro dépendance)
@@ -2143,6 +2145,7 @@ function importSession(file) {
           deployState.addrGroups           = ds.addrGroups    || null;
           deployState.warnings             = ds.warnings      || [];
           deployState.viewMode             = ds.viewMode      || 'interface-pair';
+          deployState.namingPrefix         = ds.namingPrefix  || 'FF';   // #5
         }
 
         // Navigation : deploy si dispo, sinon dashboard
@@ -2324,7 +2327,7 @@ function collectMissingObjects() {
       for (const h of p.srcHosts) {
         if (srcFoundHosts.has(h)) continue; // existe dans la config — ne pas lister
         if (!hosts.has(h)) {
-          const suggested = cleanHostName(h, p._srcHostNames?.[h]) || `FF_HOST_${h.replace(/\./g, '_')}`;
+          const suggested = cleanHostName(h, p._srcHostNames?.[h]) || ffHostName(h);
           hosts.set(h, { ip: h, name: suggested, policyCount: 0 });
         }
         hosts.get(h).policyCount++;
@@ -2335,7 +2338,7 @@ function collectMissingObjects() {
       for (const h of p.dstHosts) {
         if (dstFoundHosts.has(h)) continue; // existe dans la config
         if (!hosts.has(h)) {
-          const suggested = cleanHostName(h, p._dstHostNames?.[h]) || `FF_HOST_${h.replace(/\./g, '_')}`;
+          const suggested = cleanHostName(h, p._dstHostNames?.[h]) || ffHostName(h);
           hosts.set(h, { ip: h, name: suggested, policyCount: 0 });
         }
         hosts.get(h).policyCount++;
@@ -2345,7 +2348,7 @@ function collectMissingObjects() {
     for (const svc of a.services || []) {
       if (!svc.found) {
         const key = svc.isNamed ? `label:${svc.label}` : `${svc.port}/${svc.proto}`;
-        const defaultName = svc.isNamed ? (svc.suggestedName || svc.label) : (svc.suggestedName || `FF_SVC_${svc.port}_${svc.proto}`);
+        const defaultName = svc.isNamed ? (svc.suggestedName || svc.label) : (svc.suggestedName || ffSvcName(svc.port, svc.proto));
         if (!services.has(key)) services.set(key, { key, port: svc.port, proto: svc.proto, label: svc.label, name: defaultName, policyCount: 0 });
         services.get(key).policyCount++;
       }
@@ -3241,7 +3244,7 @@ function syncHostCell(idx, type) {
     cell.className = `inline-editable ${allNamed ? 'found' : 'missing'}`;
   } else {
     const dhFoundSet = new Set(p._dstHostsFound || []);
-    const _autoHostName = h => `FF_HOST_${h.replace(/\./g, '_')}`;
+    const _autoHostName = h => ffHostName(h);
     const _hostNameOk = (h, nm) => { const n = cleanHostName(h, nm?.[h]); return n && n !== _autoHostName(h); };
     const dhNames = (p.dstHosts || []).map(h => cleanHostName(h, p._dstHostNames?.[h]) || (dhFoundSet.has(h) ? h : h));
     const dhAllNamed = (p.dstHosts || []).every(h => dhFoundSet.has(h) || _hostNameOk(h, p._dstHostNames));
@@ -3262,7 +3265,7 @@ function _buildSvcCellHtml(p) {
       return `<span class="match-ok" style="font-size:10px" title="${escHtml(svc.portHint || stripPredef(svc.label) || dispName)}">&#10003; ${escHtml(dispName)}${badgeHtml('config')}</span>`;
     }
     const isPortNotation = /^(TCP|UDP)\/\d+$/i.test(svc.suggestedName || '');
-    const autoLabel = svc.isNamed ? svc.label : `FF_SVC_${svc.port}_${svc.proto}`;
+    const autoLabel = svc.isNamed ? svc.label : ffSvcName(svc.port, svc.proto);
     const customName = svc.suggestedName && !isPortNotation && svc.suggestedName !== autoLabel ? svc.suggestedName : '';
     const displayName = customName || svc.label || (svc.port ? `${svc.port}/${svc.proto}` : '');
     if (customName) {
@@ -3334,13 +3337,13 @@ function populateDrawer(idx) {
         const visibleSrcHosts = s.hosts.filter(h => !p._excludedSrcHosts?.has(h));
         hostsHtml = `<div style="padding-left:16px;margin-top:2px;margin-bottom:6px">${visibleSrcHosts.slice(0, 50).map(h => {
           const foundSet = new Set(p._srcHostsFound || []);
-          const hostName = cleanHostName(h, (p._srcHostNames || {})[h]) || `FF_HOST_${h.replace(/\./g,'_')}`;
+          const hostName = cleanHostName(h, (p._srcHostNames || {})[h]) || ffHostName(h);
           const hostFound = foundSet.has(h);
           return `<div class="drawer-host-row">
             <span class="drawer-host-ip">${escHtml(h)}</span>
             ${hostFound
               ? `<span style="color:var(--success);font-size:10px" title="${escHtml(h)}/32">&#10003; ${escHtml(hostName)}${badgeHtml('config')}</span>`
-              : `<input class="drawer-host-input" data-type="src" data-host="${escHtml(h)}" value="${escHtml(inputVal(cleanHostName(h, p._srcHostNames?.[h]), `FF_HOST_${h.replace(/\./g,'_')}`))}" placeholder="${escHtml(hostName)}">`}
+              : `<input class="drawer-host-input" data-type="src" data-host="${escHtml(h)}" value="${escHtml(inputVal(cleanHostName(h, p._srcHostNames?.[h]), ffHostName(h)))}" placeholder="${escHtml(hostName)}">`}
             <button class="btn-del-item" data-del-type="src-host" data-host="${escHtml(h)}" title="Retirer cet hôte">✕</button>
           </div>`;
         }).join('')}${visibleSrcHosts.length > 50 ? `<div style="font-size:10px;color:var(--text2)">+${visibleSrcHosts.length - 50} autres…</div>` : ''}</div>`;
@@ -3374,12 +3377,12 @@ function populateDrawer(idx) {
       srcHostsHtml = `<div class="drawer-host-list">${visibleSrcHostsSingle.slice(0, 80).map(h => {
         const foundSet = new Set(p._srcHostsFound || []);
         const hostFound = foundSet.has(h);
-        const name = cleanHostName(h, (p._srcHostNames || {})[h]) || `FF_HOST_${h.replace(/\./g,'_')}`;
+        const name = cleanHostName(h, (p._srcHostNames || {})[h]) || ffHostName(h);
         return `<div class="drawer-host-row">
           <span class="drawer-host-ip">${escHtml(h)}</span>
           ${hostFound
             ? `<span style="color:var(--success);font-size:10px" title="${escHtml(h)}/32">&#10003; ${escHtml(name)}${badgeHtml('config')}</span>`
-            : `<input class="drawer-host-input" data-type="src" data-host="${escHtml(h)}" value="${escHtml(inputVal(cleanHostName(h, p._srcHostNames?.[h]), `FF_HOST_${h.replace(/\./g,'_')}`))}" placeholder="${escHtml(name)}">`}
+            : `<input class="drawer-host-input" data-type="src" data-host="${escHtml(h)}" value="${escHtml(inputVal(cleanHostName(h, p._srcHostNames?.[h]), ffHostName(h)))}" placeholder="${escHtml(name)}">`}
           <button class="btn-del-item" data-del-type="src-host" data-host="${escHtml(h)}" title="Retirer cet hôte">✕</button>
         </div>`;
       }).join('')}</div>`;
@@ -3426,13 +3429,13 @@ function populateDrawer(idx) {
         const visibleDstHosts = s.hosts.filter(h => !p._excludedDstHosts?.has(h));
         hostsHtml = `<div style="padding-left:16px;margin-top:2px;margin-bottom:6px">${visibleDstHosts.slice(0, 50).map(h => {
           const foundSet = new Set(p._dstHostsFound || []);
-          const hostName = cleanHostName(h, (p._dstHostNames || {})[h]) || `FF_HOST_${h.replace(/\./g,'_')}`;
+          const hostName = cleanHostName(h, (p._dstHostNames || {})[h]) || ffHostName(h);
           const hostFound = foundSet.has(h);
           return `<div class="drawer-host-row">
             <span class="drawer-host-ip">${escHtml(h)}</span>
             ${hostFound
               ? `<span style="color:var(--success);font-size:10px" title="${escHtml(h)}/32">&#10003; ${escHtml(hostName)}${badgeHtml('config')}</span>`
-              : `<input class="drawer-host-input" data-type="dst" data-host="${escHtml(h)}" value="${escHtml(inputVal(cleanHostName(h, p._dstHostNames?.[h]), `FF_HOST_${h.replace(/\./g,'_')}`))}" placeholder="${escHtml(hostName)}">`}
+              : `<input class="drawer-host-input" data-type="dst" data-host="${escHtml(h)}" value="${escHtml(inputVal(cleanHostName(h, p._dstHostNames?.[h]), ffHostName(h)))}" placeholder="${escHtml(hostName)}">`}
             <button class="btn-del-item" data-del-type="dst-host" data-host="${escHtml(h)}" title="Retirer cet hôte">✕</button>
           </div>`;
         }).join('')}${visibleDstHosts.length > 50 ? `<div style="font-size:10px;color:var(--text2)">+${visibleDstHosts.length - 50} autres…</div>` : ''}</div>`;
@@ -3477,13 +3480,13 @@ function populateDrawer(idx) {
       const dstFoundSet = new Set(p._dstHostsFound || []);
       const visibleDstHostsSingle = dstHosts.filter(h => !p._excludedDstHosts?.has(h));
       dstHostsHtml = `<div class="drawer-host-list">${visibleDstHostsSingle.slice(0, 80).map(h => {
-        const name = cleanHostName(h, (p._dstHostNames || {})[h]) || `FF_HOST_${h.replace(/\./g,'_')}`;
+        const name = cleanHostName(h, (p._dstHostNames || {})[h]) || ffHostName(h);
         const hostFound = dstFoundSet.has(h);
         return `<div class="drawer-host-row">
           <span class="drawer-host-ip">${escHtml(h)}</span>
           ${hostFound
             ? `<span style="color:var(--success);font-size:10px" title="${escHtml(h)}/32">&#10003; ${escHtml(name)}${badgeHtml('config')}</span>`
-            : `<input class="drawer-host-input" data-type="dst" data-host="${escHtml(h)}" value="${escHtml(inputVal(cleanHostName(h, p._dstHostNames?.[h]), `FF_HOST_${h.replace(/\./g,'_')}`))}" placeholder="${escHtml(name)}">`}
+            : `<input class="drawer-host-input" data-type="dst" data-host="${escHtml(h)}" value="${escHtml(inputVal(cleanHostName(h, p._dstHostNames?.[h]), ffHostName(h)))}" placeholder="${escHtml(name)}">`}
           <button class="btn-del-item" data-del-type="dst-host" data-host="${escHtml(h)}" title="Retirer cet hôte">✕</button>
         </div>`;
       }).join('')}</div>`;
@@ -3492,7 +3495,7 @@ function populateDrawer(idx) {
     let dstWanSpecificHtml = '';
     if (isWan && !dstUseAll && dstHosts.length === 0 && p.dstTarget && p.dstTarget !== 'all') {
       const ip = p.dstTarget;
-      const autoName = `FF_HOST_${ip.replace(/[\./]/g,'_')}`;
+      const autoName = ffHostName(ip);
       const customName = p._dstAddrName || '';
       const dstTargetFound = dstFound && dstAddrName !== 'all';
       dstWanSpecificHtml = dstTargetFound
@@ -3575,7 +3578,7 @@ function populateDrawer(idx) {
     const svcKey = _pnm ? `${svcPort}/${svcProto}` : (svc.isNamed ? `label:${svc.label}` : `${svc.port}/${svc.proto}`);
     const isSelectable = !svc.found && (_pnm || (!svc.isNamed && svc.port));
     const isSelected = selKeys.has(svcKey);
-    const svcAutoName = _pnm ? `FF_SVC_${svcPort}_${svcProto}` : (svc.isNamed ? svc.label : `FF_SVC_${svc.port}_${svc.proto}`);
+    const svcAutoName = _pnm ? ffSvcName(svcPort, svcProto) : (svc.isNamed ? svc.label : ffSvcName(svc.port, svc.proto));
     const svcDefaultName = svc.suggestedName || svcAutoName;
     // Show inline port hint only when it's precise (predefined/custom/port-notation resolved)
     // — never when it's the raw multi-port "observé" fallback (misleading for named services)
@@ -3817,6 +3820,9 @@ async function deploy() {
               <option value="utm">log utm</option>
               <option value="disable">log disable</option>
             </select>
+            <label class="deploy-toggle-label" title="Préfixe des objets générés (adresses, groupes, services). Ex : ACME → ACME_10_1_6_0_24. Réanalyser pour appliquer.">
+              Préfixe <input type="text" id="opt-naming-prefix" class="deploy-select" style="width:64px" maxlength="24" placeholder="FF">
+            </label>
             <button class="btn-accent" id="btn-analyze">⚡ Analyser les policies</button>
           </div>
         </div>
@@ -4118,6 +4124,16 @@ async function deploy() {
 
   // Analyze
   el('btn-analyze')?.addEventListener('click', analyzeDeployPolicies);
+
+  // #5: préfixe de nommage — init depuis l'état + sync vers deployState (persisté en workspace)
+  const _pfxInput = el('opt-naming-prefix');
+  if (_pfxInput) {
+    _pfxInput.value = deployState.namingPrefix && deployState.namingPrefix !== 'FF' ? deployState.namingPrefix : '';
+    _pfxInput.addEventListener('input', () => {
+      const v = (_pfxInput.value || '').trim().replace(/[^A-Za-z0-9_]/g, '');
+      deployState.namingPrefix = v || 'FF';
+    });
+  }
 
   // Global NAT toggle → apply only to WAN rows (wired here since opt-nat is stable in deploy DOM)
   el('opt-nat')?.addEventListener('change', e => {
@@ -4848,7 +4864,7 @@ function _updateMergeSelectionBtn() {
 
 function _isUnqualifiedSvc(svc) {
   if (svc.found) return false;
-  const autoLabel      = svc.isNamed ? svc.label : `FF_SVC_${svc.port}_${svc.proto}`;
+  const autoLabel      = svc.isNamed ? svc.label : ffSvcName(svc.port, svc.proto);
   const isPortNotation = /^(TCP|UDP)\/\d+$/i.test(svc.suggestedName || '');
   const customName     = svc.suggestedName && !isPortNotation && svc.suggestedName !== autoLabel
     ? svc.suggestedName : '';
@@ -5210,7 +5226,7 @@ function dstTargetCellFull(p, idx) {
 // Render one host row inside a /32 popup: green ✓ if object exists, editable input otherwise
 function buildHostRow(h, nameMap, idx, type) {
   const existingName = (nameMap || {})[h];
-  const defaultName  = `FF_HOST_${h.replace(/\./g, '_')}`;
+  const defaultName  = ffHostName(h);
   const ipSpan = `<span class="mono" style="font-size:10px;min-width:105px;display:inline-block;color:var(--text2)">${escHtml(h)}</span>`;
   if (existingName) {
     return `<div style="display:flex;align-items:center;gap:6px;padding:2px 0">${ipSpan}<span class="match-ok" style="font-size:9px" title="${escHtml(h)}/32">✓ ${escHtml(existingName)}</span></div>`;
@@ -5378,7 +5394,7 @@ function mergeByPolicyId(policies) {
           _dstHostNames: Object.keys(mergedDstHostNames).length ? mergedDstHostNames : undefined,
           _srcHostsFound: mergedSrcHostsFound.size ? [...mergedSrcHostsFound] : undefined,
           _dstHostsFound: mergedDstHostsFound.size ? [...mergedDstHostsFound] : undefined,
-          srcAddrNames: srcSubnets.length > 1 ? srcSubnets.map(s => `FF_${escSlug(s)}`) : null,
+          srcAddrNames: srcSubnets.length > 1 ? srcSubnets.map(s => `${ffp()}_${escSlug(s)}`) : null,
           analysis: { ...base.analysis, services: allServices, needsWork: allServices.some(s => !s.found) },
         });
       } else {
@@ -5530,7 +5546,7 @@ function mergeByPolicyId(policies) {
           _srcHostsFound:   mergedSrcHF.size ? [...mergedSrcHF] : undefined,
           _dstHostsFound:   mergedDstHF.size ? [...mergedDstHF] : undefined,
           _multiSrcSubnets: multiSrcSubnets,
-          srcAddrNames:     existingGrp ? null : (multiSrc ? srcSubnets.map(s => `FF_${escSlug(s)}`) : null),
+          srcAddrNames:     existingGrp ? null : (multiSrc ? srcSubnets.map(s => `${ffp()}_${escSlug(s)}`) : null),
           analysis:         { ...base.analysis, services: allServices, needsWork: allServices.some(s => !s.found) },
         });
         continue;
@@ -5566,7 +5582,7 @@ function mergeByPolicyId(policies) {
         _dstHostsFound:   mergedDstHF.size ? [...mergedDstHF] : undefined,
         _dstAddrName: isWan ? 'all' : (dstTarget !== base.dstTarget ? '' : base._dstAddrName),
         _policyName:  '',
-        srcAddrNames: existingGrp ? null : (multiSrc ? srcSubnets.map(s => `FF_${escSlug(s)}`) : null),
+        srcAddrNames: existingGrp ? null : (multiSrc ? srcSubnets.map(s => `${ffp()}_${escSlug(s)}`) : null),
         analysis: { ...base.analysis, services: allServices, needsWork: allServices.some(s => !s.found) },
       });
     }
@@ -6013,7 +6029,7 @@ function mergeByService(policies) {
       _dstHostNames:    Object.keys(mergedDstHostNames).length ? mergedDstHostNames : undefined,
       _srcHostsFound:   mergedSrcHF.size ? [...mergedSrcHF] : undefined,
       _dstHostsFound:   mergedDstHF.size ? [...mergedDstHF] : undefined,
-      srcAddrNames:     existingSrcGrp ? null : (multiSrc ? srcSubnets.map(s => `FF_${escSlug(s)}`) : null),
+      srcAddrNames:     existingSrcGrp ? null : (multiSrc ? srcSubnets.map(s => `${ffp()}_${escSlug(s)}`) : null),
       analysis: {
         ...base.analysis,
         dstAddr:   isWan ? { found: true, name: 'all', cidr: 'all' } : base.analysis?.dstAddr,
@@ -6128,7 +6144,7 @@ function mergeByDestination(policies) {
       _dstHostNames:    Object.keys(mergedDstHostNames).length ? mergedDstHostNames : undefined,
       _srcHostsFound:   mergedSrcHF.size ? [...mergedSrcHF] : undefined,
       _dstHostsFound:   mergedDstHF.size ? [...mergedDstHF] : undefined,
-      srcAddrNames:     existingSrcGrp ? null : (multiSrc ? srcSubnets.map(s => `FF_${escSlug(s)}`) : null),
+      srcAddrNames:     existingSrcGrp ? null : (multiSrc ? srcSubnets.map(s => `${ffp()}_${escSlug(s)}`) : null),
       analysis: {
         ...base.analysis,
         services:  allServices,
@@ -6266,7 +6282,7 @@ async function analyzeDeployPolicies() {
     const r = await fetch(`/api/deploy/generate?session=${state.session}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ selectedPolicies: rawPolicies, opts: { preferredWanIntf, wanOverrides } }),
+      body: JSON.stringify({ selectedPolicies: rawPolicies, opts: { preferredWanIntf, wanOverrides, namingPrefix: deployState.namingPrefix || 'FF' } }),
     });
     setLoadingPct(80);
     if (!r.ok) {
@@ -6457,9 +6473,14 @@ function resetAnalyzeBtn() {
   if (btn) { btn.disabled = false; btn.textContent = '⚡ Analyser les policies'; }
 }
 
+// #5: préfixe de nommage configurable (miroir du backend). Défaut 'FF'.
+function ffp() { return (deployState.namingPrefix || 'FF'); }
+function ffHostName(ip) { return `${ffp()}_HOST_${String(ip).replace(/[./]/g, '_')}`; }
+function ffSvcName(port, proto) { return `${ffp()}_SVC_${port}_${proto}`; }
+
 function suggestAddrNameFE(cidr) {
   if (!cidr) return '';
-  return 'FF_' + cidr.replace(/[./]/g, '_');
+  return ffp() + '_' + cidr.replace(/[./]/g, '_');
 }
 
 // ─── CIDR supernet helpers ────────────────────────────────────────────────────
@@ -6525,7 +6546,7 @@ function _buildSrcAddrCell(p, idx) {
     }
     const subs = p._multiSrcSubnets || [];
     const srcFoundSet = new Set(p._srcHostsFound || []);
-    const _autoHostName = h => `FF_HOST_${h.replace(/\./g, '_')}`;
+    const _autoHostName = h => ffHostName(h);
     const _hostNameOk = (h) => { const n = cleanHostName(h, p._srcHostNames?.[h]); return n && n !== _autoHostName(h); };
     const allDone = subs.every(s => {
       if (s.useSubnet !== false) return s.addrFound || !!s.addrName;
@@ -6541,7 +6562,7 @@ function _buildSrcAddrCell(p, idx) {
   }
   if ((p._srcMode === 'hosts' || p._use32Src) && p.srcHosts?.length) {
     const hFoundSet = new Set(p._srcHostsFound || []);
-    const _autoHostName = h => `FF_HOST_${h.replace(/\./g, '_')}`;
+    const _autoHostName = h => ffHostName(h);
     const _hostNameOk = (h) => { const n = cleanHostName(h, p._srcHostNames?.[h]); return n && n !== _autoHostName(h); };
     const hNames = p.srcHosts.map(h => cleanHostName(h, p._srcHostNames?.[h]) || h);
     const allNamed = p.srcHosts.every(h => hFoundSet.has(h) || _hostNameOk(h));
@@ -6568,7 +6589,7 @@ function _buildDstAddrCell(p, idx) {
     }
     const subs = p._multiDstSubnets;
     const dstFoundSet = new Set(p._dstHostsFound || []);
-    const _autoHostName = h => `FF_HOST_${h.replace(/\./g, '_')}`;
+    const _autoHostName = h => ffHostName(h);
     const _hostNameOk = (h) => { const n = cleanHostName(h, p._dstHostNames?.[h]); return n && n !== _autoHostName(h); };
     const allDone = subs.every(s => {
       if (s.useSubnet !== false) return s.addrFound || !!s.addrName;
@@ -6586,7 +6607,7 @@ function _buildDstAddrCell(p, idx) {
   const isWan = p._isWan || p.dstType === 'public';
   if (isWan && p._dstUseAll === false && p.dstHosts?.length > 0) {
     const dhFoundSet = new Set(p._dstHostsFound || []);
-    const _autoHostName = h => `FF_HOST_${h.replace(/\./g, '_')}`;
+    const _autoHostName = h => ffHostName(h);
     const _hostNameOk = (h) => { const n = cleanHostName(h, p._dstHostNames?.[h]); return n && n !== _autoHostName(h); };
     const dhNames = p.dstHosts.map(h => cleanHostName(h, p._dstHostNames?.[h]) || h);
     const dhAllNamed = p.dstHosts.every(h => dhFoundSet.has(h) || _hostNameOk(h));
@@ -6604,7 +6625,7 @@ function _buildDstAddrCell(p, idx) {
   const _dstModeResolved = p._dstMode || (p._use32Dst ? 'hosts' : 'subnet');
   if (_dstModeResolved === 'hosts' && (p.dstHosts || []).length > 0) {
     const dhFoundSet = new Set(p._dstHostsFound || []);
-    const _autoHostName = h => `FF_HOST_${h.replace(/\./g, '_')}`;
+    const _autoHostName = h => ffHostName(h);
     const _hostNameOk = (h) => { const n = cleanHostName(h, p._dstHostNames?.[h]); return n && n !== _autoHostName(h); };
     const dhNames = p.dstHosts.map(h => cleanHostName(h, p._dstHostNames?.[h]) || h);
     const dhAllNamed = p.dstHosts.every(h => dhFoundSet.has(h) || _hostNameOk(h));
@@ -6704,7 +6725,7 @@ function isPolicyComplete(p, _debug) {
   if (!p._dstintf) { dbg('FAIL: no _dstintf'); return false; }
 
   // Helper : un nom auto-généré FF_HOST_... non modifié = incomplet
-  const autoHostName = h => `FF_HOST_${h.replace(/\./g, '_')}`;
+  const autoHostName = h => ffHostName(h);
   const hostNameOk = (h, namesMap) => {
     const n = cleanHostName(h, namesMap?.[h]);
     return n && n !== autoHostName(h);
@@ -6782,7 +6803,7 @@ function isPolicyComplete(p, _debug) {
   for (const svc of a.services || []) {
     if (svc.found || svc._isMerged) continue;
     const isPortNotation = /^(TCP|UDP)\/\d+$/i.test(svc.suggestedName || '');
-    const autoLabel = svc.isNamed ? svc.label : `FF_SVC_${svc.port}_${svc.proto}`;
+    const autoLabel = svc.isNamed ? svc.label : ffSvcName(svc.port, svc.proto);
     const hasCustomName = svc.suggestedName && !isPortNotation && svc.suggestedName !== autoLabel;
     if (!hasCustomName) { dbg(`FAIL: svc ${svc.label||svc.name} no custom name (suggested="${svc.suggestedName}" auto="${autoLabel}")`); return false; }
   }
@@ -7767,6 +7788,7 @@ async function generateDeployConf() {
     action: el('opt-action')?.value || 'accept',
     log:    el('opt-log')?.value   || 'all',
     securityProfiles,
+    namingPrefix: deployState.namingPrefix || 'FF',   // #5
   };
 
   const btn = el('btn-generate');
