@@ -1922,6 +1922,7 @@ const deployState = {
   wizardStep:    1,                // 1: config upload, 2: routes, 3: interfaces, 4: policies
   use32Global:   false,            // global /32 mode (use real hosts instead of /24)
   bruteMode:     'off',            // 'off' | 'service' (split by svc) | 'host' (split by src+svc)
+  _detailOriginal: null,           // M3: snapshot pré-détail (≠ _analyzedOriginal pré-fusion)
   riskPanelOpen: false,
   sortCol:       null,             // active sort column key
   sortDir:       'desc',           // 'asc' | 'desc'
@@ -2620,11 +2621,32 @@ function _savePolicySnapshot() {
   const snap = {
     analyzed: deployState.analyzed.map(p => ({ ...p })),
     selected: new Set(deployState.selected),
+    mergeSelected: new Set(deployState.mergeSelected),
   };
   if (_policyUndo.length >= POLICY_HISTORY_MAX) _policyUndo.shift();
   _policyUndo.push(snap);
   _policyRedo = [];  // une nouvelle action efface le redo
   _syncHistoryButtons();
+}
+
+// C4/M2: supprime des policies de deployState.analyzed (par indices) et réindexe
+// selected + mergeSelected pour qu'ils restent alignés avec le tableau réduit.
+// Sans ça, les index au-dessus des éléments supprimés pointent vers les mauvaises
+// policies → config générée / fusion manuelle silencieusement erronées.
+function _removeAnalyzedIndices(removeSet) {
+  deployState.analyzed = deployState.analyzed.filter((_, i) => !removeSet.has(i));
+  const removed = [...removeSet].sort((a, b) => a - b);
+  const reindex = (set) => {
+    const out = new Set();
+    set.forEach(i => {
+      if (removeSet.has(i)) return;
+      const drop = removed.filter(r => r < i).length;
+      out.add(i - drop);
+    });
+    return out;
+  };
+  deployState.selected     = reindex(deployState.selected);
+  deployState.mergeSelected = reindex(deployState.mergeSelected);
 }
 
 function _syncHistoryButtons() {
@@ -4259,30 +4281,38 @@ async function deploy() {
       btn.textContent = labels[deployState.bruteMode] || 'Détailler ▾';
       btn.classList.toggle('btn-active', deployState.bruteMode !== 'off');
     }
-    if (!deployState._analyzedOriginal && deployState.analyzed) {
-      deployState._analyzedOriginal = deployState.analyzed.map(p => ({ ...p }));
-    }
-    const orig = deployState._analyzedOriginal || [];
+    // M3: _detailOriginal est dédié au détail, distinct de _analyzedOriginal (base de fusion).
+    // On capture la base UNIQUEMENT à la transition off→actif → le détail s'applique sur
+    // l'état courant (fusionné inclus) et non sur un snapshot pré-fusion partagé.
     const hpsAvailable = deployState.hostPairServices && Object.keys(deployState.hostPairServices).length > 0;
+    const warn = el('deploy-hps-warn');
     if (!hpsAvailable && deployState.bruteMode !== 'off') {
       // Sans l'index de flows bruts, les modes de détail /32 produiraient des associations fictives
-      const warn = el('deploy-hps-warn');
       if (warn) {
         warn.textContent = '⚠ Index de flows absent — résultats potentiellement imprécis. Relancez l\'analyse pour des données exactes.';
         warn.style.display = '';
       }
-    } else {
-      const warn = el('deploy-hps-warn');
-      if (warn) warn.style.display = 'none';
+    } else if (warn) {
+      warn.style.display = 'none';
     }
-    if (deployState.bruteMode === 'service') {
-      deployState.analyzed = splitPoliciesByService(orig, deployState.baseAnalyzedPolicies, deployState.hostPairServices);
-    } else if (deployState.bruteMode === 'host') {
-      deployState.analyzed = splitPoliciesByHostAndService(orig, deployState.baseAnalyzedPolicies, deployState.hostPairServices);
-    } else if (deployState.bruteMode === 'src-agg-dst-detail') {
-      deployState.analyzed = splitPoliciesBySrcAggDstDetail(orig, deployState.baseAnalyzedPolicies, deployState.hostPairServices);
+    if (deployState.bruteMode === 'off') {
+      // Retour à la base : restaurer le snapshot pré-détail et le libérer
+      if (deployState._detailOriginal) {
+        deployState.analyzed = deployState._detailOriginal.map(p => ({ ...p }));
+        deployState._detailOriginal = null;
+      }
     } else {
-      deployState.analyzed = orig.map(p => ({ ...p }));
+      if (!deployState._detailOriginal && deployState.analyzed) {
+        deployState._detailOriginal = deployState.analyzed.map(p => ({ ...p }));
+      }
+      const orig = deployState._detailOriginal || [];
+      if (deployState.bruteMode === 'service') {
+        deployState.analyzed = splitPoliciesByService(orig, deployState.baseAnalyzedPolicies, deployState.hostPairServices);
+      } else if (deployState.bruteMode === 'host') {
+        deployState.analyzed = splitPoliciesByHostAndService(orig, deployState.baseAnalyzedPolicies, deployState.hostPairServices);
+      } else if (deployState.bruteMode === 'src-agg-dst-detail') {
+        deployState.analyzed = splitPoliciesBySrcAggDstDetail(orig, deployState.baseAnalyzedPolicies, deployState.hostPairServices);
+      }
     }
     deployState.selected = defaultSelectedSet(deployState.analyzed || []);
     deployState.mergeSelected = new Set();
@@ -4955,9 +4985,11 @@ function mergeAnalyzedPolicies(policies, mode) {
     const totalSessions = group.reduce((s, p) => s + (p.sessions || 0), 0);
     const allPolicyIds  = [...new Set(group.flatMap(p => p.policyIds || []))].sort((a, b) => Number(a) - Number(b));
     const allSrcHosts   = [...new Set(group.flatMap(p => p.srcHosts || []))];
+    const allDstHosts   = [...new Set(group.flatMap(p => p.dstHosts || []))];  // M5: agréger tout le groupe, pas seulement base
     merged.push({
       ...base,
       srcHosts:     allSrcHosts,
+      dstHosts:     allDstHosts,
       dstTarget:    'all',
       dstType:      'public',
       sessions:     totalSessions,
@@ -5006,10 +5038,16 @@ function mergeAnalyzedPolicies(policies, mode) {
 }
 
 function mergeServices(group) {
-  const seen = new Map(); // label → service item
+  // C3: dédupliquer par clé canonique (même convention que L2342/L2598), pas par label seul.
+  // Deux services de label identique mais ports/protos différents — ou tous les services sans label
+  // (label undefined) — ne doivent pas s'écraser mutuellement.
+  const seen = new Map();
   for (const p of group) {
     for (const svc of (p.analysis?.services || [])) {
-      if (!seen.has(svc.label)) seen.set(svc.label, svc);
+      const key = svc.isNamed
+        ? `label:${svc.label}`
+        : `${svc.port}/${svc.proto}`;
+      if (!seen.has(key)) seen.set(key, svc);
     }
   }
   return [...seen.values()];
@@ -5363,11 +5401,9 @@ function mergeByPolicyId(policies) {
       // Compute supernet only if it's specific enough (≥ /24) — avoid broad /9, /8 etc.
       const supernet     = cidrSupernet(allDstTargets);
       const supernetBits = supernet ? parseInt(supernet.split('/')[1] || '32', 10) : 0;
-      if (!isWan && supernetBits < 24 && allDstTargets.length > 1) {
-        // Too many diverse destinations — split into separate policies per dstTarget
-        for (const sub of subGroup) merged.push({ ...sub });
-        continue;
-      }
+      // M6: l'early-out qui splittait ici les destinations diverses en policies séparées
+      // rendait le bloc multi-dst plus bas (même condition) inatteignable (dead code).
+      // Supprimé : on laisse le flux atteindre la construction _multiDstSubnets correcte.
       const allDstIPs   = [...new Set(subGroup.flatMap(p => p.dstIPs || (p.dstType === 'public' ? [p.dstTarget] : [])).filter(t => t && t !== 'all'))];
       const allSrcHosts = [...new Set(subGroup.flatMap(p => p.srcHosts || []))].sort();
       const allDstHosts = [...new Set(subGroup.flatMap(p => p.dstHosts || []))].sort();
@@ -6139,6 +6175,14 @@ function applyMerge(scope, strategy) {
     }
   }
 
+  // M3: la fusion/reset remplace analyzed → toute granularité de détail devient caduque.
+  // On repasse en mode base pour éviter un _detailOriginal pointant vers un état remplacé.
+  deployState.bruteMode = 'off';
+  deployState._detailOriginal = null;
+  const _bm = el('btn-brute-mode');
+  if (_bm) { _bm.textContent = 'Détailler ▾'; _bm.classList.remove('btn-active'); }
+  document.querySelectorAll('.detail-mode-btn').forEach(b => b.classList.remove('btn-accent'));
+
   // Reset selection (hors scan policies)
   deployState.selected = defaultSelectedSet(deployState.analyzed);
   renderDeployPolicies(filterDeployPolicies());
@@ -6328,6 +6372,7 @@ async function analyzeDeployPolicies() {
 
   deployState.analyzed              = analyzed;
   deployState._analyzedOriginal     = null;
+  deployState._detailOriginal       = null;  // M3: base de détail, réinitialisée à chaque analyse
   deployState.baseAnalyzedPolicies  = analyzed.map(p => ({ ...p })); // snapshot for reset
   deployState.generatedCli          = null;
   deployState.selected              = defaultSelectedSet(analyzed);
@@ -6863,16 +6908,9 @@ function wireDeployTable() {
     _savePolicySnapshot();
     if (btn.dataset.seqMembers) {
       const members = new Set(btn.dataset.seqMembers.split(',').map(Number));
-      deployState.analyzed = deployState.analyzed.filter((_, i) => !members.has(i));
-      members.forEach(i => deployState.selected.delete(i));
+      _removeAnalyzedIndices(members);
     } else {
-      const idx = +btn.dataset.idx;
-      deployState.analyzed.splice(idx, 1);
-      deployState.selected.delete(idx);
-      // Décaler les indices sélectionnés au-dessus de idx
-      const shifted = new Set();
-      deployState.selected.forEach(i => shifted.add(i > idx ? i - 1 : i));
-      deployState.selected = shifted;
+      _removeAnalyzedIndices(new Set([+btn.dataset.idx]));
     }
     renderDeployPolicies(filterDeployPolicies(), false);
   });
@@ -7127,7 +7165,7 @@ function wireDeployTable() {
     e.stopPropagation();
     const pair = btn.dataset.mergeGroup;
     if (!pair || !deployState.analyzed) return;
-    _pushDeployHistory();
+    _savePolicySnapshot();
     const strategy = deployState.mergeStrategy || 'service';
     const pairPols = deployState.analyzed.filter(p => {
       const src = p._srcintf || p.analysis?.srcIface || '';
@@ -7233,6 +7271,11 @@ function thSort(label, col) {
 }
 
 function renderDeployPolicies(analyzed, resetPage = true) {
+  // M1: si la vue deploy n'est plus montée (render déclenché après changement de vue),
+  // el('deploy-policy-body') est null → on abandonne au lieu de crasher sur .innerHTML.
+  const body = el('deploy-policy-body');
+  if (!body) return;
+  analyzed = analyzed || [];   // garde: liste absente → pas de crash sur .length plus bas
   if (resetPage) deployState.page = 1;
 
   // In sequence mode, aggregate before pagination
@@ -7404,8 +7447,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     </div>` : '';
 
   // (adaptive column flags computed above as allSrcAutoFlag / allDstAutoFlag)
-
-  const body = el('deploy-policy-body');
+  // body est récupéré et vérifié non-null en tête de fonction (garde M1)
   body.innerHTML = `
     <div style="margin-bottom:8px;font-size:12px;color:var(--text2);display:flex;align-items:center;gap:12px">
       <span>${total} polic${total > 1 ? 'ies' : 'y'} · <strong>${selCount}</strong> sélectionnées${hasMerge ? ' · <span style="color:var(--accent2)">⚡ fusion</span>' : ''}${
