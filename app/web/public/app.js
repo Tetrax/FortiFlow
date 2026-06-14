@@ -1923,6 +1923,7 @@ const deployState = {
   use32Global:   false,            // global /32 mode (use real hosts instead of /24)
   bruteMode:     'off',            // 'off' | 'service' (split by svc) | 'host' (split by src+svc)
   _detailOriginal: null,           // M3: snapshot pré-détail (≠ _analyzedOriginal pré-fusion)
+  captureWindow: null,             // #1: { start, end, days, available } — fenêtre d'observation
   riskPanelOpen: false,
   sortCol:       null,             // active sort column key
   sortDir:       'desc',           // 'asc' | 'desc'
@@ -6221,6 +6222,7 @@ async function analyzeDeployPolicies() {
   try {
     const polData = await api('/api/policies?include_no_rcvd=1');
     rawPolicies = polData.policies || polData;
+    deployState.captureWindow = polData.captureWindow || null;   // #1: fenêtre d'observation globale
     // Append pending denied flows if any
     if (deployState._pendingDenied && deployState._pendingDenied.length > 0) {
       rawPolicies = rawPolicies.concat(deployState._pendingDenied);
@@ -7270,6 +7272,38 @@ function thSort(label, col) {
   return `<th class="sortable-th${active ? ' sort-active' : ''}" data-sort="${col}" style="cursor:pointer;user-select:none">${label}${arrow}</th>`;
 }
 
+// #1: bannière fenêtre d'observation globale (honnête — indispo si pas d'horodatage).
+function _captureBanner() {
+  const cw = deployState.captureWindow;
+  if (!cw || !cw.available) {
+    return `<span style="color:var(--text2)" title="Les logs importés ne contiennent pas d'horodatage (eventtime/date) — impossible d'évaluer la récurrence du trafic.">📅 logs sans horodatage — confiance temporelle indisponible</span>`;
+  }
+  const d0 = new Date(cw.start).toISOString().slice(0, 10);
+  const d1 = new Date(cw.end).toISOString().slice(0, 10);
+  let s = `📅 Observation : ${d0} → ${d1} (${cw.days} jour${cw.days > 1 ? 's' : ''})`;
+  if (cw.days <= 1) s += ` · <span style="color:var(--warn,#d97706)">récurrence non évaluable (capture ≤ 1 jour)</span>`;
+  return `<span style="color:var(--text2)">${s}</span>`;
+}
+
+// #1: badge de confiance par policy — basé uniquement sur les jours réellement observés.
+// Rien pour short-window/unknown (contexte donné par la bannière globale, évite le bruit).
+function _confidenceBadge(p) {
+  // En mode détail (split /32), une policy hérite des jours du sous-réseau → surévaluerait
+  // la récurrence d'un hôte isolé. On masque alors le badge (la bannière globale reste).
+  if (deployState.bruteMode && deployState.bruteMode !== 'off') return '';
+  const c = p.confidence;
+  if (c !== 'high' && c !== 'medium' && c !== 'low') return '';
+  const days = p.daysObserved;
+  const cw = deployState.captureWindow || {};
+  const fmtAgo = (ts) => { if (!ts) return ''; const d = Math.floor((Date.now() - ts) / 86400000); return d <= 0 ? "aujourd'hui" : `il y a ${d}j`; };
+  const tip = `Observé sur ${days} jour(s)${cw.days ? ` / ${cw.days} de capture` : ''}`
+    + (p.firstSeen ? ` · 1er ${new Date(p.firstSeen).toISOString().slice(0, 10)}` : '')
+    + (p.lastSeen ? ` · dernier ${new Date(p.lastSeen).toISOString().slice(0, 10)} (${fmtAgo(p.lastSeen)})` : '');
+  const color = c === 'high' ? '#16a34a' : c === 'low' ? '#d97706' : 'var(--text2)';
+  const label = c === 'high' ? `✓${days}j` : c === 'low' ? `⚠${days}j` : `${days}j`;
+  return ` <span style="font-size:9px;color:${color}" title="${escHtml(tip)}">${label}</span>`;
+}
+
 function renderDeployPolicies(analyzed, resetPage = true) {
   // M1: si la vue deploy n'est plus montée (render déclenché après changement de vue),
   // el('deploy-policy-body') est null → on abandonne au lieu de crasher sur .innerHTML.
@@ -7398,7 +7432,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
         <td class="merge-chk-cell"><input type="checkbox" ${mergeChkAttr} title="Sélectionner pour fusion"></td>
         <td class="status-cell" title="${escHtml(statusTitle)}"><div class="status-bar status-${rowStatus}"></div></td>
         <td><button class="btn-toggle-policy" data-idx="${idx}" title="${p._disabled ? 'Policy désactivée — cliquer pour activer' : 'Policy activée — cliquer pour désactiver'}"><span class="policy-status-badge ${p._disabled ? 'badge-disabled' : 'badge-enabled'}">${p._disabled ? 'DIS' : 'ENA'}</span></button></td>
-        <td class="impact-cell"><div class="impact-bar" style="width:${barW}%"></div><span class="impact-val">${fmtNum(p.sessions || 0)}</span></td>
+        <td class="impact-cell"><div class="impact-bar" style="width:${barW}%"></div><span class="impact-val">${fmtNum(p.sessions || 0)}</span>${_confidenceBadge(p)}</td>
         <td>${actionBadge}${dirBadge}</td>
         <td>${warnBadge}${seqBadge}${isScan ? '<span class="scan-badge" title="Destination silencieuse : ≥80% des flows n\'ont reçu aucune réponse. Port fermé, hôte injoignable, ou flux déjà bloqué ailleurs. Vérifier avant de créer une règle.">⚠ silencieux</span>' : ''}${p._hpsUnverified ? '<span class="scan-badge" title="Aucune paire src→dst trouvée dans l\'index de flows pour les services de cette policy. Les hôtes affichés n\'ont pas pu être vérifiés — possible désaccord de nommage entre logs et objets FortiGate.">⚠ non vérifié</span>' : ''}${srcSubnetText}${srcModeBadge}</td>
         <td>${srcAddrCell}</td>
@@ -7455,6 +7489,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
           ? ` · <span style="color:var(--warn)">⚠ ${deployState.warnings.length} conflit${deployState.warnings.length > 1 ? 's' : ''}</span>`
           : ''
       }</span>
+      ${_captureBanner()}
     </div>
     ${paginationBar}
     <div style="overflow-x:auto">

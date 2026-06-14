@@ -451,7 +451,15 @@ app.get('/api/policies', (req, res) => {
     policies = policies.filter(p => p.rcvdBytes > 0);
   }
 
-  res.json({ policies, excluded });
+  // #1: fenêtre d'observation globale (pour la bannière + le calcul de confiance côté UI)
+  const st = s.data.stats || {};
+  const captureWindow = {
+    start: st.captureStart ?? null,
+    end:   st.captureEnd ?? null,
+    days:  st.captureDays ?? 0,
+    available: !!st.temporalDataAvailable,
+  };
+  res.json({ policies, excluded, captureWindow });
 });
 
 // GET /api/raw-policies — policies brutes /32 → /32, 1 service par règle

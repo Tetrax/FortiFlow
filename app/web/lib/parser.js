@@ -88,6 +88,7 @@ const HEADER_MAP = {
 
   // Date / time
   date: 'date', time: 'time', datetime: 'date', timestamp: 'date',
+  eventtime: 'eventtime', itime: 'eventtime',
 };
 
 // Services UDP par défaut (quand le champ proto est absent)
@@ -123,6 +124,29 @@ function isValidIPv4(ip) {
 
 // ─── Flow extraction ──────────────────────────────────────────────────────────
 
+// Timestamp epoch (ms) du flux : eventtime prioritaire, sinon date+time. null si absent.
+// On ne fabrique jamais de date — si la source ne fournit rien, ts reste null (#1).
+function flowTimestamp(fields) {
+  const et = parseInt(fields.eventtime || '', 10);
+  if (et) return et > 1e12 ? et : et * 1000;   // normaliser s → ms
+  const d = (fields.date || '').trim();
+  if (d) {
+    const t = (fields.time || '').trim();
+    const parsed = Date.parse(t ? `${d}T${t}` : d);
+    if (!isNaN(parsed)) return parsed;
+  }
+  return null;
+}
+
+// Jour observé (YYYY-MM-DD). On privilégie le champ `date` brut (exact, sans décalage TZ),
+// sinon on dérive du ts. null si rien.
+function flowDay(fields, ts) {
+  const d = (fields.date || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+  if (ts != null) return new Date(ts).toISOString().slice(0, 10);
+  return null;
+}
+
 function extractFlow(fields) {
   const service = (fields.service || '').toUpperCase().trim();
   let proto = (fields.proto || '').trim();
@@ -140,6 +164,9 @@ function extractFlow(fields) {
   const srcip = (fields.srcip || '').trim();
   const dstip = (fields.dstip || '').trim();
 
+  const ts  = flowTimestamp(fields);
+  const day = flowDay(fields, ts);
+
   return {
     srcip:    isValidIPv4(srcip) ? srcip : '',
     dstip:    isValidIPv4(dstip) ? dstip : '',
@@ -154,6 +181,8 @@ function extractFlow(fields) {
     policyname: fields.policyname || '',
     date:     fields.date     || '',
     time:     fields.time     || '',
+    ts,                       // epoch ms ou null (#1)
+    day,                      // 'YYYY-MM-DD' ou null (#1)
     sentbyte: parseInt(fields.sentbyte || 0, 10) || 0,
     rcvdbyte: parseInt(fields.rcvdbyte || 0, 10) || 0,
   };
@@ -171,12 +200,19 @@ function aggregateFlow(flowMap, flow) {
       proto: flow.proto, action: flow.action, service: flow.service,
       srcintf: flow.srcintf, dstintf: flow.dstintf, policyid: flow.policyid, policyname: flow.policyname,
       count: 0, sentBytes: 0, rcvdBytes: 0,
+      firstTs: null, lastTs: null, days: [],   // #1: stats temporelles (days = tableau, JSON-safe)
     });
   }
   const e = flowMap.get(key);
   e.count++;
   e.sentBytes += flow.sentbyte;
   e.rcvdBytes += flow.rcvdbyte;
+  // #1: conserver la granularité temporelle perdue auparavant (clé de dédup inchangée).
+  if (flow.ts != null) {
+    if (e.firstTs == null || flow.ts < e.firstTs) e.firstTs = flow.ts;
+    if (e.lastTs  == null || flow.ts > e.lastTs)  e.lastTs  = flow.ts;
+  }
+  if (flow.day && !e.days.includes(flow.day)) e.days.push(flow.day);  // jours distincts (peu nombreux)
   return true;
 }
 

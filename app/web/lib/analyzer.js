@@ -87,7 +87,7 @@ function buildAllSubnetGroupsAndPorts(flows, topN = 25, knownSubnets = []) {
     const dstType = isPrivate(flow.dstip) ? 'private' : 'public';
     if (!dstKey) return;
     if (!sg.dsts[dstKey]) {
-      sg.dsts[dstKey] = { key: dstKey, type: dstType, ports: new Set(), protos: new Set(), services: new Set(), policyIds: new Set(), dstIPs: new Set(), srcIPs: new Set(), count: 0, sentBytes: 0, rcvdBytes: 0, noRcvdFlows: 0, noRcvdSrcIPs: new Set() };
+      sg.dsts[dstKey] = { key: dstKey, type: dstType, ports: new Set(), protos: new Set(), services: new Set(), policyIds: new Set(), dstIPs: new Set(), srcIPs: new Set(), count: 0, sentBytes: 0, rcvdBytes: 0, noRcvdFlows: 0, noRcvdSrcIPs: new Set(), firstTs: null, lastTs: null, days: new Set() };
     }
     const dst = sg.dsts[dstKey];
     if (flow.dstport)  dst.ports.add(flow.dstport);
@@ -100,6 +100,10 @@ function buildAllSubnetGroupsAndPorts(flows, topN = 25, knownSubnets = []) {
     dst.sentBytes  += flow.sentBytes;
     dst.rcvdBytes  += flow.rcvdBytes;
     if ((flow.rcvdBytes || 0) === 0) { dst.noRcvdFlows += flow.count; if (flow.srcip) dst.noRcvdSrcIPs.add(flow.srcip); }
+    // #1: stats temporelles (flux agrégés portent firstTs/lastTs/days depuis le parser)
+    if (flow.firstTs != null && (dst.firstTs == null || flow.firstTs < dst.firstTs)) dst.firstTs = flow.firstTs;
+    if (flow.lastTs  != null && (dst.lastTs  == null || flow.lastTs  > dst.lastTs))  dst.lastTs  = flow.lastTs;
+    if (flow.days) for (const d of flow.days) dst.days.add(d);
   }
 
   for (const f of flows) {
@@ -169,6 +173,10 @@ function buildAnalysis(flowInput, knownSubnets = []) {
   let acceptSessions = 0;
   let denySessions   = 0;
   let totalBytes     = 0;
+  // #1: fenêtre d'observation globale
+  let captureStartTs = null;
+  let captureEndTs   = null;
+  const captureDaySet = new Set();
 
   for (const f of flows) {
     srcIPs.add(f.srcip);
@@ -180,7 +188,13 @@ function buildAnalysis(flowInput, knownSubnets = []) {
     } else if (f.action === 'deny' || f.action === 'drop') {
       denySessions += f.count;
     }
+    if (f.firstTs != null && (captureStartTs == null || f.firstTs < captureStartTs)) captureStartTs = f.firstTs;
+    if (f.lastTs  != null && (captureEndTs   == null || f.lastTs  > captureEndTs))   captureEndTs   = f.lastTs;
+    if (f.days) for (const d of f.days) captureDaySet.add(d);
   }
+
+  const temporalDataAvailable = captureStartTs != null;
+  const captureDays = captureDaySet.size;
 
   const srcIPsArr      = [...srcIPs];
   const dstIPsArr      = [...dstIPs];
@@ -236,7 +250,7 @@ function buildAnalysis(flowInput, knownSubnets = []) {
   });
 
   // ── Policy suggestions (flux acceptés seulement) ──
-  const policies = buildPolicies(allowedByIntfGroups);
+  const policies = buildPolicies(allowedByIntfGroups, { captureDays, temporalDataAvailable });
 
   // ── Subnet → interfaces map (src + dst, tous les flows) ───────────────────
   const subnetIntfMap = {};
@@ -279,6 +293,11 @@ function buildAnalysis(flowInput, knownSubnets = []) {
       denySessions,
       deniedPolicyGroups,
       totalBytes,
+      // #1: fenêtre d'observation globale (null si logs sans timestamp)
+      captureStart: captureStartTs,
+      captureEnd:   captureEndTs,
+      captureDays,
+      temporalDataAvailable,
     },
     flows:    enrichedFlows,
     subnets,
@@ -291,7 +310,23 @@ function buildAnalysis(flowInput, knownSubnets = []) {
 
 // ─── Policy suggestions ───────────────────────────────────────────────────────
 
-function buildPolicies(subnetGroups) {
+// #1: niveau de confiance basé UNIQUEMENT sur des faits observés (jamais fabriqué).
+// Seuils transparents (exposés à l'UI) :
+//  - 'unknown'      : aucune donnée temporelle dans les logs
+//  - 'short-window' : capture ≤ 1 jour → impossible de juger la récurrence
+//  - 'high'         : vu ≥ 7 jours distincts OU sur ≥ 50 % des jours de la capture
+//  - 'low'          : vu un seul jour
+//  - 'medium'       : entre les deux
+function computeConfidence(daysObserved, captureDays, temporalDataAvailable) {
+  if (!temporalDataAvailable || daysObserved == null) return 'unknown';
+  if (captureDays <= 1) return 'short-window';
+  if (daysObserved >= 7 || daysObserved / captureDays >= 0.5) return 'high';
+  if (daysObserved <= 1) return 'low';
+  return 'medium';
+}
+
+function buildPolicies(subnetGroups, captureCtx = {}) {
+  const { captureDays = 0, temporalDataAvailable = false } = captureCtx;
   const policies = [];
   let id = 1;
 
@@ -305,6 +340,7 @@ function buildPolicies(subnetGroups) {
       const services  = [...dst.services].sort();
       const ports     = [...dst.ports].map(Number).sort((a, b) => a - b);
       const protos    = [...dst.protos];
+      const daysObserved = dst.days ? dst.days.size : 0;
 
       // Human-readable service description
       let serviceDesc;
@@ -337,6 +373,12 @@ function buildPolicies(subnetGroups) {
         rcvdBytes:     dst.rcvdBytes,
         noRcvdFlows:   dst.noRcvdFlows,
         noRcvdSrcHosts: [...dst.noRcvdSrcIPs],
+        // #1: fenêtre d'observation par policy (null si pas de timestamp dans les logs)
+        firstSeen:     dst.firstTs,
+        lastSeen:      dst.lastTs,
+        days:          dst.days ? [...dst.days].sort() : [],   // jours distincts (pour union lors des fusions)
+        daysObserved:  temporalDataAvailable ? daysObserved : null,
+        confidence:    computeConfidence(temporalDataAvailable ? daysObserved : null, captureDays, temporalDataAvailable),
         action:        'accept',
         // FortiGate-compatible comment
         name:        `FF-${srcSubnet.replace(/\//g, '_').replace(/\./g, '_')}-to-${dstKey.replace(/\//g, '_').replace(/\./g, '_')}`,
