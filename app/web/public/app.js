@@ -5103,6 +5103,26 @@ function mergeServices(group) {
   return [...seen.values()];
 }
 
+// #10: fusion pure des noms d'hôtes d'un groupe de policies (dédup d'un bloc dupliqué).
+// Retourne directement les 4 champs sous leur forme finale (objet/array ou undefined),
+// strictement équivalent aux blocs inline qu'elle remplace (vérifié par test unitaire).
+function _mergeHostMaps(group) {
+  const srcNames = {}, dstNames = {};
+  const srcFound = new Set(), dstFound = new Set();
+  for (const p of group) {
+    Object.assign(srcNames, p._srcHostNames || {});
+    Object.assign(dstNames, p._dstHostNames || {});
+    (p._srcHostsFound || []).forEach(h => srcFound.add(h));
+    (p._dstHostsFound || []).forEach(h => dstFound.add(h));
+  }
+  return {
+    _srcHostNames:  Object.keys(srcNames).length ? srcNames : undefined,
+    _dstHostNames:  Object.keys(dstNames).length ? dstNames : undefined,
+    _srcHostsFound: srcFound.size ? [...srcFound] : undefined,
+    _dstHostsFound: dstFound.size ? [...dstFound] : undefined,
+  };
+}
+
 // Met à jour la barre "destination silencieuse" et son bouton toggle
 function updateNoRcvdToggleBtn() {
   const btn     = document.getElementById('no-rcvd-toggle');
@@ -5379,17 +5399,6 @@ function mergeByPolicyId(policies) {
           return { subnet, hosts, useSubnet: hosts.length >= DST_SUBNET_THRESHOLD,
             addrName: dstAddr?.found ? dstAddr.name : '', addrFound: !!(dstAddr?.found) };
         });
-        // Fusionner _srcHostNames/_dstHostNames et _hostsFound de TOUTES les policies du groupe
-        const mergedDstHostNames = {};
-        const mergedSrcHostNames1 = {};
-        const mergedSrcHostsFound = new Set();
-        const mergedDstHostsFound = new Set();
-        for (const p of ifGroup) {
-          Object.assign(mergedSrcHostNames1, p._srcHostNames || {});
-          Object.assign(mergedDstHostNames, p._dstHostNames || {});
-          (p._srcHostsFound || []).forEach(h => mergedSrcHostsFound.add(h));
-          (p._dstHostsFound || []).forEach(h => mergedDstHostsFound.add(h));
-        }
         const allDstHosts = [...new Set(ifGroup.flatMap(p => p.dstHosts || []))].sort();
         // Chercher un groupe d'adresses existant pour les destinations
         let existingDstGrp1 = null;
@@ -5420,10 +5429,7 @@ function mergeByPolicyId(policies) {
           _useDstGroup: !!existingDstGrp1,
           _useSrcGroup: false,
           _policyName: '',
-          _srcHostNames: Object.keys(mergedSrcHostNames1).length ? mergedSrcHostNames1 : undefined,
-          _dstHostNames: Object.keys(mergedDstHostNames).length ? mergedDstHostNames : undefined,
-          _srcHostsFound: mergedSrcHostsFound.size ? [...mergedSrcHostsFound] : undefined,
-          _dstHostsFound: mergedDstHostsFound.size ? [...mergedDstHostsFound] : undefined,
+          ..._mergeHostMaps(ifGroup),
           srcAddrNames: srcSubnets.length > 1 ? srcSubnets.map(s => `${ffp()}_${escSlug(s)}`) : null,
           analysis: { ...base.analysis, services: allServices, needsWork: allServices.some(s => !s.found) },
         });
