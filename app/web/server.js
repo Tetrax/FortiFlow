@@ -143,6 +143,7 @@ function extractKnownSubnets(fortiConfig) {
     const ip  = addr.cidr.slice(0, slash);
     const prefix = parseInt(addr.cidr.slice(slash + 1), 10);
     if (isNaN(prefix) || prefix < 0 || prefix > 32) continue;
+    if (prefix === 0)  continue; // /0 catch-all (0.0.0.0/0) absorberait toutes les IPs → exclu
     if (prefix === 32) continue; // /32 hosts: used for individual matching only, not subnet grouping
     const parts = ip.split('.');
     if (parts.length !== 4) continue;

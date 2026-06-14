@@ -105,9 +105,12 @@ function detectFormat(firstLine) {
   const kvCount = (firstLine.match(/\b\w+=\S/g) || []).length;
   const tabs    = (firstLine.match(/\t/g) || []).length;
   const commas  = (firstLine.match(/,/g) || []).length;
+  // KV d'abord (gardé par ≥3 couples → une ligne KV avec une virgule dans une valeur reste KV).
   if (kvCount >= 3) return { format: 'kv', sep: null };
-  if (tabs > 3)     return { format: 'csv', sep: '\t' };
-  if (commas > 2)   return { format: 'csv', sep: ',' };
+  // Sinon, tout séparateur présent → CSV. Seuils abaissés à ≥1 pour ne pas rejeter un CSV
+  // à peu de colonnes (ex 2 colonnes) qui serait sinon lu comme KV → 0 flux importé.
+  if (tabs >= 1)    return { format: 'csv', sep: '\t' };
+  if (commas >= 1)  return { format: 'csv', sep: ',' };
   return { format: 'kv', sep: null };
 }
 

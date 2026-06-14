@@ -128,7 +128,9 @@ function fortiSubnetToCIDR(subnet) {
   if (parts.length === 2) {
     const bits = maskBits(parts[1]);
     if (bits === null) return null;
-    return `${parts[0]}/${bits}`;
+    // Normaliser sur l'adresse réseau : "10.1.6.5 255.255.255.0" → "10.1.6.0/24"
+    // (sinon objets dupliqués + réutilisation/réconciliation ratées).
+    return `${networkAddress(parts[0], bits)}/${bits}`;
   }
   if (parts.length === 1 && parts[0].includes('/')) return parts[0];
   return null;
@@ -142,7 +144,9 @@ function parsePorts(portrange) {
     let [a, b] = clean.split('-').map(Number);
     if (b && !isNaN(b)) {
       if (a > b) { const t = a; a = b; b = t; }
-      for (let i = a; i <= Math.min(b, a + 10000); i++) ports.push(i);
+      // Borne au max port réel (65535), pas une limite arbitraire qui tronquait les
+      // services à large plage (ex 1-65535) → matching/couverture incomplets.
+      for (let i = a; i <= Math.min(b, 65535); i++) ports.push(i);
     }
     else if (a && !isNaN(a)) ports.push(a);
   }
