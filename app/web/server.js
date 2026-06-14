@@ -15,6 +15,7 @@ const { parseFortiConfig, analyzePolicies,
         preflightValidation,
         parseFullRoutingTable, parseOspfRoutingTable, parseBgpNetworkTable,
         sortRoutes, formatExistingPolicies }             = require('./lib/forticonfig');
+const { buildHostPairCoverage }                          = require('./lib/coverage');
 
 const app   = express();
 const PORT  = process.env.PORT || 3737;
@@ -1685,7 +1686,9 @@ app.post('/api/deploy/generate', (req, res) => {
       res.send(cli);
     } else {
       const existingPoliciesCli = formatExistingPolicies(s.fortiConfig?.existingPolicies || []);
-      res.json({ cli, analyzed, addrGroups: s.fortiConfig.addressGroups || {}, warnings, resolvedHosts, existingPoliciesCli, hostPairServices });
+      // #3: couverture conservatrice du trafic vs policies existantes (par paire src→dst)
+      const { hostPairCoverage, hasConfig } = buildHostPairCoverage(s.data?.flows || [], s.fortiConfig || {});
+      res.json({ cli, analyzed, addrGroups: s.fortiConfig.addressGroups || {}, warnings, resolvedHosts, existingPoliciesCli, hostPairServices, hostPairCoverage, coverageAvailable: hasConfig });
     }
   } catch (err) {
     res.status(500).json({ error: err.message });

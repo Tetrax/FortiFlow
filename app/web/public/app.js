@@ -1924,6 +1924,9 @@ const deployState = {
   bruteMode:     'off',            // 'off' | 'service' (split by svc) | 'host' (split by src+svc)
   _detailOriginal: null,           // M3: snapshot pré-détail (≠ _analyzedOriginal pré-fusion)
   captureWindow: null,             // #1: { start, end, days, available } — fenêtre d'observation
+  hostPairCoverage: {},            // #3: "srcip|dstip" → { verdict, ruleIds, blockIds }
+  coverageAvailable: false,        // #3: une config FortiGate existante est-elle chargée ?
+  coverageFilter: 'all',           // #3: 'all' | 'new' — filtrer le tableau
   riskPanelOpen: false,
   sortCol:       null,             // active sort column key
   sortDir:       'desc',           // 'asc' | 'desc'
@@ -5089,6 +5092,14 @@ function filterDeployPolicies() {
     result = result.filter(p => !isScanPolicy(p));
   }
 
+  // #3: filtre « masquer déjà OK » — ne cache QUE les policies prouvées entièrement autorisées
+  if (deployState.coverageFilter === 'new' && deployState.coverageAvailable) {
+    result = result.filter(p => {
+      const c = _policyCoverage(p);
+      return !(c && c.status === 'allowed');
+    });
+  }
+
   if (q) {
     // Syntaxe spéciale : srcintf:X, dstintf:X (filtres exacts sur l'interface)
     const srcIntfFilter = (q.match(/\bsrcintf:(\S+)/) || [])[1] || null;
@@ -6269,6 +6280,8 @@ async function analyzeDeployPolicies() {
     deployState.warnings        = respData.warnings        || [];
     deployState.resolvedHosts   = respData.resolvedHosts   || {};
     deployState.hostPairServices = respData.hostPairServices || {};
+    deployState.hostPairCoverage = respData.hostPairCoverage || {};   // #3
+    deployState.coverageAvailable = !!respData.coverageAvailable;      // #3 (config existante chargée ?)
     setLoadingPct(95);
     setLoadingText('Enrichissement des données…');
   } catch (err) { resetAnalyzeBtn(); alert(err.message); return; }
@@ -6878,6 +6891,13 @@ function wireDeployTable() {
     input.addEventListener('keydown', e2 => { if (e2.key === 'Enter') { e2.preventDefault(); input.blur(); } if (e2.key === 'Escape') { input.value = currentVal; input.blur(); } });
   });
 
+  // ── click: #cov-filter-toggle (#3 — masquer les policies déjà autorisées) ──
+  container.addEventListener('click', e => {
+    if (!e.target.closest('#cov-filter-toggle')) return;
+    deployState.coverageFilter = deployState.coverageFilter === 'new' ? 'all' : 'new';
+    renderDeployPolicies(filterDeployPolicies(), true);
+  });
+
   // ── change: .deploy-chk ──
   container.addEventListener('change', e => {
     const chk = e.target.closest('.deploy-chk');
@@ -7304,6 +7324,68 @@ function _confidenceBadge(p) {
   return ` <span style="font-size:9px;color:${color}" title="${escHtml(tip)}">${label}</span>`;
 }
 
+// #3: agrège la couverture d'une policy sur ses paires src×dst réelles (hostPairCoverage).
+// Conservateur : 'allowed' seulement si TOUTES les paires sont prouvées autorisées.
+// Marche pour base/fusion/détail (basé sur les paires, comme hostPairServices).
+function _policyCoverage(p) {
+  const cov = deployState.hostPairCoverage;
+  if (!deployState.coverageAvailable || !cov) return null;
+  const srcs = (p.srcHosts && p.srcHosts.length) ? p.srcHosts : [];
+  let dsts = (p.dstHosts && p.dstHosts.length) ? p.dstHosts : [];
+  if (!dsts.length && p._isMultiDst && p._multiDstSubnets) dsts = p._multiDstSubnets.flatMap(s => s.hosts || []);
+  if (!dsts.length && p.dstTarget && p.dstTarget !== 'all') dsts = [p.dstTarget];
+  if (!srcs.length || !dsts.length) return null;  // pas de paires concrètes → pas de verdict fiable
+  const t = { allowed: 0, blocked: 0, new: 0, uncertain: 0, partial: 0 };
+  const ruleIds = new Set(), blockIds = new Set();
+  let total = 0;
+  for (const s of srcs) for (const d of dsts) {
+    total++;
+    const e = cov[s + '|' + d];
+    if (!e) { t.new++; continue; }   // aucune trace accept observée → nouveau
+    t[e.verdict] = (t[e.verdict] || 0) + 1;
+    (e.ruleIds  || []).forEach(r => ruleIds.add(r));
+    (e.blockIds || []).forEach(r => blockIds.add(r));
+  }
+  let status;
+  if (t.allowed === total) status = 'allowed';
+  else if (t.blocked === total) status = 'blocked';
+  else if (t.new === total) status = 'new';
+  else if (t.uncertain === total) status = 'uncertain';
+  else if (t.allowed || t.blocked || t.partial) status = 'partial';
+  else status = t.uncertain ? 'uncertain' : 'new';
+  return { status, ruleIds: [...ruleIds], blockIds: [...blockIds], counts: t, total };
+}
+
+function _coverageBadge(p) {
+  const c = _policyCoverage(p);
+  if (!c) return '';
+  const rule = (ids) => ids.length ? (ids.length === 1 ? `règle ${ids[0]}` : `${ids.length} règles`) : '';
+  switch (c.status) {
+    case 'allowed':   return ` <span style="font-size:9px;color:#16a34a" title="Tout le trafic de cette policy est DÉJÀ autorisé par la config existante (${rule(c.ruleIds)}).">✓ déjà OK</span>`;
+    case 'blocked':   return ` <span style="font-size:9px;color:#dc2626" title="Ce trafic est actuellement BLOQUÉ par la config existante (${rule(c.blockIds)}). Créer une règle accept au-dessus changerait le comportement — à valider.">⛔ bloquée</span>`;
+    case 'new':       return ` <span style="font-size:9px;color:#2563eb" title="Aucune règle existante ne couvre ce trafic — règle à créer.">● nouvelle</span>`;
+    case 'partial':   return ` <span style="font-size:9px;color:#d97706" title="Partielle : ${c.counts.allowed || 0} paire(s) déjà OK, ${c.counts.new || 0} nouvelle(s)${c.counts.blocked ? `, ${c.counts.blocked} bloquée(s)` : ''}. À examiner.">◐ partielle</span>`;
+    case 'uncertain': return ` <span style="font-size:9px;color:var(--text2)" title="Couverture indéterminée (objet/service non résolvable, interface inconnue ou FQDN). Vérifier manuellement — non considérée comme couverte.">? à vérifier</span>`;
+  }
+  return '';
+}
+
+// #3: bannière de synthèse + filtre « masquer déjà OK »
+function _coverageBanner() {
+  if (!deployState.coverageAvailable) return '';
+  const list = deployState.analyzed || [];
+  let nw = 0, al = 0, bl = 0, pa = 0, un = 0;
+  for (const p of list) {
+    const c = _policyCoverage(p);
+    if (!c) continue;
+    if (c.status === 'new') nw++; else if (c.status === 'allowed') al++;
+    else if (c.status === 'blocked') bl++; else if (c.status === 'partial') pa++; else un++;
+  }
+  const active = deployState.coverageFilter === 'new';
+  const btn = ` <button id="cov-filter-toggle" class="btn-sm" style="font-size:10px;padding:1px 6px" title="Masquer les policies dont le trafic est déjà entièrement autorisé">${active ? '✓ ' : ''}masquer déjà OK</button>`;
+  return `<span style="color:var(--text2)">🛡 vs config : <span style="color:#2563eb">${nw} nouvelles</span> · <span style="color:#16a34a">${al} déjà OK</span>${bl ? ` · <span style="color:#dc2626">${bl} bloquées</span>` : ''}${pa ? ` · <span style="color:#d97706">${pa} partielles</span>` : ''}${un ? ` · ${un} à vérifier` : ''}${btn}</span>`;
+}
+
 function renderDeployPolicies(analyzed, resetPage = true) {
   // M1: si la vue deploy n'est plus montée (render déclenché après changement de vue),
   // el('deploy-policy-body') est null → on abandonne au lieu de crasher sur .innerHTML.
@@ -7433,7 +7515,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
         <td class="status-cell" title="${escHtml(statusTitle)}"><div class="status-bar status-${rowStatus}"></div></td>
         <td><button class="btn-toggle-policy" data-idx="${idx}" title="${p._disabled ? 'Policy désactivée — cliquer pour activer' : 'Policy activée — cliquer pour désactiver'}"><span class="policy-status-badge ${p._disabled ? 'badge-disabled' : 'badge-enabled'}">${p._disabled ? 'DIS' : 'ENA'}</span></button></td>
         <td class="impact-cell"><div class="impact-bar" style="width:${barW}%"></div><span class="impact-val">${fmtNum(p.sessions || 0)}</span>${_confidenceBadge(p)}</td>
-        <td>${actionBadge}${dirBadge}</td>
+        <td>${actionBadge}${dirBadge}${_coverageBadge(p)}</td>
         <td>${warnBadge}${seqBadge}${isScan ? '<span class="scan-badge" title="Destination silencieuse : ≥80% des flows n\'ont reçu aucune réponse. Port fermé, hôte injoignable, ou flux déjà bloqué ailleurs. Vérifier avant de créer une règle.">⚠ silencieux</span>' : ''}${p._hpsUnverified ? '<span class="scan-badge" title="Aucune paire src→dst trouvée dans l\'index de flows pour les services de cette policy. Les hôtes affichés n\'ont pas pu être vérifiés — possible désaccord de nommage entre logs et objets FortiGate.">⚠ non vérifié</span>' : ''}${srcSubnetText}${srcModeBadge}</td>
         <td>${srcAddrCell}</td>
         ${allSrcAutoFlag ? '' : `<td>${srcIntf}</td>`}
@@ -7490,6 +7572,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
           : ''
       }</span>
       ${_captureBanner()}
+      ${_coverageBanner()}
     </div>
     ${paginationBar}
     <div style="overflow-x:auto">

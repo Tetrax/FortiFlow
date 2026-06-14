@@ -1762,6 +1762,10 @@ function formatExistingPolicies(policies) {
 }
 
 module.exports = {
+  ip2int,
+  int2ip,
+  networkAddress,
+  findPredefinedService,
   parseFortiConfig,
   analyzePolicies,
   generateConfig,
