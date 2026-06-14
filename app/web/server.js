@@ -1660,8 +1660,12 @@ app.post('/api/deploy/generate', (req, res) => {
         for (const h of (p.dstHosts || [])) relevantDsts.add(h);
       }
       for (const f of s.data.flows) {
+        if (f.action !== 'accept') continue;             // P2: ignorer deny/drop — allège le scan et reflète les policies (toutes en accept)
         if (!f.srcip || !f.dstip || !f.service) continue;
-        if (!relevantSrcs.has(f.srcip) || !relevantDsts.has(f.dstip)) continue;
+        // C2: les destinations publiques n'ont pas de dstHosts (analyzer.js) → relevantDsts ne les contient jamais.
+        //     Sans cette branche, aucune paire WAN n'est indexée et les modes /32 Internet fabriquent des paires fictives.
+        const dstOk = relevantDsts.has(f.dstip) || f.dstType === 'public';
+        if (!relevantSrcs.has(f.srcip) || !dstOk) continue;
         const key = f.srcip + '|' + f.dstip;
         if (!hostPairServices[key]) hostPairServices[key] = [];
         const svcUpper = f.service.toUpperCase();
