@@ -3833,6 +3833,13 @@ async function deploy() {
         <div id="deploy-hps-warn" style="display:none;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);border-radius:6px;padding:5px 12px;font-size:12px;color:var(--danger,#ef4444);margin-bottom:4px"></div>
         <div class="deploy-toolbar" id="deploy-merge-bar" style="display:none">
           <span id="deploy-merge-info" style="font-size:11px;color:var(--text2)"></span>
+          <span class="deploy-preset-group" style="display:inline-flex;gap:4px;align-items:center;margin-right:6px" title="Mode assisté : pré-règle granularité et fusion en un clic. Les contrôles avancés restent accessibles.">
+            <span style="font-size:10px;color:var(--text2);font-weight:700">Mode :</span>
+            <button class="btn-sm deploy-preset-btn" data-preset="strict"   title="Micro-segmentation — 1 règle par hôte /32 × service. Le plus précis (least-privilege strict).">Strict</button>
+            <button class="btn-sm deploy-preset-btn" data-preset="balanced" title="1 règle par service, sources/destinations groupées. Compromis recommandé.">Équilibré</button>
+            <button class="btn-sm deploy-preset-btn" data-preset="macro"    title="Fusion par destination, réseaux agrégés. Le plus compact (macro-segmentation).">Macro</button>
+            <span id="deploy-reco-hint" style="font-size:10px;color:var(--accent2,#7c9cff)"></span>
+          </span>
           <div class="dropdown-wrap" id="merge-dropdown-wrap">
             <button class="btn-sm dropdown-trigger">⚡ Fusion ▾</button>
             <div class="dropdown-menu" style="min-width:210px;padding:10px 12px">
@@ -4224,6 +4231,25 @@ async function deploy() {
         host:                 '↳ 1:1 complet : 1 policy par hôte src /32 × hôte dst /32 × service. Maximum de granularité.',
         'src-agg-dst-detail': '↳ Hybride : sources en subnet /24, destinations en IP /32. Idéal pour flux utilisateurs → serveurs (WSUS, DC, VEEAM…).',
       }[deployState.bruteMode] || '';
+      return;
+    }
+
+    // #12: mode assisté (presets) — pré-règle granularité + fusion en un clic
+    const presetBtn = e.target.closest('.deploy-preset-btn');
+    if (presetBtn) {
+      const preset = presetBtn.dataset.preset;
+      document.querySelectorAll('.dropdown-wrap.open').forEach(w => w.classList.remove('open'));
+      if (preset === 'macro') {
+        deployState.bruteMode    = 'off';
+        deployState.mergeScope   = 'all';
+        deployState.mergeStrategy = 'destination';
+        applyMerge('all', 'destination');       // fusion par destination (réseaux agrégés)
+      } else {
+        applyMerge('reset');                    // pas de fusion → repartir de la base (remet bruteMode off)
+        deployState.bruteMode = preset === 'strict' ? 'host' : 'service';
+        _applyDetailMode();                     // détail /32 (strict) ou par service (équilibré)
+      }
+      document.querySelectorAll('.deploy-preset-btn').forEach(b => b.classList.toggle('btn-accent', b.dataset.preset === preset));
       return;
     }
 
@@ -7411,6 +7437,28 @@ function _coverageBanner() {
   return `<span style="color:var(--text2)">🛡 vs config : <span style="color:#2563eb">${nw} nouvelles</span> · <span style="color:#16a34a">${al} déjà OK</span>${bl ? ` · <span style="color:#dc2626">${bl} bloquées</span>` : ''}${pa ? ` · <span style="color:#d97706">${pa} partielles</span>` : ''}${un ? ` · ${un} à vérifier` : ''}${btn}</span>`;
 }
 
+// #8: recommandation de granularité — purement consultative (l'ingénieur décide).
+// Heuristique transparente fondée sur le nombre d'hôtes source par policy.
+function _granularityReco() {
+  const list = deployState.baseAnalyzedPolicies || deployState.analyzed || [];
+  if (!list.length) return null;
+  const counts = list.map(p => (p.srcHosts || []).length);
+  const big   = counts.filter(c => c > 8).length;
+  const small = counts.filter(c => c >= 1 && c <= 3).length;
+  const n = counts.length;
+  if (big / n > 0.4)   return { preset: 'macro',    label: 'Macro',     why: `${Math.round(big / n * 100)}% des policies ont >8 hôtes source → agrégation réseau conseillée` };
+  if (small / n > 0.6) return { preset: 'strict',   label: 'Strict',    why: 'la plupart des policies ont ≤3 hôtes → micro-segmentation /32 réaliste' };
+  return { preset: 'balanced', label: 'Équilibré', why: 'volumétrie intermédiaire → détail par service recommandé' };
+}
+
+function _updateRecoHint() {
+  const hintEl = el('deploy-reco-hint');
+  if (!hintEl) return;
+  const r = _granularityReco();
+  hintEl.textContent = r ? `· reco : ${r.label}` : '';
+  hintEl.title = r ? r.why : '';
+}
+
 function renderDeployPolicies(analyzed, resetPage = true) {
   // M1: si la vue deploy n'est plus montée (render déclenché après changement de vue),
   // el('deploy-policy-body') est null → on abandonne au lieu de crasher sur .innerHTML.
@@ -7620,6 +7668,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     ${paginationBar}`;
 
   el('deploy-step4-footer').style.display = '';
+  _updateRecoHint();   // #8: rafraîchir la recommandation de granularité
 
   // Wire pagination buttons (both top and bottom bars) — re-wired each render
   // because page/pages values change and the buttons are recreated
