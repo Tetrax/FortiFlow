@@ -1327,7 +1327,13 @@ function generateConfig(selectedPolicies, opts = {}) {
 
     // Source address(es) — peut être multiple si policy-grouped merge
     let srcAddrName, srcAddrNames, srcAddrGrpName;
-    if (p._multiSrcSubnets?.length > 0) {
+    if (p._srcCidrOverride && !p._use32Src) {
+      // B: masque custom choisi par l'ingénieur (mode subnet uniquement) → objet adresse avec ce CIDR exact
+      const cidr = p._srcCidrOverride;
+      const name = p._srcAddrName || suggestAddrName(cidr, NP);
+      newAddresses.set(cidr, name);
+      srcAddrName = name;
+    } else if (p._multiSrcSubnets?.length > 0) {
       // ── Multi-src subnets : per-subnet /24 vs /32 (like _multiDstSubnets) ──
       const allSrcNames = [];
       for (const s of p._multiSrcSubnets) {
@@ -1402,8 +1408,14 @@ function generateConfig(selectedPolicies, opts = {}) {
 
     // Destination address
     let dstAddrName;
+    // B: masque custom dst (LAN uniquement) → objet adresse avec ce CIDR exact
+    if (p._dstCidrOverride && !p._use32Dst && !(p._isWan || p.dstType === 'public')) {
+      const cidr = p._dstCidrOverride;
+      const name = p._dstAddrName || suggestAddrName(cidr, NP);
+      newAddresses.set(cidr, name);
+      dstAddrName = name;
     // ── WAN policy : dstaddr "all" par défaut, ou IPs spécifiques si _dstUseAll=false ──
-    if ((p._isWan || p.dstType === 'public') && p._dstUseAll !== false) {
+    } else if ((p._isWan || p.dstType === 'public') && p._dstUseAll !== false) {
       dstAddrName = 'all';
     } else if ((p._isWan || p.dstType === 'public') && p._dstUseAll === false) {
       // Mode IPs spécifiques pour policy WAN

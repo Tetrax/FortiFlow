@@ -2781,6 +2781,19 @@ function mountDrawer() {
     if (hint) hint.style.display = '';
     if (e.target.matches('.drawer-src-name'))  { p._srcAddrName = e.target.value; syncAddrCell(_drawerIdx, 'src'); }
     if (e.target.matches('.drawer-dst-name'))  { p._dstAddrName = e.target.value; syncAddrCell(_drawerIdx, 'dst'); }
+    // B/C: masque custom src/dst — normalise, stocke l'override, met à jour le garde-fou live
+    if (e.target.matches('.drawer-src-cidr') || e.target.matches('.drawer-dst-cidr')) {
+      const isSrc = e.target.matches('.drawer-src-cidr');
+      const base  = isSrc ? p.srcSubnet : p.dstTarget;
+      const raw   = e.target.value.trim();
+      const norm  = raw ? normalizeCidrInput(raw, base) : null;
+      // override seulement si différent du subnet détecté ; vide ou == base → pas d'override
+      if (isSrc) p._srcCidrOverride = (norm && norm !== p.srcSubnet) ? norm : null;
+      else       p._dstCidrOverride = (norm && norm !== p.dstTarget) ? norm : null;
+      const guard = e.target.parentElement?.querySelector('.drawer-mask-guard');
+      if (guard) guard.innerHTML = maskGuardHtml(norm || base, isSrc ? (p.srcHosts || []) : (p.dstHosts || []));
+      return;
+    }
     if (e.target.matches('.drawer-policy-name')) p._policyName = e.target.value;
     if (e.target.matches('.drawer-host-input')) {
       const host = e.target.dataset.host;
@@ -3406,6 +3419,11 @@ function populateDrawer(idx) {
         <button class="drawer-toggle-btn drawer-mode-btn ${srcMode==='hosts'?'active':''} ${srcHosts.length<1?'disabled':''}" data-type="src" data-mode="hosts">/32 hôtes (${srcHosts.length})</button>
       </div>
       ${srcMode === 'subnet' ? `<div class="drawer-field">
+        <span class="drawer-field-label">Masque</span>
+        <input class="drawer-input drawer-src-cidr" value="${escHtml(p._srcCidrOverride || p.srcSubnet || '')}" placeholder="${escHtml(p.srcSubnet || '')}" style="width:140px" title="CIDR custom (ex 10.1.6.0/25) ou raccourci /25. Vide = subnet détecté.">
+        <span class="drawer-mask-guard" data-type="src">${maskGuardHtml(p._srcCidrOverride || p.srcSubnet, srcHosts)}</span>
+      </div>` : ''}
+      ${srcMode === 'subnet' ? `<div class="drawer-field">
         <span class="drawer-field-label">Objet addr</span>
         ${srcFound ? `<span class="drawer-field-value" style="color:var(--success)" title="${escHtml(a.srcAddr?.cidr || p.srcSubnet || '')}">&#10003; ${escHtml(srcAddrName)}${badgeHtml('config')}</span>`
           : `<input class="drawer-input drawer-src-name" value="${escHtml(inputVal(srcAddrName, a.srcAddr?.suggestedName || suggestAddrNameFE(p.srcSubnet)))}" placeholder="${escHtml(srcAddrName || 'FF_...')}">${badgeHtml('auto')}`}
@@ -3527,6 +3545,11 @@ function populateDrawer(idx) {
         <span style="font-size:11px;color:var(--text2)">Mode :</span>
         <button class="drawer-toggle-btn drawer-mode-btn ${dstMode==='subnet'?'active':''}" data-type="dst" data-mode="subnet">/24 subnet</button>
         <button class="drawer-toggle-btn drawer-mode-btn ${dstMode==='hosts'?'active':''} ${dstHosts.length<1?'disabled':''}" data-type="dst" data-mode="hosts">/32 hôtes (${dstHosts.length})</button>
+      </div>` : ''}
+      ${dstMode === 'subnet' && p.dstType === 'private' ? `<div class="drawer-field">
+        <span class="drawer-field-label">Masque</span>
+        <input class="drawer-input drawer-dst-cidr" value="${escHtml(p._dstCidrOverride || p.dstTarget || '')}" placeholder="${escHtml(p.dstTarget || '')}" style="width:140px" title="CIDR custom (ex 10.2.0.0/26) ou raccourci /26. Vide = subnet détecté.">
+        <span class="drawer-mask-guard" data-type="dst">${maskGuardHtml(p._dstCidrOverride || p.dstTarget, dstHosts)}</span>
       </div>` : ''}
       ${dstMode === 'subnet' ? `<div class="drawer-field">
         <span class="drawer-field-label">Objet addr</span>
@@ -6517,6 +6540,55 @@ function ffSvcName(port, proto) { return `${ffp()}_SVC_${port}_${proto}`; }
 function suggestAddrNameFE(cidr) {
   if (!cidr) return '';
   return ffp() + '_' + cidr.replace(/[./]/g, '_');
+}
+
+// ── Masque custom + garde-fou de couverture (B/C) ──────────────────────────────
+// Normalise une saisie utilisateur : CIDR complet "10.1.6.0/25", ou raccourci "/25"
+// (applique le préfixe au réseau du subnet de base). Retourne un CIDR normalisé ou null.
+function normalizeCidrInput(input, baseSubnet) {
+  const v = String(input || '').trim();
+  if (!v) return null;
+  let m = v.match(/^(\d+\.\d+\.\d+\.\d+)\/(\d+)$/);
+  if (m) {
+    const pfx = +m[2]; if (pfx < 0 || pfx > 32) return null;
+    return `${int2ipFE(ip2intFE(m[1]) & maskIntFE(pfx))}/${pfx}`;  // normalise sur le réseau
+  }
+  m = v.match(/^\/?(\d{1,2})$/);  // raccourci "/25" ou "25" → applique au réseau de base
+  if (m && baseSubnet) {
+    const pfx = +m[1]; if (pfx < 0 || pfx > 32) return null;
+    const baseIp = (baseSubnet.split('/')[0]) || '0.0.0.0';
+    return `${int2ipFE(ip2intFE(baseIp) & maskIntFE(pfx))}/${pfx}`;
+  }
+  return null;
+}
+function maskIntFE(pfx) { return pfx === 0 ? 0 : (0xFFFFFFFF << (32 - pfx)) >>> 0; }
+
+// Couverture d'un CIDR vs les hôtes réellement observés. null si CIDR invalide.
+function maskCoverage(cidr, hosts) {
+  const m = String(cidr || '').match(/^(\d+\.\d+\.\d+\.\d+)\/(\d+)$/);
+  if (!m) return null;
+  const pfx = +m[2]; if (pfx < 0 || pfx > 32) return null;
+  const net = (ip2intFE(m[1]) & maskIntFE(pfx)) >>> 0;
+  const size = 2 ** (32 - pfx);
+  const end = net + size - 1;
+  let covered = 0, notCovered = 0;
+  for (const h of (hosts || [])) {
+    const ip = ip2intFE(h);
+    if (ip >= net && ip <= end) covered++; else notCovered++;
+  }
+  return { covered, notCovered, size, extra: Math.max(0, size - covered), pfx };
+}
+
+// Rendu du garde-fou : sous-couverture (rouge, casse du trafic) / sur-ouverture (ambre).
+function maskGuardHtml(cidr, hosts) {
+  const c = maskCoverage(cidr, hosts);
+  if (!c) return `<span style="font-size:10px;color:var(--danger,#ef4444)">⚠ CIDR invalide</span>`;
+  const total = (hosts || []).length;
+  const parts = [`couvre ${c.covered}/${total} hôte(s) observé(s)`];
+  let color = 'var(--text2)';
+  if (c.notCovered > 0) { parts.push(`<b>${c.notCovered} hôte(s) NON couvert(s)</b>`); color = '#dc2626'; }
+  if (c.extra > 0)      { parts.push(`ouvre ${c.extra} adresse(s) non observée(s)`); if (c.notCovered === 0 && c.extra > Math.max(1, c.covered)) color = '#d97706'; }
+  return `<span style="font-size:10px;color:${color}" title="Masque /${c.pfx} = ${c.size} adresses. Sous-couverture = trafic légitime cassé ; sur-ouverture = flux non nécessaires autorisés.">${parts.join(' · ')}</span>`;
 }
 
 // ─── CIDR supernet helpers ────────────────────────────────────────────────────
