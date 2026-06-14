@@ -3823,6 +3823,10 @@ async function deploy() {
             <label class="deploy-toggle-label" title="Préfixe des objets générés (adresses, groupes, services). Ex : ACME → ACME_10_1_6_0_24. Réanalyser pour appliquer.">
               Préfixe <input type="text" id="opt-naming-prefix" class="deploy-select" style="width:64px" maxlength="24" placeholder="FF">
             </label>
+            <select id="opt-target" class="deploy-select" title="Cible de la config générée">
+              <option value="fortigate">FortiGate CLI</option>
+              <option value="fmg-script">FortiManager (script Policy Package)</option>
+            </select>
             <button class="btn-accent" id="btn-analyze">⚡ Analyser les policies</button>
           </div>
         </div>
@@ -7789,6 +7793,7 @@ async function generateDeployConf() {
     log:    el('opt-log')?.value   || 'all',
     securityProfiles,
     namingPrefix: deployState.namingPrefix || 'FF',   // #5
+    target: el('opt-target')?.value || 'fortigate',   // #9
   };
 
   const btn = el('btn-generate');

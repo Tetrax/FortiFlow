@@ -1294,6 +1294,7 @@ function generateConfig(selectedPolicies, opts = {}) {
     addressGroups  = {},
     zones          = {},
     namingPrefix   = 'FF',
+    target         = 'fortigate',   // #9: 'fortigate' (CLI device) | 'fmg-script' (script Policy Package)
   } = opts;
 
   // #5: préfixe de nommage (assaini) — défaut 'FF'. Utilisé pour TOUS les objets générés.
@@ -1569,6 +1570,22 @@ function generateConfig(selectedPolicies, opts = {}) {
 
   // ── Build CLI output ──
   const L = [];
+  if (target === 'fmg-script') {
+    // #9: en-tête pour exécution en tant que script FortiManager sur un Policy Package.
+    // Le contenu est du CLI FortiOS standard (config firewall …), exécuté dans le contexte
+    // de l'ADOM/Policy Package — PAS de wrapper `config adom`, PAS de syntaxe device-DB.
+    L.push('# ══════════════════════════════════════════════════');
+    L.push('# Script FortiManager — à exécuter sur un Policy Package');
+    L.push('# ──────────────────────────────────────────────────');
+    L.push('# Mode opératoire :');
+    L.push('#  1. FortiManager > Policy & Objects > (sélectionner l\'ADOM)');
+    L.push('#  2. CLI Scripts > Create New : "Run script on" = "Policy Package or ADOM Database"');
+    L.push('#  3. Coller ce script, sélectionner le Policy Package cible, exécuter');
+    L.push('#  4. Lancer l\'Install Wizard pour pousser vers les FortiGate');
+    L.push('# Note : les policies utilisent "edit 0" → FortiManager attribue les policyid.');
+    L.push('# ══════════════════════════════════════════════════');
+    L.push('');
+  }
   L.push(`# Policies: ${policyBlocks.length}  |  Adresses: ${newAddresses.size}  |  Groupes: ${newAddrGroups.size}  |  Services: ${newServices.size}`);
   L.push('');
 

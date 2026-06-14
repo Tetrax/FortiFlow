@@ -1627,6 +1627,7 @@ app.post('/api/deploy/generate', (req, res) => {
       zones:             s.fortiConfig.zones || {},
       securityProfiles:  o.securityProfiles || {},
       namingPrefix:      o.namingPrefix || 'FF',   // #5: préfixe de nommage configurable
+      target:            o.target === 'fmg-script' ? 'fmg-script' : 'fortigate',  // #9
     };
     const cli = generateConfig(analyzed, genOpts);
 
