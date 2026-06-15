@@ -7591,11 +7591,11 @@ function _coverageBanner() {
 
 // Axe de granularité unique — définitions des crans (mappés aux moteurs existants).
 const GRAN_LEVELS = [
-  { key: 'macro',          label: 'Macro',            sub: 'zone→zone',       desc: 'Regroupement large : sources et destinations agrégées par destination. Le plus compact.' },
-  { key: 'reseau',         label: 'Réseau',           sub: '→ réseau',        desc: 'Subnet → subnet : une règle par paire de réseaux réellement observés.' },
-  { key: 'reseau-serveur', label: 'Réseau → serveur', sub: 'src /24 · dst /32', desc: "Sources agrégées par sous-réseau, destinations détaillées à l'hôte. Idéal flux utilisateurs → serveurs (WSUS, AD, sauvegarde)." },
-  { key: 'service',        label: 'Par service',      sub: '1 règle/svc',     desc: 'Une règle par service, sources et destinations groupées.' },
-  { key: 'ip',             label: 'IP à IP',          sub: '1:1 /32',         desc: 'Tout en /32, le plus strict. Durcissement maximal d\'une règle.' },
+  { key: 'macro',          label: 'Macro',            sub: 'zone→zone',       desc: "Une seule règle entre deux zones, tous réseaux confondus. Le moins de règles, mais le plus large — à réserver aux zones de confiance homogène." },
+  { key: 'reseau',         label: 'Réseau',           sub: '→ réseau',        desc: "Une règle par paire de sous-réseaux qui communiquent réellement. Le bon défaut : ni trop large, ni trop verbeux." },
+  { key: 'reseau-serveur', label: 'Réseau → serveur', sub: 'src /24 · dst /32', desc: "Postes regroupés par sous-réseau, serveurs ciblés à l'IP exacte. Idéal « utilisateurs → serveurs » (WSUS, AD, sauvegarde)." },
+  { key: 'service',        label: 'Par service',      sub: '1 règle/svc',     desc: "Comme Réseau → réseau, mais une règle distincte par service (HTTPS, SMB…). Pour isoler ou auditer chaque protocole." },
+  { key: 'ip',             label: 'IP à IP',          sub: '1:1 /32',         desc: "Une règle par couple d'hôtes exact (/32) et par service. Le plus strict : micro-segmentation, mais beaucoup de règles." },
 ];
 
 // #8: recommandation de granularité — purement consultative. Retourne une CLÉ de cran.
