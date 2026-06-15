@@ -1922,6 +1922,7 @@ const deployState = {
   wizardStep:    1,                // 1: config upload, 2: routes, 3: interfaces, 4: policies
   use32Global:   false,            // global /32 mode (use real hosts instead of /24)
   bruteMode:     'off',            // 'off' | 'service' (split by svc) | 'host' (split by src+svc)
+  granularity:   'reseau',         // axe unique : 'macro'|'reseau'|'reseau-serveur'|'service'|'ip'
   _detailOriginal: null,           // M3: snapshot pré-détail (≠ _analyzedOriginal pré-fusion)
   captureWindow: null,             // #1: { start, end, days, available } — fenêtre d'observation
   namingPrefix:  'FF',             // #5: préfixe de nommage des objets générés (configurable)
@@ -3856,6 +3857,8 @@ async function deploy() {
         <div id="deploy-hps-warn" style="display:none;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);border-radius:6px;padding:5px 12px;font-size:12px;color:var(--danger,#ef4444);margin-bottom:4px"></div>
         <div class="deploy-toolbar" id="deploy-merge-bar" style="display:none">
           <span id="deploy-merge-info" style="font-size:11px;color:var(--text2)"></span>
+          <button class="btn-sm" id="btn-toggle-advanced" title="Contrôles avancés : presets, fusion détaillée, périmètre, détail manuel">Avancé ▾</button>
+          <span id="deploy-advanced-controls" style="display:none;align-items:center;gap:6px">
           <span class="deploy-preset-group" style="display:inline-flex;gap:4px;align-items:center;margin-right:6px" title="Mode assisté : pré-règle granularité et fusion en un clic. Les contrôles avancés restent accessibles.">
             <span style="font-size:10px;color:var(--text2);font-weight:700">Mode :</span>
             <button class="btn-sm deploy-preset-btn" data-preset="strict"   title="Micro-segmentation — 1 règle par hôte /32 × service. Le plus précis (least-privilege strict).">Strict</button>
@@ -3911,6 +3914,7 @@ async function deploy() {
               <div class="dropdown-item" data-detail-action="reset">↺ Désactiver le détail</div>
             </div>
           </div>
+          </span>
           <div class="dropdown-wrap" id="analyse-dropdown">
             <button class="btn-sm dropdown-trigger ${deployState.riskPanelOpen ? 'btn-accent' : ''}" id="btn-analyse-menu">Analyse ▾</button>
             <div class="dropdown-menu" style="min-width:160px">
@@ -4179,6 +4183,12 @@ async function deploy() {
 
   // Dropdown toggle + close-on-outside
   el('deploy-merge-bar')?.addEventListener('click', e => {
+    // Toggle "Avancé" : montre/cache presets + Fusion + Détailler
+    if (e.target.closest('#btn-toggle-advanced')) {
+      const adv = el('deploy-advanced-controls');
+      if (adv) adv.style.display = adv.style.display === 'none' ? 'inline-flex' : 'none';
+      return;
+    }
     const trigger = e.target.closest('.dropdown-trigger');
     if (trigger) {
       const wrap = trigger.closest('.dropdown-wrap');
@@ -4284,6 +4294,26 @@ async function deploy() {
       if (action === 'reset') deployState.bruteMode = 'off';
       _applyDetailMode();
       return;
+    }
+  });
+
+  // Axe de granularité unique (façade) — chaque cran réutilise les moteurs existants.
+  // Le bouton est dans deploy-policy-body (re-rendu) ; _applyDetailMode/applyMerge sont en portée ici.
+  el('deploy-policy-body')?.addEventListener('click', e => {
+    const granBtn = e.target.closest('.gran-level');
+    if (!granBtn) return;
+    const lvl = granBtn.dataset.level;
+    if (lvl === deployState.granularity) return;
+    deployState.granularity = lvl;
+    if (lvl === 'macro') {
+      deployState.mergeScope = 'all'; deployState.mergeStrategy = 'destination';
+      applyMerge('all', 'destination');                 // fusion par destination (remet bruteMode='off')
+    } else if (lvl === 'reseau') {
+      applyMerge('reset');                                // base subnet→subnet
+    } else {
+      applyMerge('reset');                                // repartir de la base, puis détailler
+      deployState.bruteMode = lvl === 'ip' ? 'host' : (lvl === 'service' ? 'service' : 'src-agg-dst-detail');
+      _applyDetailMode();
     }
   });
 
@@ -6473,6 +6503,7 @@ async function analyzeDeployPolicies() {
   }
 
   deployState.analyzed              = analyzed;
+  deployState.granularity           = 'reseau';   // base subnet→subnet à chaque (ré)analyse
   deployState._analyzedOriginal     = null;
   deployState._detailOriginal       = null;  // M3: base de détail, réinitialisée à chaque analyse
   deployState.baseAnalyzedPolicies  = analyzed.map(p => ({ ...p })); // snapshot for reset
@@ -7558,26 +7589,56 @@ function _coverageBanner() {
   return `<span style="color:var(--text2)">🛡 vs config : <span style="color:#2563eb">${nw} nouvelles</span> · <span style="color:#16a34a">${al} déjà OK</span>${bl ? ` · <span style="color:#dc2626">${bl} bloquées</span>` : ''}${pa ? ` · <span style="color:#d97706">${pa} partielles</span>` : ''}${un ? ` · ${un} à vérifier` : ''}${btn}</span>`;
 }
 
-// #8: recommandation de granularité — purement consultative (l'ingénieur décide).
+// Axe de granularité unique — définitions des crans (mappés aux moteurs existants).
+const GRAN_LEVELS = [
+  { key: 'macro',          label: 'Macro',            sub: 'zone→zone',       desc: 'Regroupement large : sources et destinations agrégées par destination. Le plus compact.' },
+  { key: 'reseau',         label: 'Réseau',           sub: '→ réseau',        desc: 'Subnet → subnet : une règle par paire de réseaux réellement observés.' },
+  { key: 'reseau-serveur', label: 'Réseau → serveur', sub: 'src /24 · dst /32', desc: "Sources agrégées par sous-réseau, destinations détaillées à l'hôte. Idéal flux utilisateurs → serveurs (WSUS, AD, sauvegarde)." },
+  { key: 'service',        label: 'Par service',      sub: '1 règle/svc',     desc: 'Une règle par service, sources et destinations groupées.' },
+  { key: 'ip',             label: 'IP à IP',          sub: '1:1 /32',         desc: 'Tout en /32, le plus strict. Durcissement maximal d\'une règle.' },
+];
+
+// #8: recommandation de granularité — purement consultative. Retourne une CLÉ de cran.
 // Heuristique transparente fondée sur le nombre d'hôtes source par policy.
 function _granularityReco() {
   const list = deployState.baseAnalyzedPolicies || deployState.analyzed || [];
   if (!list.length) return null;
   const counts = list.map(p => (p.srcHosts || []).length);
+  const n = counts.length;
   const big   = counts.filter(c => c > 8).length;
   const small = counts.filter(c => c >= 1 && c <= 3).length;
-  const n = counts.length;
-  if (big / n > 0.4)   return { preset: 'macro',    label: 'Macro',     why: `${Math.round(big / n * 100)}% des policies ont >8 hôtes source → agrégation réseau conseillée` };
-  if (small / n > 0.6) return { preset: 'strict',   label: 'Strict',    why: 'la plupart des policies ont ≤3 hôtes → micro-segmentation /32 réaliste' };
-  return { preset: 'balanced', label: 'Équilibré', why: 'volumétrie intermédiaire → détail par service recommandé' };
+  if (big / n > 0.4)   return 'reseau';          // beaucoup d'hôtes → rester au subnet
+  if (small / n > 0.6) return 'ip';              // peu d'hôtes → /32 réaliste
+  return 'reseau-serveur';                        // défaut équilibré
 }
 
-function _updateRecoHint() {
-  const hintEl = el('deploy-reco-hint');
-  if (!hintEl) return;
-  const r = _granularityReco();
-  hintEl.textContent = r ? `· reco : ${r.label}` : '';
-  hintEl.title = r ? r.why : '';
+// Barre de granularité (façade) : segmenté 5 crans + repère reco + description + compteur live.
+function _granularityBar() {
+  const cur  = deployState.granularity || 'reseau';
+  const reco = _granularityReco();
+  const n = GRAN_LEVELS.length;
+  const cells = GRAN_LEVELS.map((l, i) => {
+    const active = l.key === cur;
+    const isReco = l.key === reco;
+    const border = i < n - 1 ? 'border-right:1px solid var(--border,rgba(255,255,255,.1));' : '';
+    const bg  = active ? 'background:var(--accent2,#7c9cff);' : '';
+    const col = active ? 'color:#fff;font-weight:600;' : 'color:var(--text2,#9aa);';
+    return `<button class="gran-level" data-level="${l.key}" title="${escHtml(l.desc)}" style="flex:1;text-align:center;padding:8px 4px;font-size:12px;border:none;cursor:pointer;${border}${bg}${col}">
+      ${escHtml(l.label)}<br><span style="font-size:10px;opacity:.8">${escHtml(l.sub)}${isReco && !active ? ' <span style="color:var(--accent2,#7c9cff)">★</span>' : isReco ? ' ★' : ''}</span>
+    </button>`;
+  }).join('');
+  const def = GRAN_LEVELS.find(l => l.key === cur) || GRAN_LEVELS[1];
+  const recoLabel = reco ? (GRAN_LEVELS.find(l => l.key === reco) || {}).label : '';
+  const count = (deployState.analyzed || []).length;
+  return `<div style="margin-bottom:10px">
+    <div style="display:flex;border:1px solid var(--border,rgba(255,255,255,.15));border-radius:6px;overflow:hidden">${cells}</div>
+    <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text2,#9aa);margin-top:4px">
+      <span>← plus compact</span>${recoLabel ? `<span style="color:var(--accent2,#7c9cff)">★ recommandé : ${escHtml(recoLabel)}</span>` : '<span></span>'}<span>plus précis →</span>
+    </div>
+    <div style="margin-top:6px;padding:7px 10px;background:var(--bg2,rgba(255,255,255,.04));border:1px solid var(--border,rgba(255,255,255,.1));border-radius:6px;font-size:12px;color:var(--text,#ddd)">
+      ${escHtml(def.desc)} <strong style="color:var(--accent2,#7c9cff)">→ ${count} règle${count > 1 ? 's' : ''} générée${count > 1 ? 's' : ''}</strong>
+    </div>
+  </div>`;
 }
 
 function renderDeployPolicies(analyzed, resetPage = true) {
@@ -7759,6 +7820,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
   // (adaptive column flags computed above as allSrcAutoFlag / allDstAutoFlag)
   // body est récupéré et vérifié non-null en tête de fonction (garde M1)
   body.innerHTML = `
+    ${_granularityBar()}
     <div style="margin-bottom:8px;font-size:12px;color:var(--text2);display:flex;align-items:center;gap:12px">
       <span>${total} polic${total > 1 ? 'ies' : 'y'} · <strong>${selCount}</strong> sélectionnées${hasMerge ? ' · <span style="color:var(--accent2)">⚡ fusion</span>' : ''}${
         (deployState.warnings || []).length > 0
@@ -7789,7 +7851,6 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     ${paginationBar}`;
 
   el('deploy-step4-footer').style.display = '';
-  _updateRecoHint();   // #8: rafraîchir la recommandation de granularité
 
   // Wire pagination buttons (both top and bottom bars) — re-wired each render
   // because page/pages values change and the buttons are recreated
