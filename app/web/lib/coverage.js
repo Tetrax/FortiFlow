@@ -100,19 +100,39 @@ function resolveServiceNames(names, customServices) {
 
 // Pré-résout toutes les policies existantes ACTIVES, dans l'ordre du fichier (first-match).
 function resolveExistingPolicies(fortiConfig) {
-  const { existingPolicies = [], addresses = {}, addressGroups = {}, customServices = {} } = fortiConfig || {};
+  const { existingPolicies = [], addresses = {}, addressGroups = {}, customServices = {}, zones = {} } = fortiConfig || {};
+  // Map zone (minuscule) → interfaces membres : une règle sur une zone couvre ses interfaces.
+  // Les logs FortiAnalyzer rapportent souvent l'interface/VLAN membre, pas le nom de zone.
+  const zoneMembers = {};
+  for (const [zn, z] of Object.entries(zones)) {
+    zoneMembers[String(zn).toLowerCase()] = (z.members || []).map(m => String(m).toLowerCase());
+  }
+  const expandIntf = (arr) => {
+    const out = new Set();
+    for (const raw of (arr || [])) {
+      const n = stripQuotes(raw).toLowerCase();
+      out.add(n);                                        // garde le nom (zone OU interface)
+      if (zoneMembers[n]) zoneMembers[n].forEach(m => out.add(m));  // + interfaces membres si zone
+    }
+    return [...out];
+  };
   return existingPolicies
     .filter(p => String(p.status || 'enable').toLowerCase() !== 'disable')
-    .map(p => ({
-      policyid: p.policyid,
-      name:     p.name || '',
-      action:   String(p.action || 'deny').toLowerCase(),
-      src:      resolveAddrNames(p.srcaddr, addresses, addressGroups),
-      dst:      resolveAddrNames(p.dstaddr, addresses, addressGroups),
-      svc:      resolveServiceNames(p.service, customServices),
-      srcintf:  (p.srcintf || []).map(x => stripQuotes(x).toLowerCase()),
-      dstintf:  (p.dstintf || []).map(x => stripQuotes(x).toLowerCase()),
-    }));
+    .map(p => {
+      const src = resolveAddrNames(p.srcaddr, addresses, addressGroups);
+      const dst = resolveAddrNames(p.dstaddr, addresses, addressGroups);
+      const svc = resolveServiceNames(p.service, customServices);
+      return {
+        policyid: p.policyid,
+        name:     p.name || '',
+        action:   String(p.action || 'deny').toLowerCase(),
+        src, dst, svc,
+        srcintf:  expandIntf(p.srcintf),
+        dstintf:  expandIntf(p.dstintf),
+        // règle « large/permissive » : autorise tout en service, ou source/dest = all
+        broad:    svc.allAll || src.hasAll || dst.hasAll,
+      };
+    });
 }
 
 // 'yes' | 'no' | 'maybe'
@@ -168,7 +188,7 @@ function classifyFlow(flow, resolved) {
     const c = combine([s, d, v, si, di]);
     if (c === 'yes') {
       return rp.action === 'accept'
-        ? { verdict: 'allowed', policyid: rp.policyid, name: rp.name }
+        ? { verdict: 'allowed', policyid: rp.policyid, name: rp.name, broad: rp.broad }
         : { verdict: 'blocked', policyid: rp.policyid, name: rp.name };
     }
     return { verdict: 'uncertain', policyid: rp.policyid }; // match ambigu → first-match indéterminé
@@ -202,17 +222,22 @@ function buildHostPairCoverage(flows, fortiConfig) {
     if (!f.srcip || !f.dstip) continue;
     const key = f.srcip + '|' + f.dstip;
     let e = out[key];
-    if (!e) e = out[key] = { t: { allowed: 0, blocked: 0, new: 0, uncertain: 0 }, ruleIds: new Set(), blockIds: new Set() };
+    if (!e) e = out[key] = { t: { allowed: 0, blocked: 0, new: 0, uncertain: 0 }, ruleIds: new Set(), blockIds: new Set(), broad: false };
     const r = classifyFlow(f, resolved);
     e.t[r.verdict] += 1;
-    if (r.verdict === 'allowed' && r.policyid != null) e.ruleIds.add(r.policyid);
+    if (r.verdict === 'allowed') { if (r.policyid != null) e.ruleIds.add(r.policyid); if (r.broad) e.broad = true; }
     if (r.verdict === 'blocked' && r.policyid != null) e.blockIds.add(r.policyid);
   }
   // Finaliser (Sets → arrays, verdict dérivé) — JSON-safe pour le transport
   const final = {};
+  const dbg = { allowed: 0, allowedBroad: 0, blocked: 0, new: 0, uncertain: 0 };
   for (const [k, e] of Object.entries(out)) {
-    final[k] = { verdict: deriveVerdict(e.t), ruleIds: [...e.ruleIds], blockIds: [...e.blockIds] };
+    const v = deriveVerdict(e.t);
+    dbg[v] = (dbg[v] || 0) + 1;
+    if (v === 'allowed' && e.broad) dbg.allowedBroad++;
+    final[k] = { verdict: v, ruleIds: [...e.ruleIds], blockIds: [...e.blockIds], broad: !!e.broad };
   }
+  console.log(`[DBG coverage] policies résolues=${resolved.length} paires=${Object.keys(final).length} verdicts=${JSON.stringify(dbg)}`);
   return { hostPairCoverage: final, hasConfig: true };
 }
 

@@ -7534,7 +7534,7 @@ function _policyCoverage(p) {
   const idx = _covIndexBySrc();
   const t = { allowed: 0, blocked: 0, new: 0, uncertain: 0, partial: 0 };
   const ruleIds = new Set(), blockIds = new Set();
-  let observed = 0;
+  let observed = 0, anyBroad = false;
   for (const s of srcs) {
     const entries = idx[s];
     if (!entries) continue;
@@ -7544,6 +7544,7 @@ function _policyCoverage(p) {
       observed++;
       const e = entries[i][1];
       t[e.verdict] = (t[e.verdict] || 0) + 1;
+      if (e.verdict === 'allowed' && e.broad) anyBroad = true;   // autorisé par une règle large
       (e.ruleIds  || []).forEach(r => ruleIds.add(r));
       (e.blockIds || []).forEach(r => blockIds.add(r));
     }
@@ -7556,6 +7557,8 @@ function _policyCoverage(p) {
   else if (t.uncertain === observed) status = 'uncertain';
   else if (t.allowed || t.blocked || t.partial) status = 'partial';
   else status = t.uncertain ? 'uncertain' : 'new';
+  // « autorisé mais par une règle LARGE » : techniquement permis, mais à resserrer (≠ déjà OK).
+  if (status === 'allowed' && anyBroad) status = 'allowed-broad';
   return { status, ruleIds: [...ruleIds], blockIds: [...blockIds], counts: t, total: observed };
 }
 
@@ -7564,7 +7567,8 @@ function _coverageBadge(p) {
   if (!c) return '';
   const rule = (ids) => ids.length ? (ids.length === 1 ? `règle ${ids[0]}` : `${ids.length} règles`) : '';
   switch (c.status) {
-    case 'allowed':   return ` <span style="font-size:9px;color:#16a34a" title="Tout le trafic de cette policy est DÉJÀ autorisé par la config existante (${rule(c.ruleIds)}).">✓ déjà OK</span>`;
+    case 'allowed':   return ` <span style="font-size:9px;color:#16a34a" title="Tout le trafic de cette policy est déjà autorisé par une règle PRÉCISE existante (${rule(c.ruleIds)}). Rien à resserrer.">✓ déjà OK</span>`;
+    case 'allowed-broad': return ` <span style="font-size:9px;color:#d97706" title="Trafic autorisé, mais par une règle LARGE/permissive (${rule(c.ruleIds)}) — service ALL ou any/all. Techniquement permis, mais c'est exactement ce qu'il faut RESSERRER.">⚠ règle large</span>`;
     case 'blocked':   return ` <span style="font-size:9px;color:#dc2626" title="Ce trafic est actuellement BLOQUÉ par la config existante (${rule(c.blockIds)}). Créer une règle accept au-dessus changerait le comportement — à valider.">⛔ bloquée</span>`;
     case 'new':       return ` <span style="font-size:9px;color:#2563eb" title="Aucune règle existante ne couvre ce trafic — règle à créer.">● nouvelle</span>`;
     case 'partial':   return ` <span style="font-size:9px;color:#d97706" title="Partielle : ${c.counts.allowed || 0} paire(s) déjà OK, ${c.counts.new || 0} nouvelle(s)${c.counts.blocked ? `, ${c.counts.blocked} bloquée(s)` : ''}. À examiner.">◐ partielle</span>`;
@@ -7577,16 +7581,17 @@ function _coverageBadge(p) {
 function _coverageBanner() {
   if (!deployState.coverageAvailable) return '';
   const list = deployState.analyzed || [];
-  let nw = 0, al = 0, bl = 0, pa = 0, un = 0;
+  let nw = 0, al = 0, br = 0, bl = 0, pa = 0, un = 0;
   for (const p of list) {
     const c = _policyCoverage(p);
     if (!c) continue;
     if (c.status === 'new') nw++; else if (c.status === 'allowed') al++;
+    else if (c.status === 'allowed-broad') br++;
     else if (c.status === 'blocked') bl++; else if (c.status === 'partial') pa++; else un++;
   }
   const active = deployState.coverageFilter === 'new';
-  const btn = ` <button id="cov-filter-toggle" class="btn-sm" style="font-size:10px;padding:1px 6px" title="Masquer les policies dont le trafic est déjà entièrement autorisé">${active ? '✓ ' : ''}masquer déjà OK</button>`;
-  return `<span style="color:var(--text2)">🛡 vs config : <span style="color:#2563eb">${nw} nouvelles</span> · <span style="color:#16a34a">${al} déjà OK</span>${bl ? ` · <span style="color:#dc2626">${bl} bloquées</span>` : ''}${pa ? ` · <span style="color:#d97706">${pa} partielles</span>` : ''}${un ? ` · ${un} à vérifier` : ''}${btn}</span>`;
+  const btn = ` <button id="cov-filter-toggle" class="btn-sm" style="font-size:10px;padding:1px 6px" title="Masquer les policies déjà couvertes par une règle PRÉCISE (garde les 'règle large' à resserrer)">${active ? '✓ ' : ''}masquer déjà OK</button>`;
+  return `<span style="color:var(--text2)">🛡 vs config : <span style="color:#2563eb">${nw} nouvelles</span> · <span style="color:#16a34a">${al} déjà OK</span>${br ? ` · <span style="color:#d97706">${br} règle large (à resserrer)</span>` : ''}${bl ? ` · <span style="color:#dc2626">${bl} bloquées</span>` : ''}${pa ? ` · <span style="color:#d97706">${pa} partielles</span>` : ''}${un ? ` · ${un} à vérifier` : ''}${btn}</span>`;
 }
 
 // Axe de granularité unique — définitions des crans (mappés aux moteurs existants).
