@@ -43,6 +43,55 @@
     return pairServices.some(value => String(value).toUpperCase() === wanted);
   }
 
+  function normalizeProto(proto) {
+    if (/^(6|tcp)$/i.test(String(proto || ''))) return 'TCP';
+    if (/^(17|udp)$/i.test(String(proto || ''))) return 'UDP';
+    return String(proto || '').toUpperCase();
+  }
+
+  function serviceMatchesTuple(service, tuple) {
+    if (!service || !tuple) return false;
+    const tupleService = String(tuple.service || '').toUpperCase();
+    const wanted = serviceKey(service);
+    if (tupleService && tupleService === wanted) return true;
+
+    const tuplePort = Number(tuple.port);
+    const tupleProto = normalizeProto(tuple.proto);
+    if (!Number.isInteger(tuplePort)) return false;
+
+    const directPort = Number(service.port);
+    if (Number.isInteger(directPort) && directPort === tuplePort) {
+      return !service.proto || normalizeProto(service.proto) === tupleProto;
+    }
+
+    const notation = wanted.match(/^(?:(TCP|UDP)\/(\d+)|(\d+)\/(TCP|UDP))$/);
+    if (notation) {
+      const proto = notation[1] || notation[4];
+      const port = Number(notation[2] || notation[3]);
+      return proto === tupleProto && port === tuplePort;
+    }
+
+    const ports = Array.isArray(service.ports) ? service.ports.map(Number) : [];
+    return ports.includes(tuplePort) && (!service.proto || normalizeProto(service.proto) === tupleProto);
+  }
+
+  function technicalScope(policy, serviceGroup) {
+    const selectedKeys = new Set((serviceGroup || []).map(serviceKey));
+    const services = unique((policy.services || []).filter(service =>
+      selectedKeys.has(String(service).toUpperCase())
+    ));
+    const serviceTuples = (policy.serviceTuples || []).filter(tuple =>
+      (serviceGroup || []).some(service => serviceMatchesTuple(service, tuple))
+    );
+    const ports = serviceTuples.length
+      ? unique(serviceTuples.map(tuple => Number(tuple.port)).filter(Number.isInteger))
+      : (policy.ports || []).slice();
+    const protos = serviceTuples.length
+      ? unique(serviceTuples.map(tuple => normalizeProto(tuple.proto)).filter(Boolean))
+      : (policy.protos || []).slice();
+    return { services, serviceTuples, ports, protos };
+  }
+
   function buildPoliciesByPlan(analyzedPolicies, plan, options) {
     const normalized = normalizePlan(plan);
     const opts = options || {};
@@ -119,12 +168,28 @@
 
             const labels = serviceGroup.map(service => service.label || service.name).filter(Boolean);
             const noRcvdSrcSet = new Set(policy.noRcvdSrcHosts || []);
+            const technical = technicalScope(policy, serviceGroup);
+            let observedPairCount = 0;
+            if (hostPairServices) {
+              for (const src of serviceSrc) {
+                for (const dst of serviceDst) {
+                  const pairServices = hostPairServices[src + '|' + dst];
+                  if (pairServices && serviceGroup.some(service => serviceObserved(pairServices, service))) {
+                    observedPairCount++;
+                  }
+                }
+              }
+            }
             outputs.push({
               ...policy,
               srcSubnet: srcHost ? srcHost + '/32' : policy.srcSubnet,
               dstTarget: dstHost ? dstHost + '/32' : policy.dstTarget,
               srcHosts: serviceSrc,
               dstHosts: serviceDst,
+              services: technical.services,
+              serviceTuples: technical.serviceTuples,
+              ports: technical.ports,
+              protos: technical.protos,
               _use32Src: sourceMode === 'host',
               _use32Dst: destinationMode === 'host',
               _srcMode: sourceMode === 'host' ? 'hosts' : 'subnet',
@@ -133,6 +198,10 @@
               analysis: { ...(policy.analysis || {}), services: serviceGroup },
               noRcvdFlows: srcHost ? (noRcvdSrcSet.has(srcHost) ? 1 : 0) : (policy.noRcvdFlows || 0),
               _segmentationPlan: normalized,
+              _segmentationEvidence: {
+                verified: observedPairCount > 0,
+                observedPairCount,
+              },
             });
           }
         }
@@ -146,6 +215,7 @@
           _srcMode: sourceMode === 'host' ? 'hosts' : 'subnet',
           _dstMode: destinationMode === 'host' ? 'hosts' : 'subnet',
           _segmentationPlan: normalized,
+          _segmentationEvidence: { verified: false, observedPairCount: 0 },
           _hpsUnverified: true,
         });
       }
