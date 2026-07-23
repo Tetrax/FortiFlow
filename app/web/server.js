@@ -1425,7 +1425,6 @@ app.post('/api/deploy/config-upload', upload.single('conffile'), async (req, res
       routes:           (fortiConfig.fullRoutes || fortiConfig.staticRoutes).length,
       bgp:              fortiConfig.hasBgp   || false,
       ospf:             fortiConfig.hasOspf  || false,
-      policyRoutes:     fortiConfig.hasPolicyRoutes || false,
       nonDefaultVrf:    fortiConfig.hasNonDefaultVrf || false,
       existingPolicies: (fortiConfig.existingPolicies || []).length,
     });
@@ -1483,7 +1482,6 @@ app.post('/api/deploy/config-vdom', express.json(), (req, res) => {
       routes:           (fortiConfig.fullRoutes || fortiConfig.staticRoutes).length,
       bgp:              fortiConfig.hasBgp   || false,
       ospf:             fortiConfig.hasOspf  || false,
-      policyRoutes:     fortiConfig.hasPolicyRoutes || false,
       nonDefaultVrf:    fortiConfig.hasNonDefaultVrf || false,
       existingPolicies: (fortiConfig.existingPolicies || []).length,
     });
@@ -1625,9 +1623,7 @@ app.post('/api/deploy/generate', (req, res) => {
     // SD-WAN zone takes priority; if none, preferredWanIntf falls to null (detectWanCandidates handles it)
     // Les contrôles bloquants s'appliquent à la CLI finale, pas à la préparation de la matrice.
     if (!o.analysisOnly) {
-      const requestedPreflight = preflightValidation(selectedPolicies, configToUse, s.data?.flows || [], {
-        allowPbrOverride: o.allowPbrOverride === true,
-      });
+      const requestedPreflight = preflightValidation(selectedPolicies, configToUse, s.data?.flows || []);
       if (!requestedPreflight.ok) {
         return res.status(422).json({
           error: 'Génération refusée : le plan demandé dépasse les flux observés',
@@ -1705,9 +1701,7 @@ app.post('/api/deploy/generate', (req, res) => {
     // La route de génération applique toujours le preflight côté serveur pour
     // une CLI finale. Le mode analysisOnly ne produit aucune configuration.
     if (!o.analysisOnly) {
-      const preflight = preflightValidation(analyzed, configToUse, s.data?.flows || [], {
-        allowPbrOverride: o.allowPbrOverride === true,
-      });
+      const preflight = preflightValidation(analyzed, configToUse, s.data?.flows || []);
       if (!preflight.ok) {
         return res.status(422).json({
           error: 'Génération refusée par le contrôle preflight',
@@ -1727,7 +1721,6 @@ app.post('/api/deploy/generate', (req, res) => {
       securityProfiles:  o.securityProfiles || {},
       namingPrefix:      o.namingPrefix || 'FF',   // #5: préfixe de nommage configurable
       target:            o.target === 'fmg-script' ? 'fmg-script' : 'fortigate',  // #9
-      pbrOverride:       o.allowPbrOverride === true,
     };
     const cli = o.analysisOnly ? '' : generateConfig(analyzed, genOpts);
 
