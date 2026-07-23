@@ -1057,11 +1057,36 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
     // Services
     const protoLabel = p.protos?.[0] || 'TCP';
     const serviceItems = [];
+    const observedTuples = Array.isArray(p.serviceTuples) ? p.serviceTuples : [];
+    const tupleProtoLabel = (proto) => /^(17|udp)$/i.test(String(proto)) ? 'UDP'
+      : /^(6|tcp)$/i.test(String(proto)) ? 'TCP'
+      : protoNameForService(proto);
 
     if (p.services && p.services.length > 0) {
       for (const svc of p.services) {
-        const knownPredef = Object.values(PREDEFINED).some(e => e.name === svc);
-        const customMatch = customServices[svc];
+        const svcTuples = observedTuples.filter(t => String(t.service || '').toUpperCase() === String(svc).toUpperCase());
+        const relevantTuples = svcTuples.length ? svcTuples : (p.ports || []).map(port => ({ port, proto: protoLabel }));
+        const observedPorts = [...new Set(relevantTuples.map(t => Number(t.port)).filter(Number.isInteger))];
+        const observedProtoLabels = [...new Set(relevantTuples.map(t => tupleProtoLabel(t.proto)).filter(Boolean))];
+        const observedProtoLabel = observedProtoLabels.length === 1 ? observedProtoLabels[0] : null;
+
+        const predefEntries = Object.entries(PREDEFINED).filter(([, entry]) => entry.name === svc);
+        const knownPredef = predefEntries.length > 0 && (!relevantTuples.length || relevantTuples.every(t => {
+          const port = Number(t.port);
+          const proto = tupleProtoLabel(t.proto).toLowerCase();
+          return predefEntries.some(([candidatePort, entry]) =>
+            Number(candidatePort) === port && (entry.proto === 'both' || entry.proto === proto)
+          );
+        }));
+
+        const customCandidate = customServices[svc];
+        const customMatch = customCandidate && (!relevantTuples.length || relevantTuples.every(t => {
+          const port = Number(t.port);
+          const isUdpTuple = /^(17|udp)$/i.test(String(t.proto));
+          const set = isUdpTuple ? customCandidate._udpSet : customCandidate._tcpSet;
+          const ports = isUdpTuple ? customCandidate.udpPorts : customCandidate.tcpPorts;
+          return set ? set.has(port) : (ports || []).includes(port);
+        })) ? customCandidate : null;
         // Try ICMP/CODE/TYPE label matching if not directly found
         const icmpMatch = (!knownPredef && !customMatch) ? findIcmpService(svc, customServices) : null;
 
@@ -1069,7 +1094,7 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
         // Skip port-notation labels (e.g. "TCP/853") — they use the port-based fallback path
         const isPortNotationLabel = /^(TCP|UDP)\/\d+$/i.test(svc);
         const fuzzyMatch = (!knownPredef && !customMatch && !icmpMatch && !isPortNotationLabel)
-          ? findServiceByName(svc, p.ports, protoLabel, customServices)
+          ? (observedProtoLabel ? findServiceByName(svc, observedPorts, observedProtoLabel, customServices) : null)
           : null;
 
         // Fallback: if name-based lookup failed, try matching by port against custom services
@@ -1080,16 +1105,18 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
           if (pnm) {
             const m = findService(parseInt(pnm[2], 10), pnm[1], customServices, { maxPortCount: 100 });
             if (m.found) portFallback = m;
-          } else if (p.ports?.length > 0) {
-            // Named service (e.g. "NETBIOS-RPC"): try all observed ports, accept only if
-            // all matches resolve to the same service (unambiguous single candidate)
+          } else if (relevantTuples.length > 0) {
+            // Chaque couple protocole/port doit résoudre vers le même objet FortiGate.
             const candidates = [];
-            for (const port of p.ports) {
-              const m = findService(port, protoLabel, customServices, { maxPortCount: 5 });
+            for (const tuple of relevantTuples) {
+              if (!tuple.port) continue;
+              const m = findService(tuple.port, tupleProtoLabel(tuple.proto), customServices, { maxPortCount: 5 });
               if (m.found) candidates.push(m);
             }
             const uniqNames = [...new Set(candidates.map(m => m.name))];
-            if (uniqNames.length === 1) portFallback = candidates[0];
+            if (candidates.length === relevantTuples.filter(t => t.port).length && uniqNames.length === 1) {
+              portFallback = candidates[0];
+            }
           }
         }
 
@@ -1108,16 +1135,16 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
             const udp = cs.udpPorts.slice(0, 8).join(', ');
             portHint = [tcp && `TCP: ${tcp}`, udp && `UDP: ${udp}`].filter(Boolean).join(' / ');
           } else if (portFallback) {
-            portHint = `${protoLabel}: ${p.ports[0]} (observé)`;
+            portHint = `${observedProtoLabel || protoLabel}: ${observedPorts[0]} (observé)`;
           }
         } else if (fuzzyMatch) {
           portHint = fuzzyMatch.portHint || '';
         } else if (knownPredef) {
           const entries = Object.entries(PREDEFINED).filter(([, e]) => e.name === svc);
           portHint = entries.map(([port, e]) => `${e.proto === 'both' ? 'TCP+UDP' : e.proto.toUpperCase()}: ${port}`).join(', ');
-        } else if (p.ports?.length === 1) {
-          // Only show observed port when there's exactly one — otherwise it's ambiguous
-          portHint = `${protoLabel}: ${p.ports[0]} (observé)`;
+        } else if (observedPorts.length === 1 && observedProtoLabels.length === 1) {
+          // Only show an observed tuple when it is unambiguous.
+          portHint = `${observedProtoLabel}: ${observedPorts[0]} (observé)`;
         }
 
         const found = knownPredef || !!customMatch || !!icmpMatch || !!fuzzyMatch || !!portFallback;
@@ -1146,19 +1173,23 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
     serviceItems.length = 0;
     deduped.forEach(i => serviceItems.push(i));
 
-    // Fallback sur les ports bruts si aucun service nommé reconnu (ou tous ISDB)
-    if (serviceItems.length === 0 && p.ports?.length) {
-      for (const port of p.ports) {
-        const match = findService(port, protoLabel, customServices);
+    // Fallback sur chaque tuple protocole/port, sans appliquer le premier protocole à tous les ports.
+    if (serviceItems.length === 0) {
+      const rawPairs = observedTuples.length
+        ? observedTuples.filter(t => t.port).map(t => ({ port: Number(t.port), proto: tupleProtoLabel(t.proto) }))
+        : (p.ports || []).map(port => ({ port: Number(port), proto: protoLabel }));
+      const uniquePairs = [...new Map(rawPairs.map(pair => [`${pair.proto}|${pair.port}`, pair])).values()];
+      for (const { port, proto } of uniquePairs) {
+        const match = findService(port, proto, customServices);
         serviceItems.push({
-          label: `${port}/${protoLabel}`,
+          label: `${port}/${proto}`,
           port,
-          proto: protoLabel,
-          portHint: `${protoLabel}: ${port}`,
+          proto,
+          portHint: `${proto}: ${port}`,
           found: match.found,
           name:  match.found ? match.name : null,
           source: match.source || null,
-          suggestedName: `FF_SVC_${port}_${protoLabel}`,
+          suggestedName: `FF_SVC_${port}_${proto}`,
         });
       }
     }
