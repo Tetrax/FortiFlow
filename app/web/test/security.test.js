@@ -6,7 +6,7 @@ const { Readable } = require('node:stream');
 
 const { parseStream, normalizeDecision } = require('../lib/parser');
 const { buildAnalysis, flowDecision, consolidatePolicies } = require('../lib/analyzer');
-const { parseFortiConfig, generateConfig, preflightValidation } = require('../lib/forticonfig');
+const { parseFortiConfig, analyzePolicies, generateConfig, preflightValidation } = require('../lib/forticonfig');
 
 function aggregate(overrides = {}) {
   return {
@@ -277,4 +277,51 @@ test('les flux IPv6 non pris en charge sont comptés explicitement', async () =>
   assert.equal(result.skipped, 1);
   assert.equal(result.skipReasons.ipv6, 1);
   assert.equal(result.skipReasons.invalidFlow, 0);
+});
+
+
+test('un service TCP+UDP doit couvrir chaque tuple observé', () => {
+  const policy = {
+    srcSubnet: '10.0.0.0/24',
+    flowSrcintf: 'lan',
+    dstTarget: '10.0.1.0/24',
+    dstType: 'private',
+    services: ['APPDNS'],
+    ports: [53],
+    protos: ['TCP', 'UDP'],
+    serviceTuples: [
+      { proto: '6', port: '53', service: 'APPDNS', sessions: 1 },
+      { proto: '17', port: '53', service: 'APPDNS', sessions: 1 },
+    ],
+  };
+  const config = (customServices) => ({
+    addresses: {},
+    customServices,
+    interfaces: {
+      lan: { name: 'lan', cidr: '10.0.0.1/24' },
+      servers: { name: 'servers', cidr: '10.0.1.1/24' },
+    },
+    zones: {},
+    fullRoutes: [],
+    staticRoutes: [],
+    sdwanEnabled: false,
+    sdwanMembers: [],
+  });
+  const both = {
+    APPDNS: {
+      proto: 'TCP/UDP/SCTP',
+      tcpPorts: [53], udpPorts: [53],
+      _tcpSet: new Set([53]), _udpSet: new Set([53]),
+    },
+  };
+  const tcpOnly = {
+    APPDNS: {
+      proto: 'TCP/UDP/SCTP',
+      tcpPorts: [53], udpPorts: [],
+      _tcpSet: new Set([53]), _udpSet: new Set(),
+    },
+  };
+
+  assert.equal(analyzePolicies([policy], config(both))[0].analysis.services[0].found, true);
+  assert.equal(analyzePolicies([policy], config(tcpOnly))[0].analysis.services[0].found, false);
 });
