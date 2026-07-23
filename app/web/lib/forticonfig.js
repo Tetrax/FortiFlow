@@ -333,6 +333,24 @@ function parseFortiConfig(text, selectedVdom = null) {
     'firewall ssl-ssh-profile',
     'firewall profile-group',
   ]);
+  // En multi-VDOM, les interfaces résident généralement dans la configuration
+  // globale avec "set vdom". Les rattacher explicitement au VDOM actif.
+  if (vdomList.length > 0) {
+    const globalInterfaces = extractSection(lines, 'system interface');
+    const scopedInterfaces = {};
+    Object.defineProperty(scopedInterfaces, '__order', { value: [], enumerable: false });
+    for (const name of (globalInterfaces.__order || Object.keys(globalInterfaces))) {
+      const props = globalInterfaces[name];
+      const ifaceVdom = String(props.vdom || '').replace(/^"|"$/g, '');
+      if (ifaceVdom === activeVdom) {
+        scopedInterfaces[name] = props;
+        scopedInterfaces.__order.push(name);
+      }
+    }
+    // Ne remplacer que si la section globale a effectivement fourni le scope attendu.
+    if (scopedInterfaces.__order.length > 0) _sections['system interface'] = scopedInterfaces;
+  }
+
   const rawAddresses  = _sections['firewall address'];
   const rawCustomSvcs = _sections['firewall service custom'];
   const rawInterfaces = _sections['system interface'];
@@ -581,6 +599,7 @@ function parseStaticRoutes(rawRoutesOrLines) {
   const routes = [];
 
   for (const [, props] of Object.entries(rawRoutes)) {
+    if (String(props.status || 'enable').replace(/^"|"$/g, '') === 'disable') continue;
     const dst    = (props.dst      || '').trim();
     const device = (props.device   || props.interface || '').trim().replace(/^"|"$/g, '');
     if (!device || !dst) continue;
@@ -598,10 +617,11 @@ function parseStaticRoutes(rawRoutesOrLines) {
 
     routes.push({
       dst:      cidr,
-      gateway:  (props.gateway || '').trim(),
+      gateway:  (props.gateway || '').trim().replace(/^"|"$/g, ''),
       device,
       distance: parseInt(props.distance || '10', 10),
       priority: parseInt(props.priority || '0',  10),
+      source:   'static',
     });
   }
 
@@ -613,7 +633,10 @@ function sortRoutes(routes) {
   routes.sort((a, b) => {
     const aLen = parseInt(a.dst.split('/')[1] || '0', 10);
     const bLen = parseInt(b.dst.split('/')[1] || '0', 10);
-    return bLen !== aLen ? bLen - aLen : a.distance - b.distance;
+    if (bLen !== aLen) return bLen - aLen;
+    const distanceDiff = (a.distance ?? Number.MAX_SAFE_INTEGER) - (b.distance ?? Number.MAX_SAFE_INTEGER);
+    if (distanceDiff !== 0) return distanceDiff;
+    return (a.priority ?? 0) - (b.priority ?? 0);
   });
 }
 
@@ -691,8 +714,8 @@ function parseFullRoutingTable(text) {
     }
   }
 
+  sortRoutes(routes);
   return routes;
-
 }
 
 // Keep protocol-specific parsers as thin wrappers (backward compat)
@@ -709,26 +732,34 @@ function parseBgpNetworkTable(text) {
 // skipDefault=true pour les recherches srcintf (pas de fallback 0.0.0.0/0)
 function findInterfaceByRoute(dstCidr, routes, skipDefault) {
   if (!routes || routes.length === 0) return null;
-  let targetIp = (dstCidr || '').split('/')[0];
+  const targetIp = (dstCidr || '').split('/')[0];
   let targetInt;
   try { targetInt = ip2int(targetIp); } catch { return null; }
 
-  // Passe 1 : routes spécifiques (préfixe > 0)
+  // Collecter toutes les routes correspondantes, puis appliquer la sélection
+  // FortiGate. Si plusieurs interfaces restent ex æquo (ECMP), ne pas en choisir
+  // une arbitrairement : le moteur supérieur devra demander une décision.
+  const matches = [];
   for (const route of routes) {
-    if (route.dst === '0.0.0.0/0') continue;
-    const [routeIp, pfxStr] = route.dst.split('/');
-    const pfx  = parseInt(pfxStr, 10);
-    if (pfx === 0) continue; // /0 handled in pass 2 (default route)
-    const mask = (0xFFFFFFFF << (32 - pfx)) >>> 0;
+    const [routeIp, pfxStr] = String(route.dst || '').split('/');
+    const pfx = parseInt(pfxStr || '0', 10);
+    if (skipDefault && pfx === 0) continue;
+    const mask = pfx === 0 ? 0 : (0xFFFFFFFF << (32 - pfx)) >>> 0;
     try {
-      if ((ip2int(routeIp) & mask) === (targetInt & mask)) return route.device;
-    } catch { continue; }
+      if (pfx === 0 || (ip2int(routeIp) & mask) === (targetInt & mask)) matches.push(route);
+    } catch { /* route invalide ignorée */ }
   }
-
-  // Passe 2 : route par défaut (sauf pour srcintf)
-  if (skipDefault) return null;
-  const def = routes.find(r => r.dst === '0.0.0.0/0');
-  return def?.device || null;
+  if (!matches.length) return null;
+  sortRoutes(matches);
+  const best = matches[0];
+  const bestPrefix = parseInt(best.dst.split('/')[1] || '0', 10);
+  const equivalent = matches.filter(route =>
+    parseInt(route.dst.split('/')[1] || '0', 10) === bestPrefix &&
+    (route.distance ?? Number.MAX_SAFE_INTEGER) === (best.distance ?? Number.MAX_SAFE_INTEGER) &&
+    (route.priority ?? 0) === (best.priority ?? 0)
+  );
+  const devices = [...new Set(equivalent.map(route => route.device).filter(Boolean))];
+  return devices.length === 1 ? devices[0] : null;
 }
 
 // Parse SDWAN members from raw text (handles nested config)
