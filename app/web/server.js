@@ -16,6 +16,8 @@ const { parseFortiConfig, analyzePolicies,
         parseFullRoutingTable, parseOspfRoutingTable, parseBgpNetworkTable,
         sortRoutes, formatExistingPolicies }             = require('./lib/forticonfig');
 const { buildHostPairCoverage }                          = require('./lib/coverage');
+const { getCaptureDeploymentBlockers,
+        shouldBlockCaptureGeneration }                    = require('./lib/deploy-safety');
 
 const app   = express();
 const PORT  = process.env.PORT || 3737;
@@ -1606,19 +1608,14 @@ app.post('/api/deploy/generate', (req, res) => {
   }
 
   try {
-    const unsupportedIpv6 = s.data?.meta?.skipReasons?.ipv6 || 0;
-    const unknownSessions = s.data?.stats?.unknownSessions || 0;
-    if (unsupportedIpv6 > 0 || unknownSessions > 0) {
+    const o = opts || {};
+    const deploymentBlockers = getCaptureDeploymentBlockers(s.data);
+    if (shouldBlockCaptureGeneration(s.data, o)) {
       return res.status(422).json({
         error: 'Génération refusée : la capture contient des flux non classifiés',
-        details: {
-          unsupportedIpv6,
-          unknownActionSessions: unknownSessions,
-        },
+        details: deploymentBlockers,
       });
     }
-
-    const o = opts || {};
 
     // Apply user WAN toggles — build a patched config without mutating the session
     let configToUse = s.fortiConfig;
@@ -1633,13 +1630,15 @@ app.post('/api/deploy/generate', (req, res) => {
     }
 
     // SD-WAN zone takes priority; if none, preferredWanIntf falls to null (detectWanCandidates handles it)
-    // Contrôle le plan reçu avant toute ré-analyse afin de bloquer un périmètre élargi ou non prouvé.
-    const requestedPreflight = preflightValidation(selectedPolicies, configToUse, s.data?.flows || []);
-    if (!requestedPreflight.ok) {
-      return res.status(422).json({
-        error: 'Génération refusée : le plan demandé dépasse les flux observés',
-        preflight: requestedPreflight,
-      });
+    // Les contrôles bloquants s'appliquent à la CLI finale, pas à la préparation de la matrice.
+    if (!o.analysisOnly) {
+      const requestedPreflight = preflightValidation(selectedPolicies, configToUse, s.data?.flows || []);
+      if (!requestedPreflight.ok) {
+        return res.status(422).json({
+          error: 'Génération refusée : le plan demandé dépasse les flux observés',
+          preflight: requestedPreflight,
+        });
+      }
     }
 
     const analyzed = analyzePolicies(selectedPolicies, configToUse, o.preferredWanIntf || null);
@@ -1708,15 +1707,16 @@ app.post('/api/deploy/generate', (req, res) => {
       });
     }
 
-    // La route de génération applique toujours le preflight côté serveur.
-    // L'appel séparé depuis l'UI reste utile pour l'affichage, mais ne constitue
-    // jamais une barrière de sécurité suffisante.
-    const preflight = preflightValidation(analyzed, configToUse, s.data?.flows || []);
-    if (!preflight.ok) {
-      return res.status(422).json({
-        error: 'Génération refusée par le contrôle preflight',
-        preflight,
-      });
+    // La route de génération applique toujours le preflight côté serveur pour
+    // une CLI finale. Le mode analysisOnly ne produit aucune configuration.
+    if (!o.analysisOnly) {
+      const preflight = preflightValidation(analyzed, configToUse, s.data?.flows || []);
+      if (!preflight.ok) {
+        return res.status(422).json({
+          error: 'Génération refusée par le contrôle preflight',
+          preflight,
+        });
+      }
     }
 
     const genOpts = {
@@ -1731,12 +1731,12 @@ app.post('/api/deploy/generate', (req, res) => {
       namingPrefix:      o.namingPrefix || 'FF',   // #5: préfixe de nommage configurable
       target:            o.target === 'fmg-script' ? 'fmg-script' : 'fortigate',  // #9
     };
-    const cli = generateConfig(analyzed, genOpts);
+    const cli = o.analysisOnly ? '' : generateConfig(analyzed, genOpts);
 
     // Validation against existing policies
     const warnings = validateAgainstExisting(analyzed, s.fortiConfig.existingPolicies || []);
 
-    const download = req.query.download === '1';
+    const download = !o.analysisOnly && req.query.download === '1';
     if (download) {
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename="fortiflow_deploy_${tsNow()}.conf"`);
@@ -1803,7 +1803,7 @@ app.post('/api/deploy/generate', (req, res) => {
       const existingPoliciesCli = formatExistingPolicies(s.fortiConfig?.existingPolicies || []);
       // #3: couverture conservatrice du trafic vs policies existantes (par paire src→dst)
       const { hostPairCoverage, hasConfig } = buildHostPairCoverage(s.data?.flows || [], s.fortiConfig || {});
-      res.json({ cli, analyzed, addrGroups: s.fortiConfig.addressGroups || {}, warnings, resolvedHosts, existingPoliciesCli, hostPairServices, hostPairCoverage, coverageAvailable: hasConfig });
+      res.json({ cli, analyzed, addrGroups: s.fortiConfig.addressGroups || {}, warnings, resolvedHosts, existingPoliciesCli, hostPairServices, hostPairCoverage, coverageAvailable: hasConfig, deploymentBlockers });
     }
   } catch (err) {
     res.status(500).json({ error: err.message });
