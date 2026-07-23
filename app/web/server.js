@@ -1658,6 +1658,17 @@ app.post('/api/deploy/generate', (req, res) => {
       }
     }
 
+    // La route de génération applique toujours le preflight côté serveur.
+    // L'appel séparé depuis l'UI reste utile pour l'affichage, mais ne constitue
+    // jamais une barrière de sécurité suffisante.
+    const preflight = preflightValidation(analyzed, configToUse);
+    if (!preflight.ok) {
+      return res.status(422).json({
+        error: 'Génération refusée par le contrôle preflight',
+        preflight,
+      });
+    }
+
     const genOpts = {
       natEnabled:        o.nat     || false,
       actionVerb:        o.action  || 'accept',
