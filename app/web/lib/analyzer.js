@@ -57,6 +57,38 @@ function protoName(proto) {
   return PROTO_MAP[String(proto)] || (proto ? `PROTO${proto}` : '');
 }
 
+const ALLOW_ACTIONS = new Set([
+  'accept', 'allow', 'allowed', 'pass', 'close', 'timeout',
+  'client-rst', 'server-rst', 'ip-conn',
+]);
+const DENY_ACTIONS = new Set([
+  'deny', 'denied', 'drop', 'dropped', 'block', 'blocked',
+  'reject', 'rejected', 'violation',
+]);
+
+// Compatibilité avec les imports déjà présents en mémoire : les nouveaux parsers
+// fournissent decision, les anciens flux sont normalisés ici avec le même mode fail-closed.
+function flowDecision(flow) {
+  if (flow && (flow.decision === 'allow' || flow.decision === 'deny')) return flow.decision;
+  const action = String(flow?.action || '').toLowerCase().trim();
+  if (ALLOW_ACTIONS.has(action)) return 'allow';
+  if (DENY_ACTIONS.has(action)) return 'deny';
+  return 'unknown';
+}
+
+function flowScope(flow) {
+  return {
+    devid: String(flow?.devid || ''),
+    devname: String(flow?.devname || ''),
+    vdom: String(flow?.vdom || ''),
+  };
+}
+
+function flowScopeKey(flow) {
+  const scope = flowScope(flow);
+  return `${scope.devid || scope.devname || 'unknown-device'}::${scope.vdom || 'root'}`;
+}
+
 // ─── Main analysis ────────────────────────────────────────────────────────────
 
 // Single-pass builder: computes all 4 subnet-group variants + port stats in
@@ -79,7 +111,7 @@ function buildAllSubnetGroupsAndPorts(flows, topN = 25, knownSubnets = []) {
     if (!srcSubnet) return;
     const key = groupKey !== undefined ? groupKey : srcSubnet;
     if (!groups[key]) {
-      groups[key] = { subnet: srcSubnet, srcIPs: new Set(), dsts: {} };
+      groups[key] = { subnet: srcSubnet, srcIPs: new Set(), dsts: {}, scope: flowScope(flow) };
     }
     const sg = groups[key];
     sg.srcIPs.add(flow.srcip);
@@ -87,12 +119,22 @@ function buildAllSubnetGroupsAndPorts(flows, topN = 25, knownSubnets = []) {
     const dstType = isPrivate(flow.dstip) ? 'private' : 'public';
     if (!dstKey) return;
     if (!sg.dsts[dstKey]) {
-      sg.dsts[dstKey] = { key: dstKey, type: dstType, ports: new Set(), protos: new Set(), services: new Set(), policyIds: new Set(), dstIPs: new Set(), srcIPs: new Set(), count: 0, sentBytes: 0, rcvdBytes: 0, noRcvdFlows: 0, noRcvdSrcIPs: new Set(), firstTs: null, lastTs: null, days: new Set() };
+      sg.dsts[dstKey] = { key: dstKey, type: dstType, ports: new Set(), protos: new Set(), services: new Set(), serviceTuples: new Map(), policyIds: new Set(), dstIPs: new Set(), srcIPs: new Set(), count: 0, sentBytes: 0, rcvdBytes: 0, noRcvdFlows: 0, noRcvdSrcIPs: new Set(), firstTs: null, lastTs: null, days: new Set() };
     }
     const dst = sg.dsts[dstKey];
     if (flow.dstport)  dst.ports.add(flow.dstport);
     if (flow.proto)    dst.protos.add(protoName(flow.proto));
     if (flow.service)  dst.services.add(flow.service.toUpperCase());
+    const tupleKey = `${String(flow.proto || '')}|${String(flow.dstport || '')}|${String(flow.service || '').toUpperCase()}`;
+    if (!dst.serviceTuples.has(tupleKey)) {
+      dst.serviceTuples.set(tupleKey, {
+        proto: String(flow.proto || ''),
+        port: String(flow.dstport || ''),
+        service: String(flow.service || '').toUpperCase(),
+        sessions: 0,
+      });
+    }
+    dst.serviceTuples.get(tupleKey).sessions += flow.count;
     if (flow.policyid) dst.policyIds.add(String(flow.policyid));
     if (flow.srcip)    dst.srcIPs.add(flow.srcip);
     if (flow.dstip)    dst.dstIPs.add(flow.dstip);
@@ -107,20 +149,22 @@ function buildAllSubnetGroupsAndPorts(flows, topN = 25, knownSubnets = []) {
   }
 
   for (const f of flows) {
-    const isDeny = f.action === 'deny' || f.action === 'drop';
-    const isAccept = f.action === 'accept';
+    const decision = flowDecision(f);
+    const isDeny   = decision === 'deny';
+    const isAccept = decision === 'allow';
 
     addToGroup(all, f);
-    if (!isDeny) {
+    if (isAccept) {
       addToGroup(allowed, f);
-      // Also group by (srcSubnet|srcintf) when srcintf is present — keeps per-interface flows separate
+      // Isoler les suggestions par équipement/VDOM et par interface observée.
       const srcSubnetKey = isPrivate(f.srcip) ? subnetOf(f.srcip) : null;
       if (srcSubnetKey) {
-        addToGroup(allowedByIntf, f, f.srcintf ? `${srcSubnetKey}|${f.srcintf}` : srcSubnetKey);
+        const intfKey = f.srcintf ? `${srcSubnetKey}|${f.srcintf}` : srcSubnetKey;
+        addToGroup(allowedByIntf, f, `${flowScopeKey(f)}||${intfKey}`);
       }
     }
-    if (isAccept)   addToGroup(accept, f);
-    if (isDeny)     addToGroup(deny, f);
+    if (isAccept) addToGroup(accept, f);
+    if (isDeny)   addToGroup(deny, f);
 
     // Port stats
     const port = parseInt(f.dstport, 10);
@@ -170,9 +214,11 @@ function buildAnalysis(flowInput, knownSubnets = []) {
   const srcIPs = new Set();
   const dstIPs = new Set();
   let totalSessions  = 0;
-  let acceptSessions = 0;
-  let denySessions   = 0;
-  let totalBytes     = 0;
+  let acceptSessions  = 0;
+  let denySessions    = 0;
+  let unknownSessions = 0;
+  let totalBytes      = 0;
+  const scopes = new Map();
   // #1: fenêtre d'observation globale
   let captureStartTs = null;
   let captureEndTs   = null;
@@ -183,11 +229,17 @@ function buildAnalysis(flowInput, knownSubnets = []) {
     dstIPs.add(f.dstip);
     totalSessions += f.count;
     totalBytes    += f.sentBytes + f.rcvdBytes;
-    if (f.action === 'accept') {
+    const decision = flowDecision(f);
+    if (decision === 'allow') {
       acceptSessions += f.count;
-    } else if (f.action === 'deny' || f.action === 'drop') {
+    } else if (decision === 'deny') {
       denySessions += f.count;
+    } else {
+      unknownSessions += f.count;
     }
+    const scopeKey = flowScopeKey(f);
+    if (!scopes.has(scopeKey)) scopes.set(scopeKey, { key: scopeKey, ...flowScope(f), sessions: 0 });
+    scopes.get(scopeKey).sessions += f.count;
     if (f.firstTs != null && (captureStartTs == null || f.firstTs < captureStartTs)) captureStartTs = f.firstTs;
     if (f.lastTs  != null && (captureEndTs   == null || f.lastTs  > captureEndTs))   captureEndTs   = f.lastTs;
     if (f.days) for (const d of f.days) captureDaySet.add(d);
@@ -291,6 +343,7 @@ function buildAnalysis(flowInput, knownSubnets = []) {
       srcSubnets:    srcSubnetsSet.size,
       acceptSessions,
       denySessions,
+      unknownSessions,
       deniedPolicyGroups,
       totalBytes,
       // #1: fenêtre d'observation globale (null si logs sans timestamp)
@@ -305,6 +358,7 @@ function buildAnalysis(flowInput, knownSubnets = []) {
     portStats,
     matrix,
     denyMatrix,
+    scopes: [...scopes.values()].sort((a, b) => b.sessions - a.sessions),
   };
 }
 
@@ -331,15 +385,20 @@ function buildPolicies(subnetGroups, captureCtx = {}) {
   let id = 1;
 
   for (const [groupKey, sg] of Object.entries(subnetGroups)) {
-    // Support composite keys: "10.1.6.0/24|vlan850" (srcintf-keyed) or plain "10.1.6.0/24"
-    const pipeIdx = groupKey.indexOf('|');
-    const srcSubnet    = pipeIdx >= 0 ? groupKey.slice(0, pipeIdx) : groupKey;
-    const flowSrcintf  = pipeIdx >= 0 ? groupKey.slice(pipeIdx + 1) : null;
+    // Clé : "device::vdom||10.1.6.0/24|vlan850". Le préfixe de scope
+    // empêche toute fusion silencieuse entre équipements ou VDOM.
+    const scopeSep = groupKey.indexOf('||');
+    const scopedGroupKey = scopeSep >= 0 ? groupKey.slice(scopeSep + 2) : groupKey;
+    const pipeIdx = scopedGroupKey.indexOf('|');
+    const srcSubnet   = pipeIdx >= 0 ? scopedGroupKey.slice(0, pipeIdx) : scopedGroupKey;
+    const flowSrcintf = pipeIdx >= 0 ? scopedGroupKey.slice(pipeIdx + 1) : null;
 
     for (const [dstKey, dst] of Object.entries(sg.dsts)) {
       const services  = [...dst.services].sort();
       const ports     = [...dst.ports].map(Number).sort((a, b) => a - b);
       const protos    = [...dst.protos];
+      const serviceTuples = [...dst.serviceTuples.values()]
+        .sort((a, b) => b.sessions - a.sessions || a.proto.localeCompare(b.proto) || Number(a.port || 0) - Number(b.port || 0));
       const daysObserved = dst.days ? dst.days.size : 0;
 
       // Human-readable service description
@@ -358,11 +417,13 @@ function buildPolicies(subnetGroups, captureCtx = {}) {
         id: id++,
         srcSubnet,
         flowSrcintf,   // interface observed in logs — used by analyzePolicies for srcintf detection
+        scope:        sg.scope,
         dstTarget:   dstKey,
         dstType:     dst.type,
         services,
-        ports:       ports.slice(0, 20),
+        ports,
         protos,
+        serviceTuples,
         serviceDesc,
         policyIds:   [...dst.policyIds].sort((a, b) => Number(a) - Number(b)),
         dstIPs:      dst.type === 'public' ? [dstKey] : [],
@@ -534,4 +595,4 @@ function consolidatePolicies(rawPolicies) {
     });
 }
 
-module.exports = { isPrivate, ipType, getSubnet24, protoName, buildAnalysis, consolidatePolicies };
+module.exports = { isPrivate, ipType, getSubnet24, protoName, flowDecision, buildAnalysis, consolidatePolicies };
