@@ -287,11 +287,11 @@ test('un service TCP+UDP doit couvrir chaque tuple observé', () => {
     dstTarget: '10.0.1.0/24',
     dstType: 'private',
     services: ['APPDNS'],
-    ports: [53],
+    ports: [1053],
     protos: ['TCP', 'UDP'],
     serviceTuples: [
-      { proto: '6', port: '53', service: 'APPDNS', sessions: 1 },
-      { proto: '17', port: '53', service: 'APPDNS', sessions: 1 },
+      { proto: '6', port: '1053', service: 'APPDNS', sessions: 1 },
+      { proto: '17', port: '1053', service: 'APPDNS', sessions: 1 },
     ],
   };
   const config = (customServices) => ({
@@ -310,15 +310,15 @@ test('un service TCP+UDP doit couvrir chaque tuple observé', () => {
   const both = {
     APPDNS: {
       proto: 'TCP/UDP/SCTP',
-      tcpPorts: [53], udpPorts: [53],
-      _tcpSet: new Set([53]), _udpSet: new Set([53]),
+      tcpPorts: [1053], udpPorts: [1053],
+      _tcpSet: new Set([1053]), _udpSet: new Set([1053]),
     },
   };
   const tcpOnly = {
     APPDNS: {
       proto: 'TCP/UDP/SCTP',
-      tcpPorts: [53], udpPorts: [],
-      _tcpSet: new Set([53]), _udpSet: new Set(),
+      tcpPorts: [1053], udpPorts: [],
+      _tcpSet: new Set([1053]), _udpSet: new Set(),
     },
   };
 
