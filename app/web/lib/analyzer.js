@@ -519,6 +519,11 @@ function buildMatrix(subnetGroups) {
 //  2. grouper par (sources triées + empreinte service) → fusionner les destinations
 
 function serviceFingerprint(p) {
+  if (p.serviceTuples && p.serviceTuples.length > 0) {
+    return 'U:' + p.serviceTuples
+      .map(t => `${t.proto || ''}/${t.port || ''}/${t.service || ''}`)
+      .sort().join(',');
+  }
   if (p.services && p.services.length > 0)
     return 'S:' + [...p.services].sort().join(',');
   if (p.ports && p.ports.length > 0) {
@@ -536,12 +541,14 @@ function consolidatePolicies(rawPolicies) {
   // ── Passe 1 : (dstTarget + fp) → regrouper les srcSubnets ──
   const phase1 = new Map();
   for (const p of rawPolicies) {
-    const fp  = serviceFingerprint(p);
-    const key = `${p.dstTarget}||${fp}`;
+    const fp = serviceFingerprint(p);
+    const scopeKey = `${p.scope?.devid || p.scope?.devname || ''}::${p.scope?.vdom || ''}`;
+    const key = `${scopeKey}||${p.dstTarget}||${fp}`;
     if (!phase1.has(key)) {
       phase1.set(key, {
         srcs: new Set(), dst: p.dstTarget, dstType: p.dstType,
-        fp, services: p.services, ports: p.ports, protos: p.protos,
+        scope: p.scope || {}, fp, services: p.services, ports: p.ports, protos: p.protos,
+        serviceTuples: p.serviceTuples || [],
         serviceDesc: p.serviceDesc, sessions: 0, sentBytes: 0, rcvdBytes: 0, noRcvdFlows: 0, noRcvdSrcHosts: [],
       });
     }
@@ -558,11 +565,13 @@ function consolidatePolicies(rawPolicies) {
   const phase2 = new Map();
   for (const e of phase1.values()) {
     const srcsKey = [...e.srcs].sort().join('|');
-    const key     = `${srcsKey}||${e.fp}`;
+    const scopeKey = `${e.scope?.devid || e.scope?.devname || ''}::${e.scope?.vdom || ''}`;
+    const key = `${scopeKey}||${srcsKey}||${e.fp}`;
     if (!phase2.has(key)) {
       phase2.set(key, {
         srcSubnets: [...e.srcs].sort(), dstTargets: [], dstTypes: {},
-        fp: e.fp, services: e.services, ports: e.ports, protos: e.protos,
+        scope: e.scope, fp: e.fp, services: e.services, ports: e.ports, protos: e.protos,
+        serviceTuples: e.serviceTuples,
         serviceDesc: e.serviceDesc, sessions: 0, sentBytes: 0, rcvdBytes: 0, noRcvdFlows: 0, noRcvdSrcHosts: [],
       });
     }
@@ -590,9 +599,11 @@ function consolidatePolicies(rawPolicies) {
         dstTargets,
         dstTypes:     g.dstTypes,
         dstTypeSummary,
+        scope:        g.scope,
         services:     g.services,
         ports:        g.ports,
         protos:       g.protos,
+        serviceTuples: g.serviceTuples,
         serviceDesc:  g.serviceDesc,
         sessions:       g.sessions,
         sentBytes:      g.sentBytes,
