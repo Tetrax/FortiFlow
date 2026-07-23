@@ -4,10 +4,12 @@ function getCaptureDeploymentBlockers(sessionData) {
   const data = sessionData || {};
   const unsupportedIpv6 = Number(data.meta?.skipReasons?.ipv6 || 0);
   const unknownActionSessions = Number(data.stats?.unknownSessions || 0);
-  const hasExcludedTraffic = unsupportedIpv6 > 0 || unknownActionSessions > 0;
+  const failedConnectionSessions = Number(data.stats?.failedSessions || 0);
+  const hasExcludedTraffic = unsupportedIpv6 > 0 || unknownActionSessions > 0 || failedConnectionSessions > 0;
   return {
     unsupportedIpv6,
     unknownActionSessions,
+    failedConnectionSessions,
     hasExcludedTraffic,
     // Ces flux sont exclus des suggestions. Ils peuvent rendre la matrice
     // sous-permissive, mais ne peuvent pas élargir une policy sélectionnée.
