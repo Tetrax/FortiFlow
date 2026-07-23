@@ -2238,3 +2238,50 @@ td:has([data-tip]) { overflow: visible; }
   }
 }
 
+/* ─── Deploy workspace — utilisation maximale de la fenêtre ───────────────── */
+#content > .deploy-wrap {
+  margin: -36px -40px 0;
+}
+
+.deploy-wrap {
+  gap: 10px;
+  padding: 0 6px 16px;
+}
+
+.wizard-progress {
+  padding: 8px 18px 10px;
+  margin-bottom: 0;
+}
+
+#deploy-step4 .deploy-step-body {
+  padding: 14px 12px 18px;
+}
+
+#deploy-step4 .seg-planner {
+  margin-bottom: 14px;
+  padding: 15px;
+}
+
+#deploy-step4 .deploy-policy-scroll {
+  max-height: calc(100vh - 330px);
+  min-height: 380px;
+}
+
+@media (max-width: 900px) {
+  #content > .deploy-wrap {
+    margin: -36px -40px 0;
+  }
+
+  .deploy-wrap {
+    padding-inline: 4px;
+  }
+
+  #deploy-step4 .deploy-step-body {
+    padding: 10px 8px 14px;
+  }
+
+  .wizard-progress {
+    padding-inline: 10px;
+  }
+}
+
