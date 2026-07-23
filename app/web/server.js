@@ -1424,6 +1424,8 @@ app.post('/api/deploy/config-upload', upload.single('conffile'), async (req, res
       routes:           (fortiConfig.fullRoutes || fortiConfig.staticRoutes).length,
       bgp:              fortiConfig.hasBgp   || false,
       ospf:             fortiConfig.hasOspf  || false,
+      policyRoutes:     fortiConfig.hasPolicyRoutes || false,
+      nonDefaultVrf:    fortiConfig.hasNonDefaultVrf || false,
       existingPolicies: (fortiConfig.existingPolicies || []).length,
     });
   } catch (err) {
@@ -1480,6 +1482,8 @@ app.post('/api/deploy/config-vdom', express.json(), (req, res) => {
       routes:           (fortiConfig.fullRoutes || fortiConfig.staticRoutes).length,
       bgp:              fortiConfig.hasBgp   || false,
       ospf:             fortiConfig.hasOspf  || false,
+      policyRoutes:     fortiConfig.hasPolicyRoutes || false,
+      nonDefaultVrf:    fortiConfig.hasNonDefaultVrf || false,
       existingPolicies: (fortiConfig.existingPolicies || []).length,
     });
   } catch (err) {
