@@ -3493,7 +3493,8 @@ function populateDrawer(idx) {
     const dstAddrName = p._dstAddrName || a.dstAddr?.name || '';
     const dstFound = a.dstAddr?.found;
     const isWan = p._isWan || p.dstType === 'public';
-    const dstUseAll = p._dstUseAll !== undefined ? p._dstUseAll : isWan;
+    // Sécurité : une policy WAN reste ciblée tant que l'utilisateur n'a pas explicitement choisi "all".
+    const dstUseAll = p._dstUseAll === true;
     let dstHostsHtml = '';
     if (dstHosts.length > 0 && (dstMode === 'hosts' || (isWan && !dstUseAll))) {
       const dstFoundSet = new Set(p._dstHostsFound || []);
@@ -6494,11 +6495,10 @@ async function analyzeDeployPolicies() {
     // Initialize per-policy mode from _use32 flags
     p._srcMode = p._use32Src ? 'hosts' : 'subnet';
     p._dstMode = p._use32Dst ? 'hosts' : 'subnet';
-    // Auto "all" : si destination WAN avec beaucoup d'hôtes ou sous-réseaux → mode all par défaut
+    // Une destination WAN n'est jamais élargie automatiquement vers "all".
     const _isWanP = p._isWan || p.dstType === 'public';
     if (_isWanP && p._dstUseAll === undefined) {
-      const dstCount = p._isMultiDst ? (p._multiDstSubnets?.length || 0) : (p.dstHosts?.length || 0);
-      if (dstCount > 10) p._dstUseAll = true;
+      p._dstUseAll = false;
     }
   }
 
