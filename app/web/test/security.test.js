@@ -8,6 +8,7 @@ const { parseStream, normalizeDecision } = require('../lib/parser');
 const { buildAnalysis, flowDecision, consolidatePolicies } = require('../lib/analyzer');
 const { parseFortiConfig, analyzePolicies, generateConfig, preflightValidation } = require('../lib/forticonfig');
 const { buildPoliciesByPlan } = require('../public/segmentation-plan.js');
+const { getCaptureDeploymentBlockers, shouldBlockCaptureGeneration } = require('../lib/deploy-safety');
 
 function aggregate(overrides = {}) {
   return {
@@ -480,4 +481,20 @@ test('la chaîne plan → ré-analyse → CLI conserve une règle par service', 
   assert.ok(serviceLines.every(line => !line.includes('" "')));
   assert.ok(serviceLines.some(line => line.includes('"HTTPS"')));
   assert.ok(serviceLines.some(line => line.includes('"DNS"')));
+});
+
+
+test('les flux non classifiés n’empêchent pas l’analyse mais bloquent la CLI finale', () => {
+  const sessionData = {
+    meta: { skipReasons: { ipv6: 3 } },
+    stats: { unknownSessions: 7 },
+  };
+  assert.deepEqual(getCaptureDeploymentBlockers(sessionData), {
+    unsupportedIpv6: 3,
+    unknownActionSessions: 7,
+    blocked: true,
+  });
+  assert.equal(shouldBlockCaptureGeneration(sessionData, { analysisOnly: true }), false);
+  assert.equal(shouldBlockCaptureGeneration(sessionData, {}), true);
+  assert.equal(shouldBlockCaptureGeneration({}, {}), false);
 });
