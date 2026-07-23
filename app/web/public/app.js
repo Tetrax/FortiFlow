@@ -1642,6 +1642,10 @@ function clearCpSelection() {
 }
 window.clearCpSelection = clearCpSelection;
 
+function policyScopeKey(p) {
+  return `${p?.scope?.devid || p?.scope?.devname || ''}::${p?.scope?.vdom || ''}`;
+}
+
 function mergeConsilPolicies() {
   if (!_consilData) return;
   const checked = [...document.querySelectorAll('.cp-check:checked')];
@@ -1649,6 +1653,10 @@ function mergeConsilPolicies() {
 
   const indices  = checked.map(c => parseInt(c.dataset.idx, 10));
   const toMerge  = indices.map(i => _consilData.consolidated[i]);
+  if (new Set(toMerge.map(policyScopeKey)).size > 1) {
+    alert('Fusion refusée : les policies sélectionnées proviennent de plusieurs équipements ou VDOM.');
+    return;
+  }
 
   // Union de toutes les sources, destinations, services
   const srcSubnets = [...new Set(toMerge.flatMap(p => p.srcSubnets))].sort();
@@ -1678,6 +1686,7 @@ function mergeConsilPolicies() {
 
   const merged = {
     srcSubnets, dstTargets, dstTypes, dstTypeSummary,
+    scope: toMerge[0]?.scope || {},
     services, ports, protos, serviceDesc,
     sessions, sentBytes, rcvdBytes,
     rawCount, savedCount: rawCount - 1,
@@ -5071,11 +5080,11 @@ function mergeAnalyzedPolicies(policies, mode) {
   for (const p of policies) {
     const isPublic = p.dstType === 'public' || p.dstTarget === 'all';
     if (isPublic && internet) {
-      const k = p.srcSubnet;
+      const k = `${policyScopeKey(p)}||${p.srcSubnet}`;
       if (!internetGroups.has(k)) internetGroups.set(k, []);
       internetGroups.get(k).push(p);
     } else if (!isPublic && lan) {
-      const k = `${p.srcSubnet}|${p.dstTarget}`;
+      const k = `${policyScopeKey(p)}||${p.srcSubnet}|${p.dstTarget}`;
       if (!lanGroups.has(k)) lanGroups.set(k, []);
       lanGroups.get(k).push(p);
     }
@@ -5409,7 +5418,7 @@ function mergeByPolicyId(policies) {
   for (const p of policies) {
     const ids = p.policyIds || [];
     if (ids.length === 0) { ungrouped.push({ ...p }); continue; }
-    const key = ids[0];
+    const key = `${policyScopeKey(p)}||${ids[0]}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(p);
   }
@@ -5985,7 +5994,7 @@ function mergeByService(policies) {
     const svcKey = serviceSetKey(p);
     const src    = p._srcintf || p.analysis?.srcIface || '';
     const dst    = p._dstintf || p.analysis?.dstIface || '';
-    const key    = `${svcKey}||${src}||${dst}`;
+    const key    = `${policyScopeKey(p)}||${svcKey}||${src}||${dst}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(p);
   }
@@ -6141,7 +6150,8 @@ function mergeByDestination(policies) {
     const src    = p._srcintf || p.analysis?.srcIface || '';
     const dstI   = p._dstintf || p.analysis?.dstIface || '';
     const isWan  = p.dstType === 'public' || p.dstTarget === 'all' || p._isWan;
-    const key    = isWan ? `__wan__||${src}||${dstI}` : `${dst}||${src}||${dstI}`;
+    const scopeKey = policyScopeKey(p);
+    const key = isWan ? `${scopeKey}||__wan__||${src}||${dstI}` : `${scopeKey}||${dst}||${src}||${dstI}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(p);
   }
