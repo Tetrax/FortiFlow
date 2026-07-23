@@ -1700,6 +1700,25 @@ td:has([data-tip]) { overflow: visible; }
   color: var(--text2);
   font-size: 11px;
 }
+.seg-safety-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px 14px;
+  margin: 0 0 12px;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--warn) 55%, var(--border));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--warn) 10%, var(--bg3));
+  color: var(--text);
+  font-size: 11px;
+}
+.seg-safety-warning strong {
+  flex: 0 0 auto;
+  color: var(--warn);
+}
+.seg-safety-warning span {
+  color: var(--text2);
+}
 .seg-profile-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
