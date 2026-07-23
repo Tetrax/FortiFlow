@@ -21,6 +21,8 @@ La génération suit un modèle **fail closed** :
 - les couples protocole/port/service sont conservés sans troncature ;
 - une sélection de route ECMP ambiguë n'est pas résolue arbitrairement ;
 - les routes désactivées sont ignorées et l'ordre first-match des policies existantes est conservé ;
+- une configuration PBR ou VRF non par défaut bloque la génération tant que ce contexte n'est pas pris en charge ;
+- la présence d'IPv6 non analysé ou d'actions inconnues bloque la génération ;
 - le serveur exécute systématiquement le preflight avant toute génération CLI.
 
 Les réseaux RFC1918 sont internes par défaut. Un préfixe public porté par une interface LAN de la configuration sélectionnée est également classé comme interne.
