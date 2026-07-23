@@ -45,23 +45,27 @@ const HEADER_MAP = {
   // Source IP — variantes FortiAnalyzer / FortiGate / export manuel
   srcip: 'srcip', src_ip: 'srcip', source_ip: 'srcip',
   'source ip': 'srcip', 'src ip': 'srcip', sourceip: 'srcip',
-  'ip source': 'srcip', 'ip src': 'srcip',
+  'ip source': 'srcip', 'ip src': 'srcip', source: 'srcip',
+  'source address': 'srcip', 'source ip address': 'srcip',
+  'adresse source': 'srcip', 'adresse ip source': 'srcip',
 
   // Destination IP
   dstip: 'dstip', dst_ip: 'dstip', destination_ip: 'dstip',
   'destination ip': 'dstip', 'dst ip': 'dstip', destinationip: 'dstip',
-  'ip destination': 'dstip', 'ip dst': 'dstip',
+  'ip destination': 'dstip', 'ip dst': 'dstip', destination: 'dstip',
+  'destination address': 'dstip', 'destination ip address': 'dstip',
+  'adresse destination': 'dstip', 'adresse ip destination': 'dstip',
 
   // Source port
   srcport: 'srcport', src_port: 'srcport', sourceport: 'srcport',
-  'source port': 'srcport', 'src port': 'srcport', sport: 'srcport',
+  'source port': 'srcport', 'src port': 'srcport', 'port source': 'srcport', sport: 'srcport',
 
   // Destination port
   dstport: 'dstport', dst_port: 'dstport', destinationport: 'dstport',
-  'destination port': 'dstport', 'dst port': 'dstport', dport: 'dstport',
+  'destination port': 'dstport', 'dst port': 'dstport', 'port destination': 'dstport', dport: 'dstport',
 
   // Protocol
-  proto: 'proto', protocol: 'proto', 'ip protocol': 'proto', ip_protocol: 'proto',
+  proto: 'proto', protocol: 'proto', protocole: 'proto', 'ip protocol': 'proto', ip_protocol: 'proto',
 
   // Action
   action: 'action', verdict: 'action',
@@ -71,9 +75,9 @@ const HEADER_MAP = {
 
   // Interfaces
   srcintf: 'srcintf', src_intf: 'srcintf', srcinterface: 'srcintf',
-  'source interface': 'srcintf', 'src interface': 'srcintf', ingressintf: 'srcintf',
+  'source interface': 'srcintf', 'src interface': 'srcintf', 'interface source': 'srcintf', ingressintf: 'srcintf',
   dstintf: 'dstintf', dst_intf: 'dstintf', dstinterface: 'dstintf',
-  'destination interface': 'dstintf', 'dst interface': 'dstintf', egressintf: 'dstintf',
+  'destination interface': 'dstintf', 'dst interface': 'dstintf', 'interface destination': 'dstintf', egressintf: 'dstintf',
 
   // Policy
   policyid: 'policyid', policy_id: 'policyid', ruleid: 'policyid',
@@ -138,18 +142,68 @@ function normalizeDecision(action, context = {}) {
 
 // ─── Format detection ─────────────────────────────────────────────────────────
 
+function countDelimiterOutsideQuotes(line, delimiter) {
+  let count = 0;
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    if (line[i] === '"') {
+      if (inQuotes && line[i + 1] === '"') i++;
+      else inQuotes = !inQuotes;
+    } else if (!inQuotes && line[i] === delimiter) {
+      count++;
+    }
+  }
+  return count;
+}
+
+function separatorLabel(sep) {
+  if (sep === '\t') return 'tabulation';
+  if (sep === ';') return 'point-virgule';
+  if (sep === '|') return 'barre verticale';
+  return 'virgule';
+}
+
+function normalizeCsvHeader(value) {
+  return String(value ?? '')
+    .replace(/^\uFEFF/, '')
+    .toLowerCase()
+    .trim()
+    .replace(/^"|"$/g, '')
+    .replace(/\s+/g, ' ');
+}
+
+function mapAndValidateCsvHeaders(parts, sep) {
+  const rawHeaders = parts.map(normalizeCsvHeader);
+  const headers = rawHeaders.map(h => HEADER_MAP[h] || h);
+  const required = ['srcip', 'dstip', 'action'];
+  const missing = required.filter(h => !headers.includes(h));
+  const hasServiceEvidence = ['dstport', 'service', 'proto'].some(h => headers.includes(h));
+
+  if (missing.length || !hasServiceEvidence) {
+    const expected = [...missing, ...(!hasServiceEvidence ? ['dstport/service/proto'] : [])];
+    const detected = rawHeaders.filter(Boolean).slice(0, 15).join(', ') || 'aucune';
+    throw new Error(
+      `CSV détecté (séparateur : ${separatorLabel(sep)}), mais colonnes obligatoires introuvables : ${expected.join(', ')}. ` +
+      `Colonnes détectées : ${detected}. Exportez au minimum les IP source/destination, l’action et le service ou port/protocole.`
+    );
+  }
+
+  return headers;
+}
+
 function detectFormat(firstLine) {
-  // R2: un vrai log KV FortiAnalyzer contient de nombreux couples key=val (date=, srcip=, …).
-  // Exiger ≥3 couples évite qu'une ligne CSV contenant un seul '=' (commentaire, valeur) bascule en KV.
+  // Un vrai log KV FortiAnalyzer contient de nombreux couples key=val.
+  // On le détecte avant les séparateurs, car les valeurs KV peuvent contenir des virgules.
   const kvCount = (firstLine.match(/\b\w+=\S/g) || []).length;
-  const tabs    = (firstLine.match(/\t/g) || []).length;
-  const commas  = (firstLine.match(/,/g) || []).length;
-  // KV d'abord (gardé par ≥3 couples → une ligne KV avec une virgule dans une valeur reste KV).
   if (kvCount >= 3) return { format: 'kv', sep: null };
-  // Sinon, tout séparateur présent → CSV. Seuils abaissés à ≥1 pour ne pas rejeter un CSV
-  // à peu de colonnes (ex 2 colonnes) qui serait sinon lu comme KV → 0 flux importé.
-  if (tabs >= 1)    return { format: 'csv', sep: '\t' };
-  if (commas >= 1)  return { format: 'csv', sep: ',' };
+
+  // Les exports FAZ/Excel varient selon la locale : virgule, point-virgule,
+  // tabulation ou barre verticale. Compter uniquement hors guillemets.
+  const candidates = ['\t', ',', ';', '|']
+    .map(sep => ({ sep, count: countDelimiterOutsideQuotes(firstLine, sep) }))
+    .sort((a, b) => b.count - a.count);
+  if (candidates[0].count >= 1) return { format: 'csv', sep: candidates[0].sep };
+
   return { format: 'kv', sep: null };
 }
 
@@ -309,6 +363,13 @@ async function parseStream(inputStream, onProgress) {
     }
 
     if (!format) {
+      // Directive optionnelle produite par Excel selon la locale : "sep=;".
+      const sepDirective = /^sep=(.)$/i.exec(line);
+      if (sepDirective) {
+        format = 'csv';
+        sep = sepDirective[1];
+        continue;
+      }
       const det = detectFormat(line);
       format = det.format;
       sep    = det.sep;
@@ -323,8 +384,7 @@ async function parseStream(inputStream, onProgress) {
     } else {
       const parts = parseCSVLine(line, sep);
       if (!csvHeaders) {
-        const raw  = parts.map(h => h.toLowerCase().trim().replace(/^"|"$/g, ''));
-        csvHeaders = raw.map(h => HEADER_MAP[h] || h);
+        csvHeaders = mapAndValidateCsvHeaders(parts, sep);
         continue;
       }
       fields = {};
@@ -360,8 +420,7 @@ async function parseXLSX(filePath, onProgress) {
   if (rows.length < 2) return { flowMap: new Map(), lineCount: 0, skipped: 0 };
 
   // First row = headers
-  const rawHeaders = rows[0].map(h => String(h).toLowerCase().trim());
-  const headers    = rawHeaders.map(h => HEADER_MAP[h] || h);
+  const headers = mapAndValidateCsvHeaders(rows[0], ',');
 
   const flowMap = new Map();
   let lineCount = 0;
