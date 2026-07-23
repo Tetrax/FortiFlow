@@ -1931,7 +1931,10 @@ const deployState = {
   wizardStep:    1,                // 1: config upload, 2: routes, 3: interfaces, 4: policies
   use32Global:   false,            // global /32 mode (use real hosts instead of /24)
   bruteMode:     'off',            // 'off' | 'service' (split by svc) | 'host' (split by src+svc)
-  granularity:   'reseau',         // axe unique : 'macro'|'reseau'|'reseau-serveur'|'service'|'ip'
+  granularity:   'reseau',         // compat workspaces v2 (remplacé par segmentationPlan)
+  segmentationPlan: { source: 'network', destination: 'network', services: 'grouped' },
+  segmentationPreset: 'wide',
+  segmentationCustomOpen: false,
   _detailOriginal: null,           // M3: snapshot pré-détail (≠ _analyzedOriginal pré-fusion)
   captureWindow: null,             // #1: { start, end, days, available } — fenêtre d'observation
   namingPrefix:  'FF',             // #5: préfixe de nommage des objets générés (configurable)
@@ -2088,6 +2091,8 @@ async function exportSession() {
         warnings:             deployState.warnings,
         viewMode:             deployState.viewMode,
         namingPrefix:         deployState.namingPrefix,   // #5
+        segmentationPlan:      deployState.segmentationPlan,
+        segmentationPreset:    deployState.segmentationPreset,
       },
     };
     // Compression gzip via l'API native (zéro dépendance)
@@ -2156,6 +2161,8 @@ function importSession(file) {
           deployState.warnings             = ds.warnings      || [];
           deployState.viewMode             = ds.viewMode      || 'interface-pair';
           deployState.namingPrefix         = ds.namingPrefix  || 'FF';   // #5
+          deployState.segmentationPlan      = window.FortiFlowSegmentation?.normalizePlan(ds.segmentationPlan) || { source: 'network', destination: 'network', services: 'grouped' };
+          deployState.segmentationPreset    = ds.segmentationPreset || window.FortiFlowSegmentation?.inferPreset(deployState.segmentationPlan) || 'wide';
         }
 
         // Navigation : deploy si dispo, sinon dashboard
@@ -2182,6 +2189,8 @@ function importSession(file) {
         deployState.addrGroups    = ds.addrGroups;
         deployState.warnings      = ds.warnings || [];
         deployState.viewMode      = ds.viewMode  || 'interface-pair';
+        deployState.segmentationPlan   = window.FortiFlowSegmentation?.normalizePlan(ds.segmentationPlan) || { source: 'network', destination: 'network', services: 'grouped' };
+        deployState.segmentationPreset = ds.segmentationPreset || window.FortiFlowSegmentation?.inferPreset(deployState.segmentationPlan) || 'wide';
         deploy();
       } else {
         alert('Fichier de session invalide');
@@ -3869,13 +3878,6 @@ async function deploy() {
           <span id="deploy-merge-info" style="font-size:11px;color:var(--text2)"></span>
           <button class="btn-sm" id="btn-toggle-advanced" title="Contrôles avancés : presets, fusion détaillée, périmètre, détail manuel">Avancé ▾</button>
           <span id="deploy-advanced-controls" style="display:none;align-items:center;gap:6px">
-          <span class="deploy-preset-group" style="display:inline-flex;gap:4px;align-items:center;margin-right:6px" title="Mode assisté : pré-règle granularité et fusion en un clic. Les contrôles avancés restent accessibles.">
-            <span style="font-size:10px;color:var(--text2);font-weight:700">Mode :</span>
-            <button class="btn-sm deploy-preset-btn" data-preset="strict"   title="Micro-segmentation — 1 règle par hôte /32 × service. Le plus précis (least-privilege strict).">Strict</button>
-            <button class="btn-sm deploy-preset-btn" data-preset="balanced" title="1 règle par service, sources/destinations groupées. Compromis recommandé.">Équilibré</button>
-            <button class="btn-sm deploy-preset-btn" data-preset="macro"    title="Fusion par destination, réseaux agrégés. Le plus compact (macro-segmentation).">Macro</button>
-            <span id="deploy-reco-hint" style="font-size:10px;color:var(--accent2,#7c9cff)"></span>
-          </span>
           <div class="dropdown-wrap" id="merge-dropdown-wrap">
             <button class="btn-sm dropdown-trigger">⚡ Fusion ▾</button>
             <div class="dropdown-menu" style="min-width:210px;padding:10px 12px">
@@ -3903,25 +3905,6 @@ async function deploy() {
               <div class="dropdown-item" data-merge="selection">⚡ Fusionner la sélection</div>
               <div class="dropdown-sep"></div>
               <div class="dropdown-item" data-merge="reset">↺ Réinitialiser</div>
-            </div>
-          </div>
-          <div class="dropdown-wrap" id="detail-dropdown-wrap">
-            <button class="btn-sm dropdown-trigger ${deployState.bruteMode !== 'off' ? 'btn-active' : ''}" id="btn-brute-mode">${{ off: 'Détailler ▾', service: 'Services ✓', host: 'IP à IP ✓', 'src-agg-dst-detail': 'Réseau → Serveur ✓' }[deployState.bruteMode] || 'Détailler ▾'}</button>
-            <div class="dropdown-menu" style="min-width:270px;padding:10px 12px">
-              <div style="font-size:10px;font-weight:700;color:var(--text2);margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px">Mode de détail</div>
-              <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px">
-                <button class="btn-sm detail-mode-btn ${deployState.bruteMode==='service'?'btn-accent':''}" data-detail-mode="service">Services</button>
-                <button class="btn-sm detail-mode-btn ${deployState.bruteMode==='host'?'btn-accent':''}" data-detail-mode="host">IP à IP</button>
-                <button class="btn-sm detail-mode-btn ${deployState.bruteMode==='src-agg-dst-detail'?'btn-accent':''}" data-detail-mode="src-agg-dst-detail">Réseau → Serveur</button>
-              </div>
-              <div class="detail-mode-hint">${{
-                service:              '↳ 1 policy par service — sources et destinations restent groupées. Vue propre par protocole.',
-                host:                 '↳ 1:1 complet : 1 policy par hôte src /32 × hôte dst /32 × service. Maximum de granularité.',
-                'src-agg-dst-detail': '↳ Hybride : sources en subnet /24, destinations en IP /32. Idéal pour flux utilisateurs → serveurs (WSUS, DC, VEEAM…).',
-              }[deployState.bruteMode] || ''}</div>
-              <button class="btn-sm btn-accent" style="width:100%;margin-bottom:8px" data-detail-action="apply">▶ Appliquer</button>
-              <div class="dropdown-sep" style="margin:4px -4px"></div>
-              <div class="dropdown-item" data-detail-action="reset">↺ Désactiver le détail</div>
             </div>
           </div>
           </span>
@@ -4307,23 +4290,32 @@ async function deploy() {
     }
   });
 
-  // Axe de granularité unique (façade) — chaque cran réutilise les moteurs existants.
-  // Le bouton est dans deploy-policy-body (re-rendu) ; _applyDetailMode/applyMerge sont en portée ici.
+  // Constructeur de segmentation : trois profils simples + trois axes personnalisables.
   el('deploy-policy-body')?.addEventListener('click', e => {
-    const granBtn = e.target.closest('.gran-level');
-    if (!granBtn) return;
-    const lvl = granBtn.dataset.level;
-    if (lvl === deployState.granularity) return;
-    deployState.granularity = lvl;
-    if (lvl === 'macro') {
-      deployState.mergeScope = 'all'; deployState.mergeStrategy = 'destination';
-      applyMerge('all', 'destination');                 // fusion par destination (remet bruteMode='off')
-    } else if (lvl === 'reseau') {
-      applyMerge('reset');                                // base subnet→subnet
-    } else {
-      applyMerge('reset');                                // repartir de la base, puis détailler
-      deployState.bruteMode = lvl === 'ip' ? 'host' : (lvl === 'service' ? 'service' : 'src-agg-dst-detail');
-      _applyDetailMode();
+    const profileBtn = e.target.closest('.seg-profile');
+    if (profileBtn) {
+      const preset = profileBtn.dataset.segPreset;
+      const definition = SEGMENTATION_PRESETS.find(item => item.key === preset);
+      if (!definition) return;
+      deployState.segmentationCustomOpen = false;
+      _applySegmentationPlan(definition.plan, preset);
+      return;
+    }
+
+    const customToggle = e.target.closest('#seg-custom-toggle');
+    if (customToggle) {
+      deployState.segmentationCustomOpen = !deployState.segmentationCustomOpen;
+      renderDeployPolicies(filterDeployPolicies(), false);
+      return;
+    }
+
+    const optionBtn = e.target.closest('.seg-option');
+    if (optionBtn) {
+      const dimension = optionBtn.dataset.segDimension;
+      const value = optionBtn.dataset.segValue;
+      const nextPlan = { ...(deployState.segmentationPlan || {}), [dimension]: value };
+      deployState.segmentationCustomOpen = true;
+      _applySegmentationPlan(nextPlan, 'custom');
     }
   });
 
@@ -6513,7 +6505,10 @@ async function analyzeDeployPolicies() {
   }
 
   deployState.analyzed              = analyzed;
-  deployState.granularity           = 'reseau';   // base subnet→subnet à chaque (ré)analyse
+  deployState.granularity           = 'reseau';   // compat workspaces historiques
+  deployState.segmentationPlan      = { source: 'network', destination: 'network', services: 'grouped' };
+  deployState.segmentationPreset    = 'wide';
+  deployState.segmentationCustomOpen = false;
   deployState._analyzedOriginal     = null;
   deployState._detailOriginal       = null;  // M3: base de détail, réinitialisée à chaque analyse
   deployState.baseAnalyzedPolicies  = analyzed.map(p => ({ ...p })); // snapshot for reset
@@ -7604,56 +7599,134 @@ function _coverageBanner() {
   return `<span style="color:var(--text2)">🛡 vs config : <span style="color:#2563eb">${nw} nouvelles</span> · <span style="color:#16a34a">${al} déjà OK</span>${br ? ` · <span style="color:#d97706">${br} règle large (à resserrer)</span>` : ''}${bl ? ` · <span style="color:#dc2626">${bl} bloquées</span>` : ''}${pa ? ` · <span style="color:#d97706">${pa} partielles</span>` : ''}${un ? ` · ${un} à vérifier` : ''}${btn}</span>`;
 }
 
-// Axe de granularité unique — définitions des crans (mappés aux moteurs existants).
-const GRAN_LEVELS = [
-  { key: 'macro',          label: 'Macro',            sub: 'zone→zone',       desc: "Une seule règle entre deux zones, tous réseaux confondus. Le moins de règles, mais le plus large — à réserver aux zones de confiance homogène." },
-  { key: 'reseau',         label: 'Réseau',           sub: '→ réseau',        desc: "Une règle par paire de sous-réseaux qui communiquent réellement. Le bon défaut : ni trop large, ni trop verbeux." },
-  { key: 'reseau-serveur', label: 'Réseau → serveur', sub: 'src /24 · dst /32', desc: "Postes regroupés par sous-réseau, serveurs ciblés à l'IP exacte. Idéal « utilisateurs → serveurs » (WSUS, AD, sauvegarde)." },
-  { key: 'service',        label: 'Par service',      sub: '1 règle/svc',     desc: "Comme Réseau → réseau, mais une règle distincte par service (HTTPS, SMB…). Pour isoler ou auditer chaque protocole." },
-  { key: 'ip',             label: 'IP à IP',          sub: '1:1 /32',         desc: "Une règle par couple d'hôtes exact (/32) et par service. Le plus strict : micro-segmentation, mais beaucoup de règles." },
+// Profils simples : les axes restent personnalisables sans exposer la complexité du moteur.
+const SEGMENTATION_PRESETS = [
+  {
+    key: 'wide',
+    label: 'Large',
+    badge: 'Moins de règles',
+    icon: '▦',
+    desc: 'Réseau → réseau, services regroupés',
+    help: 'Pour des zones homogènes ou une première étape de segmentation.',
+    plan: { source: 'network', destination: 'network', services: 'grouped' },
+  },
+  {
+    key: 'targeted',
+    label: 'Serveurs ciblés',
+    badge: 'Conseillé users → servers',
+    icon: '◎',
+    desc: 'Réseau → serveur, services regroupés',
+    help: 'Les utilisateurs restent groupés ; chaque serveur est ciblé précisément.',
+    plan: { source: 'network', destination: 'host', services: 'grouped' },
+  },
+  {
+    key: 'strict',
+    label: 'Très précis',
+    badge: 'Micro-segmentation',
+    icon: '⌖',
+    desc: 'IP → IP, un service par règle',
+    help: 'Pour les enclaves critiques et les hôtes stables.',
+    plan: { source: 'host', destination: 'host', services: 'separate' },
+  },
 ];
 
-// #8: recommandation de granularité — purement consultative. Retourne une CLÉ de cran.
-// Heuristique transparente fondée sur le nombre d'hôtes source par policy.
-function _granularityReco() {
-  const list = deployState.baseAnalyzedPolicies || deployState.analyzed || [];
-  if (!list.length) return null;
-  const counts = list.map(p => (p.srcHosts || []).length);
-  const n = counts.length;
-  const big   = counts.filter(c => c > 8).length;
-  const small = counts.filter(c => c >= 1 && c <= 3).length;
-  if (big / n > 0.4)   return 'reseau';          // beaucoup d'hôtes → rester au subnet
-  if (small / n > 0.6) return 'ip';              // peu d'hôtes → /32 réaliste
-  return 'reseau-serveur';                        // défaut équilibré
+function _segmentationLabels(plan) {
+  const p = window.FortiFlowSegmentation?.normalizePlan(plan) || plan;
+  return {
+    source: p.source === 'host' ? 'Hôte /32' : 'Réseau / objet',
+    destination: p.destination === 'host' ? 'Serveur /32' : 'Réseau / objet',
+    services: p.services === 'separate' ? '1 règle par service' : 'Services regroupés',
+  };
 }
 
-// Barre de granularité (façade) : segmenté 5 crans + repère reco + description + compteur live.
+function _applySegmentationPlan(plan, preset = 'custom') {
+  const engine = window.FortiFlowSegmentation;
+  if (!engine) {
+    alert('Le moteur de segmentation est indisponible. Rechargez la page.');
+    return;
+  }
+  const normalized = engine.normalizePlan(plan);
+  const base = deployState.baseAnalyzedPolicies || deployState.analyzed || [];
+  deployState.segmentationPlan = normalized;
+  deployState.segmentationPreset = preset === 'custom' ? engine.inferPreset(normalized) : preset;
+  if (preset === 'custom' && deployState.segmentationPreset !== 'custom') {
+    deployState.segmentationCustomOpen = true;
+  }
+  deployState.granularity = {
+    wide: 'reseau',
+    targeted: 'reseau-serveur',
+    strict: 'ip',
+    custom: 'custom',
+  }[deployState.segmentationPreset] || 'custom';
+  deployState.bruteMode = 'off';
+  deployState._detailOriginal = null;
+  deployState._analyzedOriginal = null;
+  deployState.analyzed = engine.buildPoliciesByPlan(
+    base.map(policy => ({ ...policy })),
+    normalized,
+    {
+      hostPairServices: deployState.hostPairServices,
+      getServicesForPair: (src, dst, policy) =>
+        _getServicesForPair(src, dst, policy, deployState.hostPairServices, null),
+    }
+  );
+  deployState.selected = defaultSelectedSet(deployState.analyzed);
+  deployState.mergeSelected = new Set();
+  deployState._noRcvdCount = undefined;
+  deployState.page = 1;
+  _updateMergeSelectionBtn();
+  renderDeployPolicies(filterDeployPolicies(), false);
+}
+
 function _granularityBar() {
-  const cur  = deployState.granularity || 'reseau';
-  const reco = _granularityReco();
-  const n = GRAN_LEVELS.length;
-  const cells = GRAN_LEVELS.map((l, i) => {
-    const active = l.key === cur;
-    const isReco = l.key === reco;
-    const border = i < n - 1 ? 'border-right:1px solid var(--border,rgba(255,255,255,.1));' : '';
-    const bg  = active ? 'background:var(--accent2,#7c9cff);' : '';
-    const col = active ? 'color:#fff;font-weight:600;' : 'color:var(--text2,#9aa);';
-    return `<button class="gran-level" data-level="${l.key}" title="${escHtml(l.desc)}" style="flex:1;text-align:center;padding:8px 4px;font-size:12px;border:none;cursor:pointer;${border}${bg}${col}">
-      ${escHtml(l.label)}<br><span style="font-size:10px;opacity:.8">${escHtml(l.sub)}${isReco && !active ? ' <span style="color:var(--accent2,#7c9cff)">★</span>' : isReco ? ' ★' : ''}</span>
-    </button>`;
-  }).join('');
-  const def = GRAN_LEVELS.find(l => l.key === cur) || GRAN_LEVELS[1];
-  const recoLabel = reco ? (GRAN_LEVELS.find(l => l.key === reco) || {}).label : '';
-  const count = (deployState.analyzed || []).length;
-  return `<div style="margin-bottom:10px">
-    <div style="display:flex;border:1px solid var(--border,rgba(255,255,255,.15));border-radius:6px;overflow:hidden">${cells}</div>
-    <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text2,#9aa);margin-top:4px">
-      <span>← plus compact</span>${recoLabel ? `<span style="color:var(--accent2,#7c9cff)">★ recommandé : ${escHtml(recoLabel)}</span>` : '<span></span>'}<span>plus précis →</span>
+  const engine = window.FortiFlowSegmentation;
+  const plan = engine?.normalizePlan(deployState.segmentationPlan) || { source: 'network', destination: 'network', services: 'grouped' };
+  const inferred = engine?.inferPreset(plan) || 'wide';
+  const activePreset = deployState.segmentationPreset === 'custom' ? inferred : (deployState.segmentationPreset || inferred);
+  const profiles = SEGMENTATION_PRESETS.map(profile => `
+    <button class="seg-profile ${profile.key === activePreset && !deployState.segmentationCustomOpen ? 'active' : ''}" data-seg-preset="${profile.key}" title="${escHtml(profile.help)}">
+      <span class="seg-profile-icon">${profile.icon}</span>
+      <span class="seg-profile-copy">
+        <strong>${escHtml(profile.label)}</strong>
+        <small>${escHtml(profile.desc)}</small>
+      </span>
+      <span class="seg-profile-badge">${escHtml(profile.badge)}</span>
+    </button>
+  `).join('');
+  const labels = _segmentationLabels(plan);
+  const customOpen = deployState.segmentationCustomOpen || inferred === 'custom';
+  const optionGroup = (dimension, options) => `
+    <div class="seg-axis">
+      <span class="seg-axis-label">${dimension === 'source' ? 'Sources' : dimension === 'destination' ? 'Destinations' : 'Services'}</span>
+      <div class="seg-axis-options">${options.map(option => `
+        <button class="seg-option ${plan[dimension] === option.value ? 'active' : ''}" data-seg-dimension="${dimension}" data-seg-value="${option.value}">${option.label}</button>
+      `).join('')}</div>
+    </div>`;
+
+  return `<section class="seg-planner" aria-label="Stratégie de segmentation">
+    <div class="seg-planner-head">
+      <div>
+        <strong>Quel niveau de segmentation souhaitez-vous ?</strong>
+        <span>Choisissez un profil, puis ajustez seulement si nécessaire.</span>
+      </div>
+      <button class="btn-sm ${customOpen ? 'btn-active' : ''}" id="seg-custom-toggle">${customOpen ? 'Masquer les réglages' : 'Personnaliser'}</button>
     </div>
-    <div style="margin-top:6px;padding:7px 10px;background:var(--bg2,rgba(255,255,255,.04));border:1px solid var(--border,rgba(255,255,255,.1));border-radius:6px;font-size:12px;color:var(--text,#ddd)">
-      ${escHtml(def.desc)} <strong style="color:var(--accent2,#7c9cff)">→ ${count} règle${count > 1 ? 's' : ''} générée${count > 1 ? 's' : ''}</strong>
+    <div class="seg-profile-grid">${profiles}</div>
+    <div class="seg-custom-panel" style="display:${customOpen ? 'grid' : 'none'}">
+      ${optionGroup('source', [{ value: 'network', label: 'Réseau' }, { value: 'host', label: 'Hôte /32' }])}
+      ${optionGroup('destination', [{ value: 'network', label: 'Réseau' }, { value: 'host', label: 'Serveur /32' }])}
+      ${optionGroup('services', [{ value: 'grouped', label: 'Regroupés' }, { value: 'separate', label: 'Séparés' }])}
     </div>
-  </div>`;
+    <div class="seg-plan-summary">
+      <span><b>Source</b> ${escHtml(labels.source)}</span>
+      <span class="seg-arrow">→</span>
+      <span><b>Destination</b> ${escHtml(labels.destination)}</span>
+      <span class="seg-arrow">·</span>
+      <span><b>Services</b> ${escHtml(labels.services)}</span>
+      <strong class="seg-rule-count">${fmtNum((deployState.analyzed || []).length)} règle${(deployState.analyzed || []).length > 1 ? 's' : ''}</strong>
+      <small>Les destinations WAN restent toujours limitées aux IP observées.</small>
+    </div>
+  </section>`;
 }
 
 function renderDeployPolicies(analyzed, resetPage = true) {
