@@ -201,6 +201,7 @@ function extractFlow(fields) {
 
   const srcip = (fields.srcip || '').trim();
   const dstip = (fields.dstip || '').trim();
+  const unsupportedReason = (srcip.includes(':') || dstip.includes(':')) ? 'ipv6' : null;
 
   const ts       = flowTimestamp(fields);
   const day      = flowDay(fields, ts);
@@ -210,6 +211,7 @@ function extractFlow(fields) {
   return {
     srcip:    isValidIPv4(srcip) ? srcip : '',
     dstip:    isValidIPv4(dstip) ? dstip : '',
+    unsupportedReason,
     srcport:  fields.srcport  || '',
     dstport:  fields.dstport  || '',
     proto,
@@ -276,7 +278,7 @@ async function parseStream(inputStream, onProgress) {
   const flowMap = new Map();
   let lineCount = 0;
   let skipped   = 0;
-  const skipReasons = { nonTraffic: 0, invalidFlow: 0 };
+  const skipReasons = { nonTraffic: 0, invalidFlow: 0, ipv6: 0 };
   let format    = null;
   let sep       = null;
   let csvHeaders = null;
@@ -321,7 +323,11 @@ async function parseStream(inputStream, onProgress) {
     }
 
     const flow = extractFlow(fields);
-    if (!aggregateFlow(flowMap, flow)) { skipped++; skipReasons.invalidFlow++; }
+    if (!aggregateFlow(flowMap, flow)) {
+      skipped++;
+      if (flow.unsupportedReason === 'ipv6') skipReasons.ipv6++;
+      else skipReasons.invalidFlow++;
+    }
   }
 
   return { flowMap, lineCount, skipped, skipReasons };
@@ -349,6 +355,7 @@ async function parseXLSX(filePath, onProgress) {
   const flowMap = new Map();
   let lineCount = 0;
   let skipped   = 0;
+  const skipReasons = { nonTraffic: 0, invalidFlow: 0, ipv6: 0 };
   const startTs = Date.now();
 
   for (let r = 1; r < rows.length; r++) {
@@ -366,10 +373,14 @@ async function parseXLSX(filePath, onProgress) {
       fields[headers[i]] = String(parts[i] ?? '').trim();
     }
     const flow = extractFlow(fields);
-    if (!aggregateFlow(flowMap, flow)) skipped++;
+    if (!aggregateFlow(flowMap, flow)) {
+      skipped++;
+      if (flow.unsupportedReason === 'ipv6') skipReasons.ipv6++;
+      else skipReasons.invalidFlow++;
+    }
   }
 
-  return { flowMap, lineCount, skipped };
+  return { flowMap, lineCount, skipped, skipReasons };
 }
 
 // ─── File entry point (GZ / ZIP / XLSX / plain) ───────────────────────────────
@@ -422,7 +433,7 @@ async function parseFile(filePath, onProgress) {
     const mergedFlowMap = new Map();
     let totalLines = 0;
     let totalSkipped = 0;
-    const totalSkipReasons = { nonTraffic: 0, invalidFlow: 0 };
+    const totalSkipReasons = { nonTraffic: 0, invalidFlow: 0, ipv6: 0 };
 
     for (const entry of entries) {
       try {
@@ -432,8 +443,9 @@ async function parseFile(filePath, onProgress) {
         totalLines   += lineCount;
         totalSkipped += skipped;
         if (skipReasons) {
-          totalSkipReasons.nonTraffic   += skipReasons.nonTraffic   || 0;
-          totalSkipReasons.invalidFlow  += skipReasons.invalidFlow  || 0;
+          totalSkipReasons.nonTraffic  += skipReasons.nonTraffic  || 0;
+          totalSkipReasons.invalidFlow += skipReasons.invalidFlow || 0;
+          totalSkipReasons.ipv6        += skipReasons.ipv6        || 0;
         }
         // Merge into combined flowMap
         for (const [key, flow] of flowMap) {
