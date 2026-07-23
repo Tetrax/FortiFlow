@@ -329,7 +329,7 @@ test('un service TCP+UDP doit couvrir chaque tuple observé', () => {
 });
 
 
-test('le preflight bloque les contextes PBR et VRF non sélectionnés', () => {
+test('le preflight ignore la présence de PBR mais bloque une VRF non sélectionnée', () => {
   const policy = {
     srcintf: 'lan', dstintf: 'wan1',
     dstType: 'public', dstTarget: '8.8.8.8', dstHosts: ['8.8.8.8'], _dstUseAll: false,
@@ -343,22 +343,13 @@ test('le preflight bloque les contextes PBR et VRF non sélectionnés', () => {
   };
   const baseConfig = { addresses: {}, addressGroups: {}, interfaces: { lan: {}, wan1: {} }, zones: {} };
   const pbr = preflightValidation([policy], { ...baseConfig, hasPolicyRoutes: true });
-  const pbrOverride = preflightValidation(
-    [policy],
-    { ...baseConfig, hasPolicyRoutes: true },
-    null,
-    { allowPbrOverride: true },
-  );
   const vrf = preflightValidation([policy], { ...baseConfig, hasNonDefaultVrf: true });
 
-  assert.equal(pbr.ok, false);
-  assert.ok(pbr.issues.some(i => i.code === 'PBR_CONTEXT' && i.overridable === true));
-  assert.equal(pbrOverride.ok, true);
-  assert.ok(pbrOverride.issues.some(i => i.code === 'PBR_OVERRIDE' && i.level === 'warn'));
-  assert.match(generateConfig([], { pbrOverride: true }), /exception PBR confirmée/);
+  assert.equal(pbr.ok, true);
+  assert.equal(pbr.issues.some(i => /Policy-Based Routing|PBR/.test(i.msg)), false);
 
   assert.equal(vrf.ok, false);
-  assert.ok(vrf.issues.some(i => i.code === 'VRF_CONTEXT' && i.overridable === false));
+  assert.ok(vrf.issues.some(i => i.code === 'VRF_CONTEXT'));
 });
 
 
