@@ -325,3 +325,25 @@ test('un service TCP+UDP doit couvrir chaque tuple observé', () => {
   assert.equal(analyzePolicies([policy], config(both))[0].analysis.services[0].found, true);
   assert.equal(analyzePolicies([policy], config(tcpOnly))[0].analysis.services[0].found, false);
 });
+
+
+test('le preflight bloque les contextes PBR et VRF non sélectionnés', () => {
+  const policy = {
+    srcintf: 'lan', dstintf: 'wan1',
+    dstType: 'public', dstTarget: '8.8.8.8', dstHosts: ['8.8.8.8'], _dstUseAll: false,
+    action: 'accept', log: 'all',
+    analysis: {
+      srcAddr: { found: false, name: 'SRC' },
+      dstAddr: { found: false, name: 'DST' },
+      services: [{ label: 'DNS', name: 'DNS', found: true }],
+      srcIface: 'lan', dstIface: 'wan1',
+    },
+  };
+  const baseConfig = { addresses: {}, addressGroups: {}, interfaces: { lan: {}, wan1: {} }, zones: {} };
+  const pbr = preflightValidation([policy], { ...baseConfig, hasPolicyRoutes: true });
+  const vrf = preflightValidation([policy], { ...baseConfig, hasNonDefaultVrf: true });
+  assert.equal(pbr.ok, false);
+  assert.ok(pbr.issues.some(i => /Policy-Based Routing/.test(i.msg)));
+  assert.equal(vrf.ok, false);
+  assert.ok(vrf.issues.some(i => /VRF non par défaut/.test(i.msg)));
+});
