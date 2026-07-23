@@ -60,8 +60,38 @@ test('normalise les actions FortiOS et refuse les actions inconnues', () => {
   assert.equal(normalizeDecision('client-rst'), 'allow');
   assert.equal(normalizeDecision('deny'), 'deny');
   assert.equal(normalizeDecision('blocked'), 'deny');
+  assert.equal(normalizeDecision('dns'), 'unknown');
+  assert.equal(normalizeDecision('dns', {
+    msg: 'Connection Failed',
+    dstport: '53',
+    proto: '17',
+    service: 'DNS',
+  }), 'failed');
   assert.equal(normalizeDecision('unseen-action'), 'unknown');
   assert.equal(flowDecision({ action: 'unseen-action' }), 'unknown');
+  assert.equal(flowDecision({
+    action: 'dns',
+    decision: 'unknown',
+    service: 'DNS',
+    dstport: '53',
+    proto: '17',
+    sentBytes: 0,
+    rcvdBytes: 0,
+  }), 'failed');
+});
+
+test('les échecs DNS FortiOS restent distincts des flux acceptés et des actions inconnues', async () => {
+  const log = 'date=2026-07-23 time=12:00:00 type=traffic logid="0000000011" srcip=10.0.0.10 dstip=10.0.1.53 srcport=53000 dstport=53 proto=17 action=dns service=DNS srcintf="lan" dstintf="servers" policyid=1194 sentbyte=0 rcvdbyte=0 duration=0 msg="Connection Failed"';
+  const parsed = await parseStream(Readable.from([log]));
+  const flows = [...parsed.flowMap.values()];
+  assert.equal(flows.length, 1);
+  assert.equal(flows[0].decision, 'failed');
+
+  const analysis = buildAnalysis(flows);
+  assert.equal(analysis.stats.failedSessions, 1);
+  assert.equal(analysis.stats.unknownSessions, 0);
+  assert.equal(analysis.stats.acceptSessions, 0);
+  assert.equal(analysis.policies.length, 0);
 });
 
 test('le parser ne fusionne pas deux VDOM utilisant les mêmes adresses', async () => {
@@ -489,17 +519,19 @@ test('la chaîne plan → ré-analyse → CLI conserve une règle par service', 
 test('les flux exclus restent signalés sans élargir ni bloquer une policy prouvée', () => {
   const sessionData = {
     meta: { skipReasons: { ipv6: 3 } },
-    stats: { unknownSessions: 7 },
+    stats: { unknownSessions: 7, failedSessions: 11 },
   };
   assert.deepEqual(getCaptureDeploymentBlockers(sessionData), {
     unsupportedIpv6: 3,
     unknownActionSessions: 7,
+    failedConnectionSessions: 11,
     hasExcludedTraffic: true,
     blocked: false,
   });
   assert.deepEqual(getCaptureDeploymentBlockers({}), {
     unsupportedIpv6: 0,
     unknownActionSessions: 0,
+    failedConnectionSessions: 0,
     hasExcludedTraffic: false,
     blocked: false,
   });
