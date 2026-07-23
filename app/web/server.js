@@ -1394,7 +1394,8 @@ app.post('/api/deploy/config-upload', upload.single('conffile'), async (req, res
       const knownSubnets = extractKnownSubnets(fortiConfig);
       if (knownSubnets.length > 0) {
         const meta = s.data.meta;
-        const scopedFlows = flowsForFortiConfig(s.data.flows, fortiConfig);
+        if (!s.originalFlows) s.originalFlows = s.data.flows;
+        const scopedFlows = flowsForFortiConfig(s.originalFlows, fortiConfig);
         const newAnalysis = buildAnalysis(scopedFlows, knownSubnets);
         newAnalysis.meta = meta;
         s.data = newAnalysis;
@@ -1448,10 +1449,11 @@ app.post('/api/deploy/config-vdom', express.json(), (req, res) => {
 
     // Un changement de VDOM doit aussi recalculer les suggestions et exclure
     // les logs portant explicitement un autre VDOM.
-    if (s.data?.flows?.length > 0) {
-      const meta = s.data.meta;
+    const sourceFlows = s.originalFlows || s.data?.flows || [];
+    if (sourceFlows.length > 0) {
+      const meta = s.data?.meta;
       const knownSubnets = extractKnownSubnets(fortiConfig);
-      const scopedFlows = flowsForFortiConfig(s.data.flows, fortiConfig);
+      const scopedFlows = flowsForFortiConfig(sourceFlows, fortiConfig);
       const newAnalysis = buildAnalysis(scopedFlows, knownSubnets);
       newAnalysis.meta = meta;
       s.data = newAnalysis;
