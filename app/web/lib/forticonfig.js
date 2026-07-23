@@ -1825,7 +1825,74 @@ function generateConfig(selectedPolicies, opts = {}) {
 
 // ─── Preflight validation ─────────────────────────────────────────────────────
 
-function preflightValidation(selectedPolicies, config) {
+function segmentationServiceKey(service) {
+  if (!service) return '';
+  return String(service.label || service.name || '').toUpperCase();
+}
+
+function segmentationProto(proto) {
+  if (/^(6|tcp)$/i.test(String(proto || ''))) return 'TCP';
+  if (/^(17|udp)$/i.test(String(proto || ''))) return 'UDP';
+  return String(proto || '').toUpperCase();
+}
+
+function segmentationFlowServiceKey(flow) {
+  const named = String(flow?.service || '').trim();
+  if (named) return named.toUpperCase();
+  const port = Number(flow?.dstport ?? flow?.port);
+  const proto = segmentationProto(flow?.proto);
+  return Number.isInteger(port) && proto ? `${port}/${proto}` : '';
+}
+
+function segmentationServiceMatchesTuple(service, tuple) {
+  const wanted = segmentationServiceKey(service);
+  const named = String(tuple?.service || '').toUpperCase();
+  if (wanted && named && wanted === named) return true;
+
+  const port = Number(tuple?.port ?? tuple?.dstport);
+  const proto = segmentationProto(tuple?.proto);
+  if (!Number.isInteger(port) || !proto) return false;
+
+  const directPort = Number(service?.port);
+  if (Number.isInteger(directPort) && directPort === port) {
+    return !service.proto || segmentationProto(service.proto) === proto;
+  }
+
+  const notation = wanted.match(/^(?:(TCP|UDP)\/(\d+)|(\d+)\/(TCP|UDP))$/);
+  if (notation) {
+    return (notation[1] || notation[4]) === proto
+      && Number(notation[2] || notation[3]) === port;
+  }
+
+  const ports = Array.isArray(service?.ports) ? service.ports.map(Number) : [];
+  return ports.includes(port) && (!service.proto || segmentationProto(service.proto) === proto);
+}
+
+function segmentationFlowAllowed(flow) {
+  if (String(flow?.decision || '').toLowerCase() === 'allow') return true;
+  return new Set(['accept', 'allow', 'allowed', 'pass', 'close', 'timeout', 'client-rst', 'server-rst', 'ip-conn'])
+    .has(String(flow?.action || '').toLowerCase());
+}
+
+function segmentationFlowInScope(flow, policy) {
+  const scope = policy.scope || {};
+  const flowVdom = flow.vdom || flow.vd || '';
+  const flowDevice = flow.devid || flow.devname || '';
+  const policyDevice = scope.devid || scope.devname || '';
+  if (scope.vdom && flowVdom && scope.vdom !== flowVdom) return false;
+  if (policyDevice && flowDevice && policyDevice !== flowDevice) return false;
+  return true;
+}
+
+function segmentationEvidenceHosts(policy, side) {
+  const hosts = side === 'src' ? policy.srcHosts : policy.dstHosts;
+  if (Array.isArray(hosts) && hosts.length) return [...new Set(hosts.filter(Boolean))];
+  const cidr = side === 'src' ? policy.srcSubnet : policy.dstTarget;
+  const match = String(cidr || '').match(/^(\d{1,3}(?:\.\d{1,3}){3})(?:\/32)?$/);
+  return match ? [match[1]] : [];
+}
+
+function preflightValidation(selectedPolicies, config, observedFlows = null) {
   const issues = []; // { level: 'warn'|'error', msg }
   const addresses      = config.addresses      || {};
   const addressGroups  = config.addressGroups   || {};
@@ -1901,6 +1968,95 @@ function preflightValidation(selectedPolicies, config) {
 
     if (!(a.services || []).length) {
       issues.push({ level: 'error', msg: `${label}: aucun service déterminé — génération de ALL refusée` });
+    }
+
+    const plan = p._segmentationPlan;
+    if (plan) {
+      const validSource = ['network', 'host'].includes(plan.source);
+      const validDestination = ['network', 'host'].includes(plan.destination);
+      const validServices = ['grouped', 'separate'].includes(plan.services);
+      if (!validSource || !validDestination || !validServices) {
+        issues.push({ level: 'error', msg: `${label}: plan de segmentation invalide` });
+      }
+
+      const expectedServices = a.services || [];
+      const expectedKeys = new Set(expectedServices.map(segmentationServiceKey).filter(Boolean));
+      const technicalServices = (p.services || []).map(value => String(value).toUpperCase());
+      const unexpectedTechnical = technicalServices.filter(value => !expectedKeys.has(value));
+      if (unexpectedTechnical.length) {
+        issues.push({
+          level: 'error',
+          msg: `${label}: services techniques hors périmètre (${unexpectedTechnical.join(', ')})`,
+        });
+      }
+
+      const unexpectedTuples = (p.serviceTuples || []).filter(tuple =>
+        !expectedServices.some(service => segmentationServiceMatchesTuple(service, tuple))
+      );
+      if (unexpectedTuples.length) {
+        issues.push({
+          level: 'error',
+          msg: `${label}: tuples protocole/port hors du service sélectionné`,
+        });
+      }
+
+      if (plan.services === 'separate' && expectedServices.length !== 1) {
+        issues.push({ level: 'error', msg: `${label}: le mode "un service par règle" exige exactement un service` });
+      }
+
+      const effectiveDestinationMode = isWan ? 'host' : plan.destination;
+      const srcEvidenceHosts = segmentationEvidenceHosts(p, 'src');
+      const dstEvidenceHosts = segmentationEvidenceHosts(p, 'dst');
+      if (plan.source === 'host' && (!p._use32Src || !srcEvidenceHosts.length)) {
+        issues.push({ level: 'error', msg: `${label}: source /32 exigée mais aucune source exacte n'est disponible` });
+      }
+      if (effectiveDestinationMode === 'host' && (!p._use32Dst || !dstEvidenceHosts.length)) {
+        issues.push({ level: 'error', msg: `${label}: destination /32 exigée mais aucune destination exacte n'est disponible` });
+      }
+      if (p._hpsUnverified) {
+        issues.push({ level: 'error', msg: `${label}: règle détaillée non prouvée par une paire de flux observée` });
+      }
+
+      if (Array.isArray(observedFlows)) {
+        const srcSet = new Set(srcEvidenceHosts);
+        const dstSet = new Set(dstEvidenceHosts);
+        const evidenceFlows = observedFlows.filter(flow =>
+          segmentationFlowAllowed(flow)
+          && segmentationFlowInScope(flow, p)
+          && srcSet.has(flow.srcip)
+          && dstSet.has(flow.dstip)
+        );
+
+        if (!evidenceFlows.length) {
+          issues.push({ level: 'error', msg: `${label}: aucun flux accepté ne prouve cette règle` });
+        } else if (plan.source === 'host' && effectiveDestinationMode === 'host') {
+          for (const src of srcEvidenceHosts) {
+            for (const dst of dstEvidenceHosts) {
+              for (const service of expectedServices) {
+                const wanted = segmentationServiceKey(service);
+                if (!evidenceFlows.some(flow =>
+                  flow.srcip === src && flow.dstip === dst && segmentationFlowServiceKey(flow) === wanted
+                )) {
+                  issues.push({
+                    level: 'error',
+                    msg: `${label}: couple ${src} → ${dst} / ${wanted || 'service inconnu'} non observé`,
+                  });
+                }
+              }
+            }
+          }
+        } else {
+          for (const service of expectedServices) {
+            const wanted = segmentationServiceKey(service);
+            if (!evidenceFlows.some(flow => segmentationFlowServiceKey(flow) === wanted)) {
+              issues.push({
+                level: 'error',
+                msg: `${label}: service ${wanted || 'inconnu'} absent des flux acceptés dans ce périmètre`,
+              });
+            }
+          }
+        }
+      }
     }
 
     // Name collisions with existing objects
