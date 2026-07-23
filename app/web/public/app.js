@@ -419,7 +419,7 @@ async function dashboard() {
       </div>
       <div class="stat-card">
         <div class="stat-value orange">${fmtNum(s.privateSrcIPs)}</div>
-        <div class="stat-label">Hôtes RFC1918</div>
+        <div class="stat-label">Hôtes internes</div>
       </div>
       <div class="stat-card">
         <div class="stat-value">${pct}%</div>
@@ -458,7 +458,7 @@ async function dashboard() {
       <div class="stat-card" style="cursor:pointer;" onclick="navigateTo('groups')">
         <div style="font-size:12px;color:var(--text2);margin-bottom:8px;">Destinations</div>
         <div style="display:flex;gap:16px;align-items:center;">
-          <div><div class="stat-value" style="font-size:18px;">${fmtNum(s.privateDstIPs)}</div><div class="stat-label" style="color:var(--accent2)">LAN (RFC1918)</div></div>
+          <div><div class="stat-value" style="font-size:18px;">${fmtNum(s.privateDstIPs)}</div><div class="stat-label" style="color:var(--accent2)">LAN (réseaux internes)</div></div>
           <div><div class="stat-value" style="font-size:18px;color:var(--accent3)">${fmtNum(s.uniqueDstIPs - s.privateDstIPs)}</div><div class="stat-label" style="color:var(--accent3)">WAN (public)</div></div>
         </div>
       </div>
@@ -1011,7 +1011,7 @@ function renderGroups(subnets) {
   });
 
   if (!entries.length) {
-    el(_renderTarget || 'content').innerHTML = '<div class="empty-state"><div class="empty-icon">⊕</div><div class="empty-msg">Aucun subnet RFC1918 trouvé</div></div>';
+    el(_renderTarget || 'content').innerHTML = '<div class="empty-state"><div class="empty-icon">⊕</div><div class="empty-msg">Aucun réseau interne trouvé</div></div>';
     return;
   }
 
