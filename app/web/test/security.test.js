@@ -268,3 +268,13 @@ test('la consolidation ne fusionne jamais deux scopes FortiGate/VDOM', () => {
   assert.equal(result.length, 2);
   assert.deepEqual(result.map(p => p.scope.vdom).sort(), ['root', 'tenant-b']);
 });
+
+
+test('les flux IPv6 non pris en charge sont comptés explicitement', async () => {
+  const log = 'date=2026-07-01 time=10:00:00 type=traffic devname="FGT-A" vd="root" srcip=2001:db8::10 dstip=2001:db8::20 dstport=443 proto=6 action=accept service=HTTPS';
+  const result = await parseStream(Readable.from([log]));
+  assert.equal(result.flowMap.size, 0);
+  assert.equal(result.skipped, 1);
+  assert.equal(result.skipReasons.ipv6, 1);
+  assert.equal(result.skipReasons.invalidFlow, 0);
+});
