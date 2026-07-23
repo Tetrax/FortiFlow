@@ -118,10 +118,21 @@ const DENY_ACTIONS = new Set([
   'reject', 'rejected', 'violation',
 ]);
 
-function normalizeDecision(action) {
+function normalizeDecision(action, context = {}) {
   const value = String(action || '').toLowerCase().trim();
   if (ALLOW_ACTIONS.has(value)) return 'allow';
   if (DENY_ACTIONS.has(value)) return 'deny';
+
+  // FortiOS journalise certaines tentatives DNS non abouties avec action="dns"
+  // et msg="Connection Failed". Ce n'est ni une autorisation ni un refus :
+  // garder une classe dédiée empêche de créer une règle à partir d'un échec connu.
+  const message = String(context.msg || '').toLowerCase().trim();
+  const dstport = String(context.dstport || '').trim();
+  const proto = String(context.proto || '').toLowerCase().trim();
+  if (value === 'dns' && message === 'connection failed' && dstport === '53' && (proto === '17' || proto === 'udp')) {
+    return 'failed';
+  }
+
   return 'unknown';
 }
 
@@ -206,7 +217,7 @@ function extractFlow(fields) {
   const ts       = flowTimestamp(fields);
   const day      = flowDay(fields, ts);
   const action   = (fields.action || '').toLowerCase().trim();
-  const decision = normalizeDecision(action);
+  const decision = normalizeDecision(action, { ...fields, proto, service });
 
   return {
     srcip:    isValidIPv4(srcip) ? srcip : '',
