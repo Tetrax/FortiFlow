@@ -499,6 +499,7 @@ function parseFortiConfig(text, selectedVdom = null) {
       _roleWan: roleWan,
       isTunnel,
       isSdwan:  sdwanMembers.includes(name),
+      vrf:       parseInt(props.vrf || '0', 10) || 0,
     };
   }
 
@@ -575,6 +576,11 @@ function parseFortiConfig(text, selectedVdom = null) {
   // OSPF detection — vérifie la présence de networks configurés
   const hasOspf = /config router ospf[\s\S]*?set router-id\s+\d/m.test(parseText);
 
+  // PBR et VRF non par défaut exigent un contexte de routage que la matrice
+  // standard ne peut pas déduire de manière certaine.
+  const hasPolicyRoutes = /config router policy(?:6)?\b/.test(parseText);
+  const hasNonDefaultVrf = Object.values(interfaces).some(iface => iface.vrf !== 0);
+
   // ── Security profiles ──
   const securityProfiles = {
     antivirus:    Object.keys(_sections['antivirus profile'] || {}),
@@ -584,7 +590,7 @@ function parseFortiConfig(text, selectedVdom = null) {
     profileGroup: Object.keys(_sections['firewall profile-group'] || {}),
   };
 
-  return { addresses, addressGroups, customServices, serviceGroups, interfaces, zones, sdwanMembers, sdwanZoneNames, sdwanEnabled, sdwanIntfName, vdomList, selectedVdom: activeVdom, hasVdom: vdomList.length > 0, staticRoutes, fullRoutes, hasBgp, hasOspf, existingPolicies, securityProfiles };
+  return { addresses, addressGroups, customServices, serviceGroups, interfaces, zones, sdwanMembers, sdwanZoneNames, sdwanEnabled, sdwanIntfName, vdomList, selectedVdom: activeVdom, hasVdom: vdomList.length > 0, staticRoutes, fullRoutes, hasBgp, hasOspf, hasPolicyRoutes, hasNonDefaultVrf, existingPolicies, securityProfiles };
 }
 
 // ─── Static routes + BGP parser ──────────────────────────────────────────────
@@ -1828,6 +1834,13 @@ function preflightValidation(selectedPolicies, config) {
 
   const namesUsed = new Map(); // name → [policy indices]
   const selectedScopes = new Set();
+
+  if (config.hasPolicyRoutes) {
+    issues.push({ level: 'error', msg: 'Policy-Based Routing détecté : contexte PBR non pris en charge pour une génération certaine' });
+  }
+  if (config.hasNonDefaultVrf) {
+    issues.push({ level: 'error', msg: 'VRF non par défaut détectée : sélection de table VRF requise avant génération' });
+  }
 
   for (let i = 0; i < selectedPolicies.length; i++) {
     const p = selectedPolicies[i];
