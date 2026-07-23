@@ -94,6 +94,28 @@ test('les échecs DNS FortiOS restent distincts des flux acceptés et des action
   assert.equal(analysis.policies.length, 0);
 });
 
+test('le parser accepte les CSV FAZ au point-virgule avec directive Excel', async () => {
+  const csv = [
+    '\uFEFFsep=;',
+    'Date;Time;IP source;IP destination;Port destination;Protocole;Action;Service;Interface source;Interface destination',
+    '2026-07-23;12:00:00;10.0.0.10;10.0.1.53;53;17;accept;DNS;lan;servers',
+  ].join('\n');
+  const result = await parseStream(Readable.from([csv]));
+  const flows = [...result.flowMap.values()];
+  assert.equal(flows.length, 1);
+  assert.equal(flows[0].srcip, '10.0.0.10');
+  assert.equal(flows[0].dstip, '10.0.1.53');
+  assert.equal(flows[0].decision, 'allow');
+});
+
+test('un CSV aux colonnes incompatibles est refusé avec un diagnostic lisible', async () => {
+  const csv = 'foo;bar;baz\n1;2;3';
+  await assert.rejects(
+    parseStream(Readable.from([csv])),
+    /colonnes obligatoires introuvables.*srcip.*dstip.*action/i
+  );
+});
+
 test('le parser ne fusionne pas deux VDOM utilisant les mêmes adresses', async () => {
   const logs = [
     'date=2026-07-01 time=10:00:00 type=traffic devname="FGT-A" devid="FGT123" vd="root" srcip=10.0.0.10 dstip=10.0.1.20 srcport=50000 dstport=443 proto=6 action=accept service=HTTPS srcintf="lan" dstintf="servers"',
