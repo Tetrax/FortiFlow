@@ -7,7 +7,7 @@ const fs               = require('fs');
 const { WebSocketServer } = require('ws');
 
 const { parseFile }                                      = require('./lib/parser');
-const { buildAnalysis, consolidatePolicies }             = require('./lib/analyzer');
+const { buildAnalysis, consolidatePolicies, flowDecision } = require('./lib/analyzer');
 const { createSession, getSession, setSessionData, setFortiConfig,
         setSessionError, deleteSession, getStats, listSessions } = require('./lib/store');
 const { parseFortiConfig, analyzePolicies,
@@ -1579,7 +1579,7 @@ app.post('/api/deploy/preflight', (req, res) => {
   }
 
   try {
-    const result = preflightValidation(selectedPolicies, s.fortiConfig);
+    const result = preflightValidation(selectedPolicies, s.fortiConfig, s.data?.flows || []);
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1633,6 +1633,15 @@ app.post('/api/deploy/generate', (req, res) => {
     }
 
     // SD-WAN zone takes priority; if none, preferredWanIntf falls to null (detectWanCandidates handles it)
+    // Contrôle le plan reçu avant toute ré-analyse afin de bloquer un périmètre élargi ou non prouvé.
+    const requestedPreflight = preflightValidation(selectedPolicies, configToUse, s.data?.flows || []);
+    if (!requestedPreflight.ok) {
+      return res.status(422).json({
+        error: 'Génération refusée : le plan demandé dépasse les flux observés',
+        preflight: requestedPreflight,
+      });
+    }
+
     const analyzed = analyzePolicies(selectedPolicies, configToUse, o.preferredWanIntf || null);
 
     // Re-inject per-policy overrides from frontend (action, log, securityProfiles)
@@ -1645,6 +1654,7 @@ app.post('/api/deploy/generate', (req, res) => {
 
     // Inject frontend-merged services (multi-port / range) into each policy's analysis
     // Also re-inject user-set suggestedName for standard services (lost during re-analysis)
+    const serviceScopeIssues = [];
     for (let i = 0; i < analyzed.length; i++) {
       const src = selectedPolicies[i] || {};
 
@@ -1661,6 +1671,18 @@ app.post('/api/deploy/generate', (req, res) => {
         }
       }
 
+      if (src._segmentationPlan) {
+        const expected = srcServices.map(s => String(s.label || s.name || '').toUpperCase()).filter(Boolean).sort();
+        const recalculated = analyzed[i].analysis.services
+          .map(s => String(s.label || s.name || '').toUpperCase()).filter(Boolean).sort();
+        if (expected.length !== recalculated.length || expected.some((value, index) => value !== recalculated[index])) {
+          serviceScopeIssues.push({
+            level: 'error',
+            msg: `Policy #${i + 1}: dérive de services après ré-analyse (attendu: ${expected.join(', ') || 'aucun'}; obtenu: ${recalculated.join(', ') || 'aucun'})`,
+          });
+        }
+      }
+
       const merged = src._mergedServices;
       if (Array.isArray(merged) && merged.length > 0) {
         for (const ms of merged) {
@@ -1674,10 +1696,22 @@ app.post('/api/deploy/generate', (req, res) => {
       }
     }
 
+    if (serviceScopeIssues.length) {
+      return res.status(422).json({
+        error: 'Génération refusée : le moteur a élargi les services demandés',
+        preflight: {
+          issues: serviceScopeIssues,
+          errors: serviceScopeIssues.length,
+          warnings: 0,
+          ok: false,
+        },
+      });
+    }
+
     // La route de génération applique toujours le preflight côté serveur.
     // L'appel séparé depuis l'UI reste utile pour l'affichage, mais ne constitue
     // jamais une barrière de sécurité suffisante.
-    const preflight = preflightValidation(analyzed, configToUse);
+    const preflight = preflightValidation(analyzed, configToUse, s.data?.flows || []);
     if (!preflight.ok) {
       return res.status(422).json({
         error: 'Génération refusée par le contrôle preflight',
@@ -1734,20 +1768,31 @@ app.post('/api/deploy/generate', (req, res) => {
       // Only index hosts that appear in analyzed policies (avoids sending unnecessary data)
       const relevantSrcs = new Set();
       const relevantDsts = new Set();
+      const relevantPublicDsts = new Set();
       for (const p of analyzed) {
         for (const h of (p.srcHosts || [])) relevantSrcs.add(h);
         for (const h of (p.dstHosts || [])) relevantDsts.add(h);
+        if (p.dstType === 'public' && p.dstTarget) {
+          relevantPublicDsts.add(String(p.dstTarget).split('/')[0]);
+        }
       }
       for (const f of s.data.flows) {
-        if (f.action !== 'accept') continue;             // P2: ignorer deny/drop — allège le scan et reflète les policies (toutes en accept)
-        if (!f.srcip || !f.dstip || !f.service) continue;
-        // C2: les destinations publiques n'ont pas de dstHosts (analyzer.js) → relevantDsts ne les contient jamais.
-        //     Sans cette branche, aucune paire WAN n'est indexée et les modes /32 Internet fabriquent des paires fictives.
-        const dstOk = relevantDsts.has(f.dstip) || f.dstType === 'public';
+        if (flowDecision(f) !== 'allow') continue;
+        if (!f.srcip || !f.dstip) continue;
+        const dstOk = relevantDsts.has(f.dstip) || relevantPublicDsts.has(f.dstip);
         if (!relevantSrcs.has(f.srcip) || !dstOk) continue;
+
+        let svcUpper = String(f.service || '').trim().toUpperCase();
+        if (!svcUpper && f.dstport) {
+          const proto = /^(17|udp)$/i.test(String(f.proto)) ? 'UDP'
+            : /^(6|tcp)$/i.test(String(f.proto)) ? 'TCP'
+            : String(f.proto || '').toUpperCase();
+          if (proto) svcUpper = `${f.dstport}/${proto}`;
+        }
+        if (!svcUpper) continue;
+
         const key = f.srcip + '|' + f.dstip;
         if (!hostPairServices[key]) hostPairServices[key] = [];
-        const svcUpper = f.service.toUpperCase();
         if (!hostPairServices[key].includes(svcUpper)) hostPairServices[key].push(svcUpper);
       }
     }
