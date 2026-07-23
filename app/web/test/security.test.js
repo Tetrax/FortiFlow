@@ -7,6 +7,7 @@ const { Readable } = require('node:stream');
 const { parseStream, normalizeDecision } = require('../lib/parser');
 const { buildAnalysis, flowDecision, consolidatePolicies } = require('../lib/analyzer');
 const { parseFortiConfig, analyzePolicies, generateConfig, preflightValidation } = require('../lib/forticonfig');
+const { buildPoliciesByPlan } = require('../public/segmentation-plan.js');
 
 function aggregate(overrides = {}) {
   return {
@@ -346,4 +347,137 @@ test('le preflight bloque les contextes PBR et VRF non sélectionnés', () => {
   assert.ok(pbr.issues.some(i => /Policy-Based Routing/.test(i.msg)));
   assert.equal(vrf.ok, false);
   assert.ok(vrf.issues.some(i => /VRF non par défaut/.test(i.msg)));
+});
+
+
+test('le preflight prouve une règle stricte avec les flux acceptés exacts', () => {
+  const config = {
+    addresses: {}, addressGroups: {}, zones: {},
+    interfaces: { lan: {}, servers: {} },
+  };
+  const policy = {
+    srcintf: 'lan',
+    dstintf: 'servers',
+    srcSubnet: '10.0.0.10/32',
+    dstTarget: '10.0.1.20/32',
+    srcHosts: ['10.0.0.10'],
+    dstHosts: ['10.0.1.20'],
+    services: ['HTTPS'],
+    serviceTuples: [{ proto: '6', port: '443', service: 'HTTPS' }],
+    _use32Src: true,
+    _use32Dst: true,
+    _segmentationPlan: { source: 'host', destination: 'host', services: 'separate' },
+    action: 'accept',
+    log: 'all',
+    scope: { devid: 'FGT123', vdom: 'root' },
+    analysis: {
+      srcAddr: { found: false, name: 'SRC' },
+      dstAddr: { found: false, name: 'DST' },
+      srcIface: 'lan',
+      dstIface: 'servers',
+      services: [{ label: 'HTTPS', name: 'HTTPS', found: true }],
+    },
+  };
+  const flows = [aggregate()];
+
+  assert.equal(preflightValidation([policy], config, flows).ok, true);
+
+  const phantom = {
+    ...policy,
+    dstTarget: '10.0.1.21/32',
+    dstHosts: ['10.0.1.21'],
+  };
+  const rejected = preflightValidation([phantom], config, flows);
+  assert.equal(rejected.ok, false);
+  assert.ok(rejected.issues.some(issue => /aucun flux accepté|non observé/.test(issue.msg)));
+});
+
+test('le preflight bloque les services techniques plus larges que le plan', () => {
+  const config = {
+    addresses: {}, addressGroups: {}, zones: {},
+    interfaces: { lan: {}, servers: {} },
+  };
+  const policy = {
+    srcintf: 'lan',
+    dstintf: 'servers',
+    srcSubnet: '10.0.0.10/32',
+    dstTarget: '10.0.1.20/32',
+    srcHosts: ['10.0.0.10'],
+    dstHosts: ['10.0.1.20'],
+    services: ['HTTPS', 'DNS'],
+    serviceTuples: [
+      { proto: '6', port: '443', service: 'HTTPS' },
+      { proto: '17', port: '53', service: 'DNS' },
+    ],
+    _use32Src: true,
+    _use32Dst: true,
+    _segmentationPlan: { source: 'host', destination: 'host', services: 'separate' },
+    analysis: {
+      srcAddr: { found: false, name: 'SRC' },
+      dstAddr: { found: false, name: 'DST' },
+      srcIface: 'lan',
+      dstIface: 'servers',
+      services: [{ label: 'HTTPS', name: 'HTTPS', found: true }],
+    },
+  };
+  const rejected = preflightValidation([policy], config, [aggregate()]);
+  assert.equal(rejected.ok, false);
+  assert.ok(rejected.issues.some(issue => /services techniques hors périmètre/.test(issue.msg)));
+  assert.ok(rejected.issues.some(issue => /tuples protocole\/port hors/.test(issue.msg)));
+});
+
+test('la chaîne plan → ré-analyse → CLI conserve une règle par service', () => {
+  const serviceObjects = [
+    { label: 'HTTPS', name: 'HTTPS', found: true },
+    { label: 'DNS', name: 'DNS', found: true },
+  ];
+  const base = {
+    srcSubnet: '10.0.0.0/24',
+    dstTarget: '10.0.1.0/24',
+    dstType: 'private',
+    flowSrcintf: 'lan',
+    services: ['HTTPS', 'DNS'],
+    ports: [443, 53],
+    protos: ['TCP', 'UDP'],
+    serviceTuples: [
+      { proto: '6', port: '443', service: 'HTTPS', sessions: 1 },
+      { proto: '17', port: '53', service: 'DNS', sessions: 1 },
+    ],
+    srcHosts: ['10.0.0.10'],
+    dstHosts: ['10.0.1.20'],
+    analysis: { services: serviceObjects },
+  };
+  const hostPairServices = { '10.0.0.10|10.0.1.20': ['HTTPS', 'DNS'] };
+  const planned = buildPoliciesByPlan([base], {
+    source: 'host',
+    destination: 'host',
+    services: 'separate',
+  }, {
+    hostPairServices,
+    getServicesForPair: () => serviceObjects,
+  });
+  const config = {
+    addresses: {}, addressGroups: {}, customServices: {}, serviceGroups: {},
+    interfaces: {
+      lan: { name: 'lan', cidr: '10.0.0.1/24' },
+      servers: { name: 'servers', cidr: '10.0.1.1/24' },
+    },
+    zones: {}, fullRoutes: [], staticRoutes: [],
+    sdwanEnabled: false, sdwanMembers: [],
+  };
+  const analyzed = analyzePolicies(planned, config);
+  assert.deepEqual(analyzed.map(policy => policy.analysis.services.map(service => service.label)), [['HTTPS'], ['DNS']]);
+
+  const flows = [
+    aggregate(),
+    aggregate({ dstport: '53', proto: '17', service: 'DNS' }),
+  ];
+  assert.equal(preflightValidation(analyzed, config, flows).ok, true);
+
+  const cli = generateConfig(analyzed, { addresses: {}, addressGroups: {}, zones: {} });
+  const serviceLines = cli.split('\n').filter(line => line.trim().startsWith('set service '));
+  assert.equal(serviceLines.length, 2);
+  assert.ok(serviceLines.every(line => !line.includes('" "')));
+  assert.ok(serviceLines.some(line => line.includes('"HTTPS"')));
+  assert.ok(serviceLines.some(line => line.includes('"DNS"')));
 });
