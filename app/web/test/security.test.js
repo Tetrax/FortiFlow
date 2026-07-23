@@ -8,7 +8,7 @@ const { parseStream, normalizeDecision } = require('../lib/parser');
 const { buildAnalysis, flowDecision, consolidatePolicies } = require('../lib/analyzer');
 const { parseFortiConfig, analyzePolicies, generateConfig, preflightValidation } = require('../lib/forticonfig');
 const { buildPoliciesByPlan } = require('../public/segmentation-plan.js');
-const { getCaptureDeploymentBlockers, shouldBlockCaptureGeneration } = require('../lib/deploy-safety');
+const { getCaptureDeploymentBlockers } = require('../lib/deploy-safety');
 
 function aggregate(overrides = {}) {
   return {
@@ -343,11 +343,22 @@ test('le preflight bloque les contextes PBR et VRF non sélectionnés', () => {
   };
   const baseConfig = { addresses: {}, addressGroups: {}, interfaces: { lan: {}, wan1: {} }, zones: {} };
   const pbr = preflightValidation([policy], { ...baseConfig, hasPolicyRoutes: true });
+  const pbrOverride = preflightValidation(
+    [policy],
+    { ...baseConfig, hasPolicyRoutes: true },
+    null,
+    { allowPbrOverride: true },
+  );
   const vrf = preflightValidation([policy], { ...baseConfig, hasNonDefaultVrf: true });
+
   assert.equal(pbr.ok, false);
-  assert.ok(pbr.issues.some(i => /Policy-Based Routing/.test(i.msg)));
+  assert.ok(pbr.issues.some(i => i.code === 'PBR_CONTEXT' && i.overridable === true));
+  assert.equal(pbrOverride.ok, true);
+  assert.ok(pbrOverride.issues.some(i => i.code === 'PBR_OVERRIDE' && i.level === 'warn'));
+  assert.match(generateConfig([], { pbrOverride: true }), /exception PBR confirmée/);
+
   assert.equal(vrf.ok, false);
-  assert.ok(vrf.issues.some(i => /VRF non par défaut/.test(i.msg)));
+  assert.ok(vrf.issues.some(i => i.code === 'VRF_CONTEXT' && i.overridable === false));
 });
 
 
@@ -484,7 +495,7 @@ test('la chaîne plan → ré-analyse → CLI conserve une règle par service', 
 });
 
 
-test('les flux non classifiés n’empêchent pas l’analyse mais bloquent la CLI finale', () => {
+test('les flux exclus restent signalés sans élargir ni bloquer une policy prouvée', () => {
   const sessionData = {
     meta: { skipReasons: { ipv6: 3 } },
     stats: { unknownSessions: 7 },
@@ -492,9 +503,13 @@ test('les flux non classifiés n’empêchent pas l’analyse mais bloquent la C
   assert.deepEqual(getCaptureDeploymentBlockers(sessionData), {
     unsupportedIpv6: 3,
     unknownActionSessions: 7,
-    blocked: true,
+    hasExcludedTraffic: true,
+    blocked: false,
   });
-  assert.equal(shouldBlockCaptureGeneration(sessionData, { analysisOnly: true }), false);
-  assert.equal(shouldBlockCaptureGeneration(sessionData, {}), true);
-  assert.equal(shouldBlockCaptureGeneration({}, {}), false);
+  assert.deepEqual(getCaptureDeploymentBlockers({}), {
+    unsupportedIpv6: 0,
+    unknownActionSessions: 0,
+    hasExcludedTraffic: false,
+    blocked: false,
+  });
 });
