@@ -8144,9 +8144,6 @@ async function generateDeployConf() {
       if (pf.errors > 0 || pf.warnings > 0) {
         const proceed = await showPreflightModal(pf);
         if (!proceed) { if (btn) { btn.disabled = false; btn.textContent = '⬇ Générer config FortiGate'; } return; }
-        if (pf.issues.some(issue => issue.code === 'PBR_CONTEXT')) {
-          opts.allowPbrOverride = true;
-        }
       }
     }
   } catch { /* non-bloquant */ }
@@ -8251,7 +8248,6 @@ function showPreflightModal(pf) {
   return new Promise(resolve => {
     const errors  = pf.issues.filter(i => i.level === 'error');
     const warns   = pf.issues.filter(i => i.level === 'warn');
-    const canOverride = errors.length > 0 && errors.every(i => i.overridable === true);
     const icon    = pf.errors > 0 ? '🛑' : '⚠️';
     const title   = pf.errors > 0 ? 'Erreurs détectées' : 'Avertissements';
 
@@ -8267,11 +8263,7 @@ function showPreflightModal(pf) {
         ${warns.length ? `<div class="preflight-section"><div class="preflight-section-title">Avertissements (${warns.length})</div>${warnHtml}</div>` : ''}
         <div class="preflight-actions">
           <button class="btn-sm" id="pf-cancel">Annuler</button>
-          ${pf.errors === 0
-            ? `<button class="btn-accent" id="pf-continue">Continuer quand même</button>`
-            : canOverride
-              ? `<button class="btn-accent" id="pf-continue">Générer avec exception PBR</button>`
-              : ''}
+          ${pf.errors === 0 ? `<button class="btn-accent" id="pf-continue">Continuer quand même</button>` : ''}
         </div>
       </div>`;
 
