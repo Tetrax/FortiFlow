@@ -80,10 +80,21 @@ const DENY_ACTIONS = new Set([
 // Compatibilité avec les imports déjà présents en mémoire : les nouveaux parsers
 // fournissent decision, les anciens flux sont normalisés ici avec le même mode fail-closed.
 function flowDecision(flow) {
-  if (flow && (flow.decision === 'allow' || flow.decision === 'deny')) return flow.decision;
+  if (flow && ['allow', 'deny', 'failed'].includes(flow.decision)) return flow.decision;
   const action = String(flow?.action || '').toLowerCase().trim();
   if (ALLOW_ACTIONS.has(action)) return 'allow';
   if (DENY_ACTIONS.has(action)) return 'deny';
+
+  // Compatibilité avec les captures déjà analysées avant l'ajout de la classe
+  // "failed" : un agrégat DNS/UDP 53 sans aucun octet ne prouve aucun flux utile.
+  const failedDns = action === 'dns'
+    && String(flow?.service || '').toUpperCase().trim() === 'DNS'
+    && String(flow?.dstport || '').trim() === '53'
+    && String(flow?.proto || '').toLowerCase().trim().replace('udp', '17') === '17'
+    && Number(flow?.sentBytes || 0) === 0
+    && Number(flow?.rcvdBytes || 0) === 0;
+  if (failedDns) return 'failed';
+
   return 'unknown';
 }
 
@@ -229,6 +240,7 @@ function buildAnalysis(flowInput, knownSubnets = []) {
   let totalSessions  = 0;
   let acceptSessions  = 0;
   let denySessions    = 0;
+  let failedSessions  = 0;
   let unknownSessions = 0;
   let totalBytes      = 0;
   const scopes = new Map();
@@ -247,6 +259,8 @@ function buildAnalysis(flowInput, knownSubnets = []) {
       acceptSessions += f.count;
     } else if (decision === 'deny') {
       denySessions += f.count;
+    } else if (decision === 'failed') {
+      failedSessions += f.count;
     } else {
       unknownSessions += f.count;
     }
@@ -356,6 +370,7 @@ function buildAnalysis(flowInput, knownSubnets = []) {
       srcSubnets:    srcSubnetsSet.size,
       acceptSessions,
       denySessions,
+      failedSessions,
       unknownSessions,
       deniedPolicyGroups,
       totalBytes,
