@@ -6,7 +6,7 @@ const { Readable } = require('node:stream');
 
 const { parseStream, normalizeDecision } = require('../lib/parser');
 const { buildAnalysis, flowDecision } = require('../lib/analyzer');
-const { parseFortiConfig, generateConfig } = require('../lib/forticonfig');
+const { parseFortiConfig, generateConfig, preflightValidation } = require('../lib/forticonfig');
 
 function aggregate(overrides = {}) {
   return {
@@ -145,4 +145,102 @@ test('un groupe de profils utilise la syntaxe FortiOS correcte', () => {
   assert.match(cli, /set profile-type group/);
   assert.match(cli, /set profile-group "EDGE-PROFILES"/);
   assert.doesNotMatch(cli, /set profile-protocol-options "EDGE-PROFILES"/);
+});
+
+
+test('un préfixe public porté par une interface LAN reste interne', () => {
+  const netA = (203 * 0x1000000 + 0 * 0x10000 + 113 * 0x100) >>> 0;
+  const netB = (203 * 0x1000000 + 0 * 0x10000 + 114 * 0x100) >>> 0;
+  const known = [
+    { prefix: 24, networkInt: netA, cidr: '203.0.113.0/24', internal: true },
+    { prefix: 24, networkInt: netB, cidr: '203.0.114.0/24', internal: true },
+  ];
+  const result = buildAnalysis([
+    aggregate({ srcip: '203.0.113.10', dstip: '203.0.114.20' }),
+  ], known);
+  assert.equal(result.policies.length, 1);
+  assert.equal(result.policies[0].srcSubnet, '203.0.113.0/24');
+  assert.equal(result.policies[0].dstType, 'private');
+  assert.equal(result.policies[0].dstTarget, '203.0.114.0/24');
+});
+
+test('les routes statiques désactivées sont ignorées et la priorité est respectée', () => {
+  const config = parseFortiConfig(`
+config system interface
+    edit "lan"
+        set ip 10.0.0.1 255.255.255.0
+        set role lan
+    next
+    edit "wan1"
+        set ip 192.0.2.2 255.255.255.252
+        set role wan
+    next
+    edit "wan2"
+        set ip 198.51.100.2 255.255.255.252
+        set role wan
+    next
+end
+config router static
+    edit 1
+        set status disable
+        set dst 0.0.0.0 0.0.0.0
+        set device "bad-wan"
+    next
+    edit 2
+        set dst 0.0.0.0 0.0.0.0
+        set device "wan2"
+        set distance 10
+        set priority 20
+    next
+    edit 3
+        set dst 0.0.0.0 0.0.0.0
+        set device "wan1"
+        set distance 10
+        set priority 5
+    next
+end
+`);
+  assert.equal(config.staticRoutes.some(r => r.device === 'bad-wan'), false);
+  assert.deepEqual(config.staticRoutes.map(r => r.device), ['wan1', 'wan2']);
+});
+
+test('le preflight refuse une action invalide et les scopes VDOM mélangés', () => {
+  const config = {
+    addresses: {},
+    addressGroups: {},
+    interfaces: { lan: {}, wan1: {} },
+    zones: {},
+    selectedVdom: 'root',
+  };
+  const base = {
+    srcintf: 'lan',
+    dstintf: 'wan1',
+    dstType: 'public',
+    dstTarget: '8.8.8.8',
+    _dstUseAll: false,
+    dstHosts: ['8.8.8.8'],
+    action: 'accept',
+    log: 'all',
+    scope: { devid: 'FGT123', vdom: 'root' },
+    analysis: {
+      srcAddr: { found: false, name: 'SRC' },
+      dstAddr: { found: false, name: 'DST' },
+      services: [{ label: 'HTTPS', name: 'HTTPS', found: true }],
+      srcIface: 'lan',
+      dstIface: 'wan1',
+    },
+  };
+
+  assert.equal(preflightValidation([base], config).ok, true);
+  const badAction = preflightValidation([{ ...base, action: 'permit' }], config);
+  assert.equal(badAction.ok, false);
+  assert.match(badAction.issues.find(i => i.level === 'error').msg, /action FortiGate invalide/);
+
+  const mixed = preflightValidation([
+    base,
+    { ...base, scope: { devid: 'FGT123', vdom: 'tenant-b' } },
+  ], config);
+  assert.equal(mixed.ok, false);
+  assert.ok(mixed.issues.some(i => /Plusieurs équipements\/VDOM/.test(i.msg)));
+  assert.ok(mixed.issues.some(i => /incompatible/.test(i.msg)));
 });
