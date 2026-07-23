@@ -15,7 +15,16 @@ function extractSections(lines, sectionNames) {
   const wanted   = new Set(sectionNames);
   // Results map: sectionName → {}
   const results  = {};
-  for (const name of sectionNames) results[name] = {};
+  for (const name of sectionNames) {
+    results[name] = {};
+    // Les clés numériques d'un objet JavaScript sont réordonnées. Conserver
+    // séparément l'ordre FortiGate est indispensable pour simuler le first-match.
+    Object.defineProperty(results[name], '__order', { value: [], enumerable: false });
+  }
+  const storeEdit = (section, name, props) => {
+    if (!Object.prototype.hasOwnProperty.call(results[section], name)) results[section].__order.push(name);
+    results[section][name] = props;
+  };
 
   let depth      = 0;
   let inTarget   = null;  // current section name being parsed, or null
@@ -45,7 +54,7 @@ function extractSections(lines, sectionNames) {
     if (t === 'end') {
       if (--depth === 0) {
         // Flush last pending edit (some sections have no 'next' before 'end')
-        if (editName !== null) results[inTarget][editName] = editProps;
+        if (editName !== null) storeEdit(inTarget, editName, editProps);
         inTarget  = null;
         editName  = null;
         editProps = {};
@@ -56,11 +65,11 @@ function extractSections(lines, sectionNames) {
     if (depth !== 1) continue; // ignore nested section content
 
     if (t.startsWith('edit ')) {
-      if (editName !== null) results[inTarget][editName] = editProps;
+      if (editName !== null) storeEdit(inTarget, editName, editProps);
       editName  = t.slice(5).trim().replace(/^"|"$/g, '');
       editProps = {};
     } else if (t === 'next') {
-      if (editName !== null) results[inTarget][editName] = editProps;
+      if (editName !== null) storeEdit(inTarget, editName, editProps);
       editName  = null;
       editProps = {};
     } else if (t.startsWith('set ') || t.startsWith('append ')) {
@@ -419,7 +428,8 @@ function parseFortiConfig(text, selectedVdom = null) {
   const existingPolicies = [];
   const parseMultiVal = (val) => (val || '').match(/"([^"]+)"/g)?.map(m => m.replace(/"/g, ''))
                                  || (val || '').split(/\s+/).filter(Boolean).map(v => v.replace(/^"|"$/g, ''));
-  for (const [editId, props] of Object.entries(rawPolicies)) {
+  for (const editId of (rawPolicies.__order || Object.keys(rawPolicies))) {
+    const props = rawPolicies[editId];
     existingPolicies.push({
       policyid:  parseInt(editId, 10) || editId,
       name:      (props.name || '').replace(/^"|"$/g, ''),
@@ -1414,12 +1424,26 @@ function generateConfig(selectedPolicies, opts = {}) {
       const name = p._dstAddrName || suggestAddrName(cidr, NP);
       newAddresses.set(cidr, name);
       dstAddrName = name;
-    // ── WAN policy : dstaddr "all" par défaut, ou IPs spécifiques si _dstUseAll=false ──
-    } else if ((p._isWan || p.dstType === 'public') && p._dstUseAll !== false) {
+    // ── WAN policy : "all" uniquement sur choix explicite ──
+    } else if ((p._isWan || p.dstType === 'public') && p._dstUseAll === true) {
       dstAddrName = 'all';
-    } else if ((p._isWan || p.dstType === 'public') && p._dstUseAll === false) {
-      // Mode IPs spécifiques pour policy WAN
-      if (p._use32Dst && p.dstHosts?.length > 0) {
+    } else if (p._isWan || p.dstType === 'public') {
+      // Mode sûr par défaut : conserver exactement les destinations WAN observées.
+      if (p._isMultiDst && p._multiDstSubnets?.length > 0) {
+        const hosts = [...new Set([
+          ...(p.dstHosts || []),
+          ...p._multiDstSubnets.flatMap(s => s.hosts || []),
+        ])];
+        if (!hosts.length) {
+          throw new Error(`Policy WAN "${p.policyName || p.name || p.id || '?'}" sans destination spécifique — génération refusée`);
+        }
+        const hostNames = hosts.map(h => {
+          const { name, isNew } = resolveHost32(h, p._dstHostNames);
+          if (isNew) newAddresses.set(`${h}/32`, name);
+          return name;
+        });
+        dstAddrName = hostNames.length === 1 ? hostNames[0] : hostNames;
+      } else if (p._use32Dst && p.dstHosts?.length > 0) {
         const hostNames = p.dstHosts.map(h => {
           const { name, isNew } = resolveHost32(h, p._dstHostNames);
           if (isNew) newAddresses.set(`${h}/32`, name);
@@ -1440,7 +1464,7 @@ function generateConfig(selectedPolicies, opts = {}) {
         newAddresses.set(cidr, name);
         dstAddrName = name;
       } else {
-        dstAddrName = 'all';
+        throw new Error(`Policy WAN "${p.policyName || p.name || p.id || '?'}" sans destination spécifique — génération refusée`);
       }
     // ── Multi-dst : "all" si _dstUseAll=true ──
     } else if (p._isMultiDst && p._dstUseAll === true) {
@@ -1695,7 +1719,10 @@ function generateConfig(selectedPolicies, opts = {}) {
       const hasUtm = sp.antivirus || sp.webfilter || sp.ips || sp.sslSsh || sp.profileGroup;
       if (hasUtm) {
         L.push(`        set utm-status enable`);
-        if (sp.profileGroup)  L.push(`        set profile-protocol-options "${safeCli(sp.profileGroup)}"`);
+        if (sp.profileGroup) {
+          L.push('        set profile-type group');
+          L.push(`        set profile-group "${safeCli(sp.profileGroup)}"`);
+        }
         if (sp.antivirus)     L.push(`        set av-profile "${safeCli(sp.antivirus)}"`);
         if (sp.webfilter)     L.push(`        set webfilter-profile "${safeCli(sp.webfilter)}"`);
         if (sp.ips)           L.push(`        set ips-sensor "${safeCli(sp.ips)}"`);
