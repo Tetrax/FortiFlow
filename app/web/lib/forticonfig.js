@@ -1625,8 +1625,11 @@ function generateConfig(selectedPolicies, opts = {}) {
       srcSubnet:   p.srcSubnets ? p.srcSubnets.join(', ') : p.srcSubnet,
       dstTarget:   p.dstTarget,
       serviceDesc: p.serviceDesc, sessions: p.sessions,
-      tags: p.tags || [],
-      disabled:    p._disabled || false,
+      action:      p.action || p._action || actionVerb,
+      log:         p.log || p._log || logTraffic,
+      securityProfiles: p.securityProfiles || p._secProfiles || null,
+      tags:        p.tags || p._tags || [],
+      disabled:    p.disabled ?? p._disabled ?? false,
     });
   }
 
