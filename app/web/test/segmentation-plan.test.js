@@ -15,6 +15,13 @@ function fixture() {
     dstTarget: '10.0.2.0/24',
     dstType: 'private',
     sessions: 120,
+    services: ['HTTPS', 'DNS'],
+    ports: [443, 53],
+    protos: ['TCP', 'UDP'],
+    serviceTuples: [
+      { proto: '6', port: '443', service: 'HTTPS', sessions: 2 },
+      { proto: '17', port: '53', service: 'DNS', sessions: 2 },
+    ],
     srcHosts: ['10.0.1.10', '10.0.1.11'],
     dstHosts: ['10.0.2.10', '10.0.2.11'],
     analysis: { services },
@@ -50,6 +57,8 @@ test('wide mode keeps one network-to-network rule with grouped services', () => 
   assert.equal(result[0].srcSubnet, '10.0.1.0/24');
   assert.equal(result[0].dstTarget, '10.0.2.0/24');
   assert.deepEqual(result[0].analysis.services.map(service => service.label).sort(), ['DNS', 'HTTPS']);
+  assert.deepEqual(result[0].services.sort(), ['DNS', 'HTTPS']);
+  assert.equal(result[0].serviceTuples.length, 2);
 });
 
 test('targeted mode creates one grouped rule per observed server', () => {
@@ -57,7 +66,10 @@ test('targeted mode creates one grouped rule per observed server', () => {
   assert.equal(result.length, 2);
   assert.deepEqual(result.map(policy => policy.dstTarget).sort(), ['10.0.2.10/32', '10.0.2.11/32']);
   const server10 = result.find(policy => policy.dstTarget === '10.0.2.10/32');
+  const server11 = result.find(policy => policy.dstTarget === '10.0.2.11/32');
   assert.deepEqual(server10.analysis.services.map(service => service.label).sort(), ['DNS', 'HTTPS']);
+  assert.deepEqual(server11.services, ['DNS']);
+  assert.deepEqual(server11.serviceTuples.map(tuple => tuple.service), ['DNS']);
 });
 
 test('custom service mode separates services while retaining network objects', () => {
@@ -65,6 +77,11 @@ test('custom service mode separates services while retaining network objects', (
   assert.equal(result.length, 2);
   assert.ok(result.every(policy => policy._srcMode === 'subnet' && policy._dstMode === 'subnet'));
   assert.deepEqual(result.map(policy => policy.analysis.services[0].label).sort(), ['DNS', 'HTTPS']);
+  assert.ok(result.every(policy => policy.services.length === 1));
+  assert.ok(result.every(policy =>
+    policy.serviceTuples.length === 1
+    && policy.serviceTuples[0].service === policy.analysis.services[0].label
+  ));
 });
 
 test('strict mode creates exact observed host/service tuples without phantom pairs', () => {
@@ -74,6 +91,31 @@ test('strict mode creates exact observed host/service tuples without phantom pai
   assert.equal(result.some(policy =>
     policy.srcSubnet === '10.0.1.10/32' && policy.dstTarget === '10.0.2.11/32'
   ), false);
+});
+
+test('unnamed protocol/port tuples remain exact when services are separated', () => {
+  const policies = [{
+    srcSubnet: '10.0.1.0/24',
+    dstTarget: '10.0.2.0/24',
+    services: [],
+    ports: [853],
+    protos: ['TCP'],
+    serviceTuples: [{ proto: '6', port: '853', service: '', sessions: 1 }],
+    srcHosts: ['10.0.1.10'],
+    dstHosts: ['10.0.2.10'],
+    analysis: { services: [{ label: '853/TCP', port: 853, proto: 'TCP' }] },
+  }];
+  const result = buildPoliciesByPlan(policies, {
+    source: 'host',
+    destination: 'host',
+    services: 'separate',
+  }, {
+    hostPairServices: { '10.0.1.10|10.0.2.10': ['853/TCP'] },
+    getServicesForPair: (_src, _dst, policy) => policy.analysis.services,
+  });
+  assert.equal(result.length, 1);
+  assert.deepEqual(result[0].services, []);
+  assert.deepEqual(result[0].serviceTuples, [{ proto: '6', port: '853', service: '', sessions: 1 }]);
 });
 
 test('WAN destinations stay exact even when the selected destination scope is network', () => {
