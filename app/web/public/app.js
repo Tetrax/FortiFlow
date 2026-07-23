@@ -3220,7 +3220,7 @@ function buildDrawerSecProfiles(p, idx) {
     (list || []).map(n => `<option value="${escHtml(n)}" ${cur === n ? 'selected' : ''}>${escHtml(n)}</option>`).join('');
   const row = (label, key, list) => !list?.length ? '' :
     `<div class="drawer-field"><span class="drawer-field-label">${label}</span><select class="drawer-input drawer-sp-sel" data-idx="${idx}" data-sp="${key}" style="font-size:10px">${mkOpts(list, cur[key])}</select></div>`;
-  return `<div class="drawer-section">
+  return `<div class="drawer-section drawer-section-security">
     <div class="drawer-section-title">Profils de sécurité</div>
     ${row('Antivirus', 'antivirus', sp.antivirus)}
     ${row('Web Filter', 'webfilter', sp.webfilter)}
@@ -3389,7 +3389,7 @@ function populateDrawer(idx) {
         <button class="btn-del-item" data-del-type="src-subnet" data-si="${si}" title="Retirer ce subnet">✕</button>
       </div>${hostsHtml}`;
     }).join('');
-    srcSection = `<div class="drawer-section">
+    srcSection = `<div class="drawer-section drawer-section-source">
       <div class="drawer-section-title">Sources (${srcSubs.length} subnets)</div>
       ${srcSubRows}
       <div class="drawer-toggle-row" style="margin-top:8px">
@@ -3430,7 +3430,7 @@ function populateDrawer(idx) {
         </div>`;
       }
     }
-    srcSection = `<div class="drawer-section">
+    srcSection = `<div class="drawer-section drawer-section-source">
       <div class="drawer-section-title">Source</div>
       <div class="drawer-field"><span class="drawer-field-label">Subnet</span><span class="drawer-field-value">${escHtml(p.srcSubnet || '')}</span></div>
       <div class="drawer-toggle-row">
@@ -3488,7 +3488,7 @@ function populateDrawer(idx) {
     }).join('');
     const isMultiDstWan = p._isWan || p.dstTypeSummary === 'public' || subs.some(s => s.subnet === 'all' || (p.dstTypes || {})[s.subnet] === 'public');
     const dstUseAllMulti = p._dstUseAll === true;
-    dstSection = `<div class="drawer-section">
+    dstSection = `<div class="drawer-section drawer-section-destination">
       <div class="drawer-section-title">Destinations (${subs.length})</div>
       ${isMultiDstWan ? `<div class="drawer-toggle-row" style="margin-bottom:8px">
         <span style="font-size:11px;color:var(--text2)">Mode :</span>
@@ -3547,7 +3547,7 @@ function populateDrawer(idx) {
             <input class="drawer-input drawer-dst-name" value="${escHtml(inputVal(customName, autoName))}" placeholder="${escHtml(autoName)}">${badgeHtml('auto')}
           </div>`;
     }
-    dstSection = `<div class="drawer-section">
+    dstSection = `<div class="drawer-section drawer-section-destination">
       <div class="drawer-section-title">Destination</div>
       <div class="drawer-field">
         <span class="drawer-field-label">Target</span>
@@ -3650,8 +3650,8 @@ function populateDrawer(idx) {
 
   const body = document.getElementById('drawer-body');
   body.innerHTML = `
-    <div class="drawer-section">
-      <div class="drawer-section-title">General</div>
+    <div class="drawer-section drawer-section-general">
+      <div class="drawer-section-title">Général</div>
       <div class="drawer-field"><span class="drawer-field-label">Direction</span><span class="drawer-field-value">${p._isWan ? '<span class="dir-badge wan">WAN</span>' : '<span class="dir-badge lan">LAN</span>'}</span></div>
       <div class="drawer-field"><span class="drawer-field-label">Policy IDs</span><span class="drawer-field-value">${(p.policyIds||[]).join(', ') || '—'}</span></div>
       <div class="drawer-field"><span class="drawer-field-label">Sessions</span><span class="drawer-field-value">${fmtNum(p.sessions||0)}</span></div>
@@ -3676,11 +3676,11 @@ function populateDrawer(idx) {
     </div>
     ${srcSection}
     ${dstSection}
-    <div class="drawer-section">
-      <div class="drawer-section-title">Interfaces destination</div>
+    <div class="drawer-section drawer-section-interfaces">
+      <div class="drawer-section-title">Interface de destination</div>
       <div class="drawer-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-dstintf">${ifOptsDst}</select></div>
     </div>
-    ${svcList.length ? `<div class="drawer-section"><div class="drawer-section-title">Services (${svcList.length})${selectableSvcs.length > 1 ? `<label style="font-size:10px;color:var(--text2);font-weight:400;margin-left:8px;display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" class="svc-sel-all" ${selectedSvcs.length === selectableSvcs.length ? 'checked' : ''} style="cursor:pointer;margin:0"> Tout sélectionner</label>` : ''}</div>${svcsHtml}${mergeBar}${propagateBanner}</div>` : ''}
+    ${svcList.length ? `<div class="drawer-section drawer-section-services"><div class="drawer-section-title">Services (${svcList.length})${selectableSvcs.length > 1 ? `<label style="font-size:10px;color:var(--text2);font-weight:400;margin-left:8px;display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" class="svc-sel-all" ${selectedSvcs.length === selectableSvcs.length ? 'checked' : ''} style="cursor:pointer;margin:0"> Tout sélectionner</label>` : ''}</div>${svcsHtml}${mergeBar}${propagateBanner}</div>` : ''}
     ${buildDrawerSecProfiles(p, idx)}
   `;
 }
@@ -7923,7 +7923,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
   // body est récupéré et vérifié non-null en tête de fonction (garde M1)
   body.innerHTML = `
     ${_granularityBar()}
-    <div style="margin-bottom:8px;font-size:12px;color:var(--text2);display:flex;align-items:center;gap:12px">
+    <div class="deploy-policy-summary">
       <span>${total} polic${total > 1 ? 'ies' : 'y'} · <strong>${selCount}</strong> sélectionnées${hasMerge ? ' · <span style="color:var(--accent2)">⚡ fusion</span>' : ''}${
         (deployState.warnings || []).length > 0
           ? ` · <span style="color:var(--warn)">⚠ ${deployState.warnings.length} conflit${deployState.warnings.length > 1 ? 's' : ''}</span>`
@@ -7933,7 +7933,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
       ${_coverageBanner()}
     </div>
     ${paginationBar}
-    <div style="overflow-x:auto">
+    <div class="deploy-policy-scroll">
       <table class="deploy-policy-table">
         <thead><tr>
           <th></th>
