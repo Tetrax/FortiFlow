@@ -27,6 +27,12 @@ const tsNow = () => new Date().toISOString().slice(0, 19).replace('T', '_').repl
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
+const configuredUploadMb = Number.parseInt(process.env.MAX_UPLOAD_SIZE_MB || '2048', 10);
+const MAX_UPLOAD_SIZE_MB = Number.isFinite(configuredUploadMb) && configuredUploadMb > 0
+  ? Math.min(configuredUploadMb, 10240)
+  : 2048;
+const MAX_UPLOAD_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024;
+
 const WS_HISTORY_DIR = path.join(__dirname, 'workspaces');
 fs.mkdirSync(WS_HISTORY_DIR, { recursive: true });
 
@@ -108,7 +114,7 @@ const upload = multer({
       cb(null, `${Date.now()}-${safe}`);
     },
   }),
-  limits: { fileSize: 400 * 1024 * 1024 },  // 400 MB
+  limits: { fileSize: MAX_UPLOAD_BYTES },
 });
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
@@ -122,11 +128,12 @@ app.use(express.static(path.join(__dirname, 'public'), {
 }));
 app.use(express.json({ limit: '50mb' }));
 
-// Timeout sur les routes non-SSE seulement (5 min)
+// Les fichiers FAZ volumineux sont envoyés en streaming sur disque.
 app.use((req, res, next) => {
   if (!req.path.startsWith('/api/progress')) {
-    req.setTimeout(300000);
-    res.setTimeout(300000);
+    const timeoutMs = req.path === '/api/upload' ? 30 * 60 * 1000 : 5 * 60 * 1000;
+    req.setTimeout(timeoutMs);
+    res.setTimeout(timeoutMs);
   }
   next();
 });
@@ -299,6 +306,17 @@ app.post('/api/upload', upload.single('logfile'), (req, res) => {
       };
 
       const { flowMap, lineCount, skipped, skipReasons } = await parseFile(filePath, onProgress);
+      if (flowMap.size === 0) {
+        const reasons = [];
+        if (skipReasons?.invalidFlow) reasons.push(`${skipReasons.invalidFlow} ligne(s) sans IP source/destination exploitable`);
+        if (skipReasons?.nonTraffic) reasons.push(`${skipReasons.nonTraffic} ligne(s) hors trafic`);
+        if (skipReasons?.ipv6) reasons.push(`${skipReasons.ipv6} flux IPv6 non pris en charge`);
+        const detail = reasons.length ? ` Détail : ${reasons.join(', ')}.` : '';
+        throw new Error(
+          `Fichier lu (${lineCount.toLocaleString('fr-FR')} lignes), mais aucun flux exploitable n’a été trouvé.${detail} ` +
+          'Vérifiez le séparateur CSV et la présence des colonnes srcip, dstip, action, service/dstport et proto.'
+        );
+      }
       const analysis = buildAnalysis(flowMap);
       analysis.meta  = { lineCount, skipped, skipReasons, uniqueFlows: flowMap.size, filename };
       setSessionData(sessionId, analysis);
@@ -1799,6 +1817,16 @@ app.post('/api/deploy/generate', (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// Erreurs d’upload explicites : Express renverrait sinon une page HTML générique.
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
+    return res.status(413).json({
+      error: `Fichier trop volumineux. Limite FortiFlow : ${MAX_UPLOAD_SIZE_MB} Mo. Compressez-le en .gz/.zip ou augmentez MAX_UPLOAD_SIZE_MB.`,
+    });
+  }
+  return next(err);
 });
 
 // ─── Start ────────────────────────────────────────────────────────────────────
