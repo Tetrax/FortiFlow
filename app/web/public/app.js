@@ -438,7 +438,7 @@ async function dashboard() {
     <div class="section-header" style="margin-top:8px;">
       <div>
         <div class="section-title">Fichier analysé</div>
-        <div class="section-sub">${m?.filename || ''} — ${fmtNum(m?.lineCount)} lignes lues · ${fmtNum(m?.uniqueFlows || 0)} flux uniques · ${fmtNum(m?.skipped || 0)} ignorées${m?.skipReasons ? ` (${fmtNum(m.skipReasons.nonTraffic || 0)} non-traffic, ${fmtNum(m.skipReasons.invalidFlow || 0)} invalides)` : ''}</div>
+        <div class="section-sub">${m?.filename || ''} — ${fmtNum(m?.lineCount)} lignes lues · ${fmtNum(m?.uniqueFlows || 0)} flux uniques · ${fmtNum(m?.skipped || 0)} ignorées${m?.skipReasons ? ` (${fmtNum(m.skipReasons.nonTraffic || 0)} non-traffic, ${fmtNum(m.skipReasons.invalidFlow || 0)} invalides, ${fmtNum(m.skipReasons.ipv6 || 0)} IPv6 non pris en charge)` : ''}</div>
       </div>
       <div style="display:flex;gap:8px;">
         <button class="export-btn primary" onclick="navigateTo('policies')">◎ Voir les policies</button>
