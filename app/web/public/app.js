@@ -1935,6 +1935,7 @@ const deployState = {
   segmentationPlan: { source: 'network', destination: 'network', services: 'grouped' },
   segmentationPreset: 'wide',
   segmentationCustomOpen: false,
+  deploymentBlockers: { unsupportedIpv6: 0, unknownActionSessions: 0, blocked: false },
   _detailOriginal: null,           // M3: snapshot pré-détail (≠ _analyzedOriginal pré-fusion)
   captureWindow: null,             // #1: { start, end, days, available } — fenêtre d'observation
   namingPrefix:  'FF',             // #5: préfixe de nommage des objets générés (configurable)
@@ -6374,7 +6375,7 @@ async function analyzeDeployPolicies() {
     const r = await fetch(`/api/deploy/generate?session=${state.session}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ selectedPolicies: rawPolicies, opts: { preferredWanIntf, wanOverrides, namingPrefix: deployState.namingPrefix || 'FF' } }),
+      body: JSON.stringify({ selectedPolicies: rawPolicies, opts: { analysisOnly: true, preferredWanIntf, wanOverrides, namingPrefix: deployState.namingPrefix || 'FF' } }),
     });
     setLoadingPct(80);
     if (!r.ok) {
@@ -6390,6 +6391,7 @@ async function analyzeDeployPolicies() {
     deployState.hostPairServices = respData.hostPairServices || {};
     deployState.hostPairCoverage = respData.hostPairCoverage || {};   // #3
     deployState.coverageAvailable = !!respData.coverageAvailable;      // #3 (config existante chargée ?)
+    deployState.deploymentBlockers = respData.deploymentBlockers || { unsupportedIpv6: 0, unknownActionSessions: 0, blocked: false };
     setLoadingPct(95);
     setLoadingText('Enrichissement des données…');
   } catch (err) { resetAnalyzeBtn(); alert(err.message); return; }
@@ -7695,6 +7697,16 @@ function _granularityBar() {
   `).join('');
   const labels = _segmentationLabels(plan);
   const customOpen = deployState.segmentationCustomOpen === true;
+  const blockers = deployState.deploymentBlockers || {};
+  const blockerTotal = Number(blockers.unsupportedIpv6 || 0) + Number(blockers.unknownActionSessions || 0);
+  const safetyNotice = blockers.blocked ? `
+    <div class="seg-safety-warning" role="status">
+      <strong>Analyse disponible, génération CLI bloquée</strong>
+      <span>${fmtNum(blockerTotal)} élément${blockerTotal > 1 ? 's' : ''} non classifié${blockerTotal > 1 ? 's' : ''} :
+        ${fmtNum(blockers.unknownActionSessions || 0)} session${Number(blockers.unknownActionSessions || 0) > 1 ? 's' : ''} avec action inconnue,
+        ${fmtNum(blockers.unsupportedIpv6 || 0)} flux IPv6 non pris en charge.
+      </span>
+    </div>` : '';
   const optionGroup = (dimension, options) => `
     <div class="seg-axis">
       <span class="seg-axis-label">${dimension === 'source' ? 'Sources' : dimension === 'destination' ? 'Destinations' : 'Services'}</span>
@@ -7711,6 +7723,7 @@ function _granularityBar() {
       </div>
       <button class="btn-sm ${customOpen ? 'btn-active' : ''}" id="seg-custom-toggle">${customOpen ? 'Masquer les réglages' : 'Personnaliser'}</button>
     </div>
+    ${safetyNotice}
     <div class="seg-profile-grid">${profiles}</div>
     <div class="seg-custom-panel" style="display:${customOpen ? 'grid' : 'none'}">
       ${optionGroup('source', [{ value: 'network', label: 'Réseau' }, { value: 'host', label: 'Hôte /32' }])}
