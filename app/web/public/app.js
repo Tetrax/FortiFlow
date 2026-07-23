@@ -1935,7 +1935,7 @@ const deployState = {
   segmentationPlan: { source: 'network', destination: 'network', services: 'grouped' },
   segmentationPreset: 'wide',
   segmentationCustomOpen: false,
-  deploymentBlockers: { unsupportedIpv6: 0, unknownActionSessions: 0, blocked: false },
+  deploymentBlockers: { unsupportedIpv6: 0, unknownActionSessions: 0, hasExcludedTraffic: false, blocked: false },
   _detailOriginal: null,           // M3: snapshot pré-détail (≠ _analyzedOriginal pré-fusion)
   captureWindow: null,             // #1: { start, end, days, available } — fenêtre d'observation
   namingPrefix:  'FF',             // #5: préfixe de nommage des objets générés (configurable)
@@ -7699,12 +7699,13 @@ function _granularityBar() {
   const customOpen = deployState.segmentationCustomOpen === true;
   const blockers = deployState.deploymentBlockers || {};
   const blockerTotal = Number(blockers.unsupportedIpv6 || 0) + Number(blockers.unknownActionSessions || 0);
-  const safetyNotice = blockers.blocked ? `
+  const safetyNotice = blockers.hasExcludedTraffic ? `
     <div class="seg-safety-warning" role="status">
-      <strong>Analyse disponible, génération CLI bloquée</strong>
+      <strong>Trafic exclu de la matrice</strong>
       <span>${fmtNum(blockerTotal)} élément${blockerTotal > 1 ? 's' : ''} non classifié${blockerTotal > 1 ? 's' : ''} :
         ${fmtNum(blockers.unknownActionSessions || 0)} session${Number(blockers.unknownActionSessions || 0) > 1 ? 's' : ''} avec action inconnue,
         ${fmtNum(blockers.unsupportedIpv6 || 0)} flux IPv6 non pris en charge.
+        Les règles proposées reposent uniquement sur les flux explicitement acceptés.
       </span>
     </div>` : '';
   const optionGroup = (dimension, options) => `
@@ -8143,6 +8144,9 @@ async function generateDeployConf() {
       if (pf.errors > 0 || pf.warnings > 0) {
         const proceed = await showPreflightModal(pf);
         if (!proceed) { if (btn) { btn.disabled = false; btn.textContent = '⬇ Générer config FortiGate'; } return; }
+        if (pf.issues.some(issue => issue.code === 'PBR_CONTEXT')) {
+          opts.allowPbrOverride = true;
+        }
       }
     }
   } catch { /* non-bloquant */ }
@@ -8247,6 +8251,7 @@ function showPreflightModal(pf) {
   return new Promise(resolve => {
     const errors  = pf.issues.filter(i => i.level === 'error');
     const warns   = pf.issues.filter(i => i.level === 'warn');
+    const canOverride = errors.length > 0 && errors.every(i => i.overridable === true);
     const icon    = pf.errors > 0 ? '🛑' : '⚠️';
     const title   = pf.errors > 0 ? 'Erreurs détectées' : 'Avertissements';
 
@@ -8262,13 +8267,17 @@ function showPreflightModal(pf) {
         ${warns.length ? `<div class="preflight-section"><div class="preflight-section-title">Avertissements (${warns.length})</div>${warnHtml}</div>` : ''}
         <div class="preflight-actions">
           <button class="btn-sm" id="pf-cancel">Annuler</button>
-          ${pf.errors === 0 ? `<button class="btn-accent" id="pf-continue">Continuer quand même</button>` : `<button class="btn-accent" id="pf-continue">Forcer la génération</button>`}
+          ${pf.errors === 0
+            ? `<button class="btn-accent" id="pf-continue">Continuer quand même</button>`
+            : canOverride
+              ? `<button class="btn-accent" id="pf-continue">Générer avec exception PBR</button>`
+              : ''}
         </div>
       </div>`;
 
     document.body.appendChild(overlay);
     overlay.querySelector('#pf-cancel').addEventListener('click', () => { overlay.remove(); resolve(false); });
-    overlay.querySelector('#pf-continue').addEventListener('click', () => { overlay.remove(); resolve(true); });
+    overlay.querySelector('#pf-continue')?.addEventListener('click', () => { overlay.remove(); resolve(true); });
     overlay.addEventListener('click', e => { if (e.target === overlay) { overlay.remove(); resolve(false); } });
   });
 }
