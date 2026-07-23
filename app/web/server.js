@@ -1602,6 +1602,18 @@ app.post('/api/deploy/generate', (req, res) => {
   }
 
   try {
+    const unsupportedIpv6 = s.data?.meta?.skipReasons?.ipv6 || 0;
+    const unknownSessions = s.data?.stats?.unknownSessions || 0;
+    if (unsupportedIpv6 > 0 || unknownSessions > 0) {
+      return res.status(422).json({
+        error: 'Génération refusée : la capture contient des flux non classifiés',
+        details: {
+          unsupportedIpv6,
+          unknownActionSessions: unknownSessions,
+        },
+      });
+    }
+
     const o = opts || {};
 
     // Apply user WAN toggles — build a patched config without mutating the session
