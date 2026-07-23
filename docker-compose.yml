@@ -10,6 +10,8 @@ services:
       - "127.0.0.1:13737:3737"
     environment:
       - PORT=3737
+      # Taille maximale d’un export FAZ brut (Mo)
+      - MAX_UPLOAD_SIZE_MB=2048
       # HTTPS optionnel — décommenter si certificats disponibles :
       # - SSL_KEY=/certs/privkey.pem
       # - SSL_CERT=/certs/fullchain.pem
@@ -17,5 +19,6 @@ services:
       # Persistance des sessions et des workspaces entre redémarrages
       - ./data/sessions-cache:/sessions-cache
       - ./data/workspaces:/app/workspaces
+      - ./data/uploads:/app/uploads
       # HTTPS — monter le répertoire des certificats en lecture seule :
       # - /etc/ssl/fortiflow:/certs:ro
