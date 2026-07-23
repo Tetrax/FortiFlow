@@ -6,7 +6,8 @@ services:
     container_name: fortiflow
     restart: unless-stopped
     ports:
-      - "3737:3737"
+      # Nginx expose le HTTPS public sur 3737 et relaie vers ce backend local.
+      - "127.0.0.1:13737:3737"
     environment:
       - PORT=3737
       # HTTPS optionnel — décommenter si certificats disponibles :
