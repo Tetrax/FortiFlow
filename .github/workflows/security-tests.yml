@@ -21,5 +21,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Check JavaScript syntax
+        run: |
+          node --check server.js
+          node --check public/app.js
+          node --check lib/parser.js
+          node --check lib/analyzer.js
+          node --check lib/forticonfig.js
       - name: Run tests
         run: npm test
