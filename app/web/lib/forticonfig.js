@@ -948,9 +948,17 @@ function findServiceByName(label, observedPorts, protoName, customServices) {
   if (/^(TCP|UDP)\/\d+$/i.test(label)) return null;
   const norm = label.toLowerCase().replace(/[-_\s]/g, '');
 
-  // 1. Case-insensitive exact match in custom services
+  const isUdp = /^(udp|17)$/i.test(String(protoName));
+  const compatibleWithObserved = (cs) => {
+    if (!observedPorts?.length) return true;
+    const portSet = isUdp ? cs._udpSet : cs._tcpSet;
+    const ports = isUdp ? (cs.udpPorts || []) : (cs.tcpPorts || []);
+    return observedPorts.every(port => portSet ? portSet.has(Number(port)) : ports.includes(Number(port)));
+  };
+
+  // 1. Correspondance exacte, mais jamais au prix d'une incompatibilité port/protocole.
   for (const [name, cs] of Object.entries(customServices)) {
-    if (name.toLowerCase() === label.toLowerCase()) {
+    if (name.toLowerCase() === label.toLowerCase() && compatibleWithObserved(cs)) {
       const tcp = (cs.tcpPorts || []).slice(0, 8).join(', ');
       const udp = (cs.udpPorts || []).slice(0, 8).join(', ');
       const portHint = [tcp && `TCP: ${tcp}`, udp && `UDP: ${udp}`].filter(Boolean).join(' / ') || null;
@@ -972,7 +980,9 @@ function findServiceByName(label, observedPorts, protoName, customServices) {
     const byPort = observedPorts?.length
       ? predefCandidates.filter(c => observedPorts.includes(c.port))
       : predefCandidates;
-    const pool = byPort.length > 0 ? byPort : predefCandidates;
+    // Si des ports sont observés, aucun candidat incompatible ne doit être retenu.
+    if (observedPorts?.length && byPort.length === 0) return null;
+    const pool = observedPorts?.length ? byPort : predefCandidates;
     // Accept if all matching entries point to the same root name (e.g. NetBIOS_NS / NetBIOS_DS → "NetBIOS")
     const roots = [...new Set(pool.map(c => c.name.replace(/[-_][A-Z0-9]+$/i, '')))];
     if (roots.length === 1) {
@@ -986,7 +996,7 @@ function findServiceByName(label, observedPorts, protoName, customServices) {
   // 3. Prefix match in custom service names (min 5 chars)
   for (const [name, cs] of Object.entries(customServices)) {
     const cn = name.toLowerCase().replace(/[-_\s]/g, '');
-    if ((cn.startsWith(norm) || norm.startsWith(cn)) && norm.length >= 5 && cn.length >= 5) {
+    if ((cn.startsWith(norm) || norm.startsWith(cn)) && norm.length >= 5 && cn.length >= 5 && compatibleWithObserved(cs)) {
       return { found: true, name, source: 'custom', portHint: null };
     }
   }
@@ -1036,7 +1046,10 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
     // Destination address
     let dstAddrMatch;
     if (p.dstType === 'public') {
-      dstAddrMatch = { found: true, name: 'all', source: 'builtin' };
+      const publicCidr = p.dstTarget
+        ? (String(p.dstTarget).includes('/') ? String(p.dstTarget) : `${p.dstTarget}/32`)
+        : null;
+      dstAddrMatch = publicCidr ? findAddress(publicCidr, addresses) : { found: false, cidr: null };
     } else {
       dstAddrMatch = findAddress(p.dstTarget, addresses);
     }
@@ -1135,7 +1148,7 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
 
     // Fallback sur les ports bruts si aucun service nommé reconnu (ou tous ISDB)
     if (serviceItems.length === 0 && p.ports?.length) {
-      for (const port of p.ports.slice(0, 10)) {
+      for (const port of p.ports) {
         const match = findService(port, protoLabel, customServices);
         serviceItems.push({
           label: `${port}/${protoLabel}`,
