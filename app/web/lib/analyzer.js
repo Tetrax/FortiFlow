@@ -23,8 +23,19 @@ function isPrivate(ip) {
   return RFC1918_RANGES.some(r => n >= r.start && n <= r.end);
 }
 
-function ipType(ip) {
-  return isPrivate(ip) ? 'private' : 'public';
+function isKnownInternal(ip, knownSubnets) {
+  if (!ip || !knownSubnets?.length) return false;
+  const n = ip2int(ip);
+  if (isNaN(n)) return false;
+  return knownSubnets.some(({ prefix, networkInt, internal }) => {
+    if (!internal) return false;
+    const mask = prefix === 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) >>> 0;
+    return ((n & mask) >>> 0) === networkInt;
+  });
+}
+
+function ipType(ip, knownSubnets) {
+  return (isPrivate(ip) || isKnownInternal(ip, knownSubnets)) ? 'private' : 'public';
 }
 
 function getSubnet24(ip) {
@@ -103,10 +114,11 @@ function buildAllSubnetGroupsAndPorts(flows, topN = 25, knownSubnets = []) {
   const tcpMap = new Map();
   const udpMap = new Map();
   const subnetOf = (ip) => getSubnetForIP(ip, knownSubnets);
+  const isInternal = (ip) => isPrivate(ip) || isKnownInternal(ip, knownSubnets);
 
   // groupKey: explicit key override (e.g. "10.1.6.0/24|vlan850"); defaults to srcSubnet
   function addToGroup(groups, flow, groupKey) {
-    if (!isPrivate(flow.srcip)) return;
+    if (!isInternal(flow.srcip)) return;
     const srcSubnet = subnetOf(flow.srcip);
     if (!srcSubnet) return;
     const key = groupKey !== undefined ? groupKey : srcSubnet;
@@ -115,8 +127,8 @@ function buildAllSubnetGroupsAndPorts(flows, topN = 25, knownSubnets = []) {
     }
     const sg = groups[key];
     sg.srcIPs.add(flow.srcip);
-    const dstKey  = isPrivate(flow.dstip) ? subnetOf(flow.dstip) : flow.dstip;
-    const dstType = isPrivate(flow.dstip) ? 'private' : 'public';
+    const dstKey  = isInternal(flow.dstip) ? subnetOf(flow.dstip) : flow.dstip;
+    const dstType = isInternal(flow.dstip) ? 'private' : 'public';
     if (!dstKey) return;
     if (!sg.dsts[dstKey]) {
       sg.dsts[dstKey] = { key: dstKey, type: dstType, ports: new Set(), protos: new Set(), services: new Set(), serviceTuples: new Map(), policyIds: new Set(), dstIPs: new Set(), srcIPs: new Set(), count: 0, sentBytes: 0, rcvdBytes: 0, noRcvdFlows: 0, noRcvdSrcIPs: new Set(), firstTs: null, lastTs: null, days: new Set() };
@@ -157,7 +169,7 @@ function buildAllSubnetGroupsAndPorts(flows, topN = 25, knownSubnets = []) {
     if (isAccept) {
       addToGroup(allowed, f);
       // Isoler les suggestions par équipement/VDOM et par interface observée.
-      const srcSubnetKey = isPrivate(f.srcip) ? subnetOf(f.srcip) : null;
+      const srcSubnetKey = isInternal(f.srcip) ? subnetOf(f.srcip) : null;
       if (srcSubnetKey) {
         const intfKey = f.srcintf ? `${srcSubnetKey}|${f.srcintf}` : srcSubnetKey;
         addToGroup(allowedByIntf, f, `${flowScopeKey(f)}||${intfKey}`);
@@ -205,6 +217,7 @@ function buildAllSubnetGroupsAndPorts(flows, topN = 25, knownSubnets = []) {
 function buildAnalysis(flowInput, knownSubnets = []) {
   const flows = Array.isArray(flowInput) ? flowInput : Array.from(flowInput.values());
   const subnetOf = (ip) => getSubnetForIP(ip, knownSubnets);
+  const isInternal = (ip) => isPrivate(ip) || isKnownInternal(ip, knownSubnets);
 
   // ── Single pass: all subnet groups + port stats ──
   const { subnetGroups, allowedSubnetGroups, allowedByIntfGroups, acceptSubnetGroups, denySubnetGroups, portStats } =
@@ -250,8 +263,8 @@ function buildAnalysis(flowInput, knownSubnets = []) {
 
   const srcIPsArr      = [...srcIPs];
   const dstIPsArr      = [...dstIPs];
-  const privateSrcIPs  = srcIPsArr.filter(isPrivate);
-  const privateDstIPs  = dstIPsArr.filter(isPrivate);
+  const privateSrcIPs  = srcIPsArr.filter(isInternal);
+  const privateDstIPs  = dstIPsArr.filter(isInternal);
   const srcSubnetsSet  = new Set(privateSrcIPs.map(ip => subnetOf(ip)).filter(Boolean));
 
   // ── Denied policy groups count ──
@@ -288,14 +301,14 @@ function buildAnalysis(flowInput, knownSubnets = []) {
   const enrichedFlows = flows.map(f => {
     const pn         = protoName(f.proto);
     const resolvedSvc = f.service || portName(f.dstport, pn) || '';
-    const dstPriv    = isPrivate(f.dstip);
+    const dstPriv    = isInternal(f.dstip);
     return {
       ...f,
       service:    resolvedSvc,
       protoName:  pn,
-      srcType:    ipType(f.srcip),
+      srcType:    isInternal(f.srcip) ? 'private' : 'public',
       dstType:    dstPriv ? 'private' : 'public',
-      srcSubnet:  isPrivate(f.srcip) ? subnetOf(f.srcip) : null,
+      srcSubnet:  isInternal(f.srcip) ? subnetOf(f.srcip) : null,
       dstSubnet:  dstPriv ? subnetOf(f.dstip) : null,
       totalBytes: f.sentBytes + f.rcvdBytes,
     };
@@ -307,14 +320,14 @@ function buildAnalysis(flowInput, knownSubnets = []) {
   // ── Subnet → interfaces map (src + dst, tous les flows) ───────────────────
   const subnetIntfMap = {};
   for (const f of flows) {
-    if (f.srcintf && isPrivate(f.srcip)) {
+    if (f.srcintf && isInternal(f.srcip)) {
       const sub = subnetOf(f.srcip);
       if (sub) {
         if (!subnetIntfMap[sub]) subnetIntfMap[sub] = new Set();
         subnetIntfMap[sub].add(f.srcintf);
       }
     }
-    if (f.dstintf && isPrivate(f.dstip)) {
+    if (f.dstintf && isInternal(f.dstip)) {
       const sub = subnetOf(f.dstip);
       if (sub) {
         if (!subnetIntfMap[sub]) subnetIntfMap[sub] = new Set();
@@ -595,4 +608,4 @@ function consolidatePolicies(rawPolicies) {
     });
 }
 
-module.exports = { isPrivate, ipType, getSubnet24, protoName, flowDecision, buildAnalysis, consolidatePolicies };
+module.exports = { isPrivate, isKnownInternal, ipType, getSubnet24, protoName, flowDecision, buildAnalysis, consolidatePolicies };
