@@ -2,15 +2,45 @@
 
 Outil d'analyse de logs trafic **FortiGate / FortiAnalyzer** pour les prestations de segmentation réseau.
 
-Analyse les flux, identifie les IPs privées (RFC1918), et agrège les communications pour faciliter la création de politiques de pare-feu.
+FortiFlow importe les logs trafic, conserve leur contexte FortiGate/VDOM, construit les matrices de flux, rapproche les observations de la configuration et du routage, puis prépare une CLI FortiGate destinée à être revue par un ingénieur.
 
-- Aucune dépendance externe — stdlib Python 3.6+ uniquement
-- Traitement en streaming : gère les fichiers de **200MB+** sans saturer la RAM
-- Trois modes de sortie : tableau terminal, CSV (Excel), suggestions de politiques
+Le dépôt contient :
+
+- l'application web Node.js dans `app/web`, utilisable via Docker ;
+- le CLI Python historique `fortiflow.py`, sans dépendance externe ;
+- les exports CSV/XLSX et les suggestions de politiques.
+
+## Invariants de sécurité
+
+La génération suit un modèle **fail closed** :
+
+- seules les actions FortiOS explicitement reconnues comme autorisées produisent des suggestions ;
+- les actions inconnues sont comptées mais exclues des règles ;
+- les équipements et VDOM ne sont jamais fusionnés silencieusement ;
+- une destination WAN reste limitée aux IP observées ; `dstaddr "all"` nécessite un choix explicite ;
+- les couples protocole/port/service sont conservés sans troncature ;
+- une sélection de route ECMP ambiguë n'est pas résolue arbitrairement ;
+- les routes désactivées sont ignorées et l'ordre first-match des policies existantes est conservé ;
+- le serveur exécute systématiquement le preflight avant toute génération CLI.
+
+Les réseaux RFC1918 sont internes par défaut. Un préfixe public porté par une interface LAN de la configuration sélectionnée est également classé comme interne.
+
+> L'application ne remplace pas la validation d'un ingénieur FortiGate. Vérifier la période de capture, les flux saisonniers, le routage/PBR, les objets dynamiques, les VIP, le NAT central et l'ordre final des policies avant déploiement. L'instance est prévue pour un environnement interne de confiance.
+
+## Vérification
+
+Les tests ne nécessitent aucun service externe :
+
+```bash
+cd app/web
+npm test
+```
+
+GitHub Actions vérifie également la syntaxe JavaScript et les invariants de sécurité à chaque modification de `main`.
 
 ---
 
-## Usage rapide
+## Usage rapide du CLI Python
 
 ```bash
 # Vue tableau — sources privées vers toutes destinations
