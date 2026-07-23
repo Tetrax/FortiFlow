@@ -1935,7 +1935,7 @@ const deployState = {
   segmentationPlan: { source: 'network', destination: 'network', services: 'grouped' },
   segmentationPreset: 'wide',
   segmentationCustomOpen: false,
-  deploymentBlockers: { unsupportedIpv6: 0, unknownActionSessions: 0, hasExcludedTraffic: false, blocked: false },
+  deploymentBlockers: { unsupportedIpv6: 0, unknownActionSessions: 0, failedConnectionSessions: 0, hasExcludedTraffic: false, blocked: false },
   _detailOriginal: null,           // M3: snapshot pré-détail (≠ _analyzedOriginal pré-fusion)
   captureWindow: null,             // #1: { start, end, days, available } — fenêtre d'observation
   namingPrefix:  'FF',             // #5: préfixe de nommage des objets générés (configurable)
@@ -6391,7 +6391,7 @@ async function analyzeDeployPolicies() {
     deployState.hostPairServices = respData.hostPairServices || {};
     deployState.hostPairCoverage = respData.hostPairCoverage || {};   // #3
     deployState.coverageAvailable = !!respData.coverageAvailable;      // #3 (config existante chargée ?)
-    deployState.deploymentBlockers = respData.deploymentBlockers || { unsupportedIpv6: 0, unknownActionSessions: 0, blocked: false };
+    deployState.deploymentBlockers = respData.deploymentBlockers || { unsupportedIpv6: 0, unknownActionSessions: 0, failedConnectionSessions: 0, hasExcludedTraffic: false, blocked: false };
     setLoadingPct(95);
     setLoadingText('Enrichissement des données…');
   } catch (err) { resetAnalyzeBtn(); alert(err.message); return; }
@@ -7698,14 +7698,25 @@ function _granularityBar() {
   const labels = _segmentationLabels(plan);
   const customOpen = deployState.segmentationCustomOpen === true;
   const blockers = deployState.deploymentBlockers || {};
-  const blockerTotal = Number(blockers.unsupportedIpv6 || 0) + Number(blockers.unknownActionSessions || 0);
+  const unknownCount = Number(blockers.unknownActionSessions || 0);
+  const failedCount = Number(blockers.failedConnectionSessions || 0);
+  const ipv6Count = Number(blockers.unsupportedIpv6 || 0);
+  const blockerTotal = unknownCount + failedCount + ipv6Count;
+  const excludedDetails = [
+    failedCount > 0 ? `${fmtNum(failedCount)} tentative${failedCount > 1 ? 's' : ''} de connexion échouée${failedCount > 1 ? 's' : ''}` : '',
+    unknownCount > 0 ? `${fmtNum(unknownCount)} session${unknownCount > 1 ? 's' : ''} avec action réellement inconnue` : '',
+    ipv6Count > 0 ? `${fmtNum(ipv6Count)} flux IPv6 non pris en charge` : '',
+  ].filter(Boolean).join(' · ');
+  const safetyTitle = unknownCount > 0
+    ? 'Trafic non classifié exclu des règles'
+    : failedCount > 0
+      ? 'Tentatives échouées écartées des règles'
+      : 'Trafic IPv6 exclu des règles';
   const safetyNotice = blockers.hasExcludedTraffic ? `
     <div class="seg-safety-warning" role="status">
-      <strong>Trafic exclu de la matrice</strong>
-      <span>${fmtNum(blockerTotal)} élément${blockerTotal > 1 ? 's' : ''} non classifié${blockerTotal > 1 ? 's' : ''} :
-        ${fmtNum(blockers.unknownActionSessions || 0)} session${Number(blockers.unknownActionSessions || 0) > 1 ? 's' : ''} avec action inconnue,
-        ${fmtNum(blockers.unsupportedIpv6 || 0)} flux IPv6 non pris en charge.
-        Les règles proposées reposent uniquement sur les flux explicitement acceptés.
+      <strong>${safetyTitle}</strong>
+      <span>${fmtNum(blockerTotal)} événement${blockerTotal > 1 ? 's' : ''} non retenu${blockerTotal > 1 ? 's' : ''} : ${excludedDetails}.
+        Ces événements restent visibles dans l’analyse, mais seuls les flux explicitement acceptés peuvent produire des règles.
       </span>
     </div>` : '';
   const optionGroup = (dimension, options) => `
