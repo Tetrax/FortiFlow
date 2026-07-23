@@ -89,6 +89,16 @@ const HEADER_MAP = {
   // Date / time
   date: 'date', time: 'time', datetime: 'date', timestamp: 'date',
   eventtime: 'eventtime', itime: 'eventtime',
+
+  // Scope FortiGate / FortiAnalyzer — indispensable en environnement multi-équipements / multi-VDOM
+  devname: 'devname', device: 'devname', 'device name': 'devname', hostname: 'devname',
+  devid: 'devid', device_id: 'devid', 'device id': 'devid', serial: 'devid',
+  vd: 'vd', vdom: 'vd', 'virtual domain': 'vd',
+
+  // Session / volumétrie complémentaire
+  sessionid: 'sessionid', session_id: 'sessionid', 'session id': 'sessionid',
+  duration: 'duration', sentpkt: 'sentpkt', sent_pkts: 'sentpkt', 'packets sent': 'sentpkt',
+  rcvdpkt: 'rcvdpkt', rcvd_pkts: 'rcvdpkt', 'packets received': 'rcvdpkt',
 };
 
 // Services UDP par défaut (quand le champ proto est absent)
@@ -96,6 +106,24 @@ const UDP_SERVICES = new Set([
   'DNS', 'DHCP', 'NTP', 'SNMP', 'SNMPTRAP', 'SYSLOG', 'TFTP',
   'RIP', 'MDNS', 'LLMNR', 'BOOTP', 'RADIUS', 'ISAKMP', 'IKE',
 ]);
+
+// Ne jamais considérer une action inconnue comme autorisée. Les logs de fin de session
+// FortiOS utilisent notamment close/timeout/client-rst/server-rst pour des sessions acceptées.
+const ALLOW_ACTIONS = new Set([
+  'accept', 'allow', 'allowed', 'pass', 'close', 'timeout',
+  'client-rst', 'server-rst', 'ip-conn',
+]);
+const DENY_ACTIONS = new Set([
+  'deny', 'denied', 'drop', 'dropped', 'block', 'blocked',
+  'reject', 'rejected', 'violation',
+]);
+
+function normalizeDecision(action) {
+  const value = String(action || '').toLowerCase().trim();
+  if (ALLOW_ACTIONS.has(value)) return 'allow';
+  if (DENY_ACTIONS.has(value)) return 'deny';
+  return 'unknown';
+}
 
 // ─── Format detection ─────────────────────────────────────────────────────────
 
@@ -174,8 +202,10 @@ function extractFlow(fields) {
   const srcip = (fields.srcip || '').trim();
   const dstip = (fields.dstip || '').trim();
 
-  const ts  = flowTimestamp(fields);
-  const day = flowDay(fields, ts);
+  const ts       = flowTimestamp(fields);
+  const day      = flowDay(fields, ts);
+  const action   = (fields.action || '').toLowerCase().trim();
+  const decision = normalizeDecision(action);
 
   return {
     srcip:    isValidIPv4(srcip) ? srcip : '',
@@ -183,18 +213,26 @@ function extractFlow(fields) {
     srcport:  fields.srcport  || '',
     dstport:  fields.dstport  || '',
     proto,
-    action:   (fields.action  || '').toLowerCase().trim(),
+    action,
+    decision,
     service,
     srcintf:    fields.srcintf    || '',
     dstintf:    fields.dstintf    || '',
     policyid:   fields.policyid   || '',
     policyname: fields.policyname || '',
+    devname:    (fields.devname || '').trim(),
+    devid:      (fields.devid || '').trim(),
+    vdom:       (fields.vd || '').trim(),
+    sessionid:  (fields.sessionid || '').trim(),
     date:     fields.date     || '',
     time:     fields.time     || '',
     ts,                       // epoch ms ou null (#1)
     day,                      // 'YYYY-MM-DD' ou null (#1)
     sentbyte: parseInt(fields.sentbyte || 0, 10) || 0,
     rcvdbyte: parseInt(fields.rcvdbyte || 0, 10) || 0,
+    sentpkt:  parseInt(fields.sentpkt  || 0, 10) || 0,
+    rcvdpkt:  parseInt(fields.rcvdpkt  || 0, 10) || 0,
+    duration: parseInt(fields.duration || 0, 10) || 0,
   };
 }
 
@@ -202,21 +240,27 @@ function extractFlow(fields) {
 
 function aggregateFlow(flowMap, flow) {
   if (!flow.srcip || !flow.dstip) return false;
-  const key = `${flow.srcip}|${flow.dstip}|${flow.dstport}|${flow.proto}|${flow.action}|${flow.service}|${flow.srcintf}|${flow.dstintf}|${flow.policyid}`;
+  // Le scope équipement/VDOM fait partie de l'identité du flux : deux VDOM peuvent
+  // légitimement utiliser les mêmes réseaux RFC1918 sans représenter le même contexte.
+  const key = `${flow.devid || flow.devname}|${flow.vdom}|${flow.srcip}|${flow.dstip}|${flow.dstport}|${flow.proto}|${flow.action}|${flow.service}|${flow.srcintf}|${flow.dstintf}|${flow.policyid}`;
   if (!flowMap.has(key)) {
     flowMap.set(key, {
       srcip: flow.srcip, dstip: flow.dstip,
       srcport: flow.srcport, dstport: flow.dstport,
-      proto: flow.proto, action: flow.action, service: flow.service,
+      proto: flow.proto, action: flow.action, decision: flow.decision, service: flow.service,
       srcintf: flow.srcintf, dstintf: flow.dstintf, policyid: flow.policyid, policyname: flow.policyname,
-      count: 0, sentBytes: 0, rcvdBytes: 0,
+      devname: flow.devname, devid: flow.devid, vdom: flow.vdom,
+      count: 0, sentBytes: 0, rcvdBytes: 0, sentPackets: 0, rcvdPackets: 0, duration: 0,
       firstTs: null, lastTs: null, days: [],   // #1: stats temporelles (days = tableau, JSON-safe)
     });
   }
   const e = flowMap.get(key);
   e.count++;
-  e.sentBytes += flow.sentbyte;
-  e.rcvdBytes += flow.rcvdbyte;
+  e.sentBytes   += flow.sentbyte;
+  e.rcvdBytes   += flow.rcvdbyte;
+  e.sentPackets += flow.sentpkt;
+  e.rcvdPackets += flow.rcvdpkt;
+  e.duration     += flow.duration;
   // #1: conserver la granularité temporelle perdue auparavant (clé de dédup inchangée).
   if (flow.ts != null) {
     if (e.firstTs == null || flow.ts < e.firstTs) e.firstTs = flow.ts;
@@ -397,9 +441,17 @@ async function parseFile(filePath, onProgress) {
             mergedFlowMap.set(key, { ...flow });
           } else {
             const e = mergedFlowMap.get(key);
-            e.count     += flow.count;
-            e.sentBytes += flow.sentBytes;
-            e.rcvdBytes += flow.rcvdBytes;
+            e.count       += flow.count;
+            e.sentBytes   += flow.sentBytes;
+            e.rcvdBytes   += flow.rcvdBytes;
+            e.sentPackets += flow.sentPackets || 0;
+            e.rcvdPackets += flow.rcvdPackets || 0;
+            e.duration     += flow.duration || 0;
+            if (flow.firstTs != null && (e.firstTs == null || flow.firstTs < e.firstTs)) e.firstTs = flow.firstTs;
+            if (flow.lastTs  != null && (e.lastTs  == null || flow.lastTs  > e.lastTs))  e.lastTs  = flow.lastTs;
+            for (const day of (flow.days || [])) {
+              if (!e.days.includes(day)) e.days.push(day);
+            }
           }
         }
       } catch (err) {
@@ -417,4 +469,4 @@ async function parseFile(filePath, onProgress) {
   return parseStream(inputStream, progressCb);
 }
 
-module.exports = { parseFile, parseStream };
+module.exports = { parseFile, parseStream, normalizeDecision };
