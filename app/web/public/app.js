@@ -122,9 +122,16 @@ async function handleUpload(file) {
 
   let sessionId;
   try {
-    const r    = await fetch('/api/upload', { method: 'POST', body: fd });
-    const data = await r.json();
-    if (!r.ok) throw new Error(data.error || 'Erreur serveur');
+    const r = await fetch('/api/upload', { method: 'POST', body: fd });
+    const responseText = await r.text();
+    let data = {};
+    try { data = responseText ? JSON.parse(responseText) : {}; } catch { /* réponse proxy HTML */ }
+    if (!r.ok) {
+      const fallback = r.status === 413
+        ? 'Fichier refusé car trop volumineux par FortiFlow ou Nginx.'
+        : `Erreur serveur HTTP ${r.status}`;
+      throw new Error(data.error || fallback);
+    }
     sessionId = data.sessionId;
   } catch (e) {
     showProgress(false);
@@ -6353,8 +6360,20 @@ async function analyzeDeployPolicies() {
   } catch (err) { resetAnalyzeBtn(); alert(err.message); return; }
   if (!rawPolicies || rawPolicies.length === 0) {
     resetAnalyzeBtn();
-    alert('Aucune policy à analyser. Vérifiez que le fichier de trafic est bien chargé (étape 1).');
-    if (body) body.innerHTML = '<div class="empty-state" style="padding:24px">Aucune policy disponible. Chargez un fichier de trafic en étape 1.</div>';
+    const total = Number(state.stats?.totalSessions || 0);
+    const accepted = Number(state.stats?.acceptSessions || 0);
+    const unknown = Number(state.stats?.unknownSessions || 0);
+    const skipped = Number(state.meta?.skipped || 0);
+    let message;
+    if (total === 0) {
+      message = `Le fichier a été chargé, mais aucun flux exploitable n’a été conservé${skipped ? ` (${fmtNum(skipped)} lignes rejetées)` : ''}. Vérifiez les colonnes et le séparateur CSV.`;
+    } else if (accepted === 0) {
+      message = `${fmtNum(total)} sessions ont été lues, mais aucune n’est explicitement acceptée${unknown ? ` (${fmtNum(unknown)} actions inconnues)` : ''}. Aucun échec ou refus ne peut générer une règle.`;
+    } else {
+      message = `${fmtNum(accepted)} sessions acceptées ont été lues, mais aucune policy candidate n’a été construite. Vérifiez le périmètre réseau, les interfaces et les filtres de l’analyse.`;
+    }
+    alert(message);
+    if (body) body.innerHTML = `<div class="empty-state" style="padding:24px">${escHtml(message)}</div>`;
     return;
   }
 
