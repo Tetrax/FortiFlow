@@ -7694,7 +7694,7 @@ function _granularityBar() {
     </button>
   `).join('');
   const labels = _segmentationLabels(plan);
-  const customOpen = deployState.segmentationCustomOpen || inferred === 'custom';
+  const customOpen = deployState.segmentationCustomOpen === true;
   const optionGroup = (dimension, options) => `
     <div class="seg-axis">
       <span class="seg-axis-label">${dimension === 'source' ? 'Sources' : dimension === 'destination' ? 'Destinations' : 'Services'}</span>
