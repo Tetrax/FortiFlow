@@ -191,17 +191,47 @@ function mapAndValidateCsvHeaders(parts, sep) {
   return headers;
 }
 
-function detectFormat(firstLine) {
-  // Un vrai log KV FortiAnalyzer contient de nombreux couples key=val.
-  // On le détecte avant les séparateurs, car les valeurs KV peuvent contenir des virgules.
-  const kvCount = (firstLine.match(/\b\w+=\S/g) || []).length;
-  if (kvCount >= 3) return { format: 'kv', sep: null };
+function parseDelimitedKvRow(line, sep) {
+  const fields = {};
+  for (const rawCell of parseCSVLine(line, sep)) {
+    const cell = rawCell.trim();
+    if (!cell) continue;
+    const eq = cell.indexOf('=');
+    if (eq <= 0) continue;
+    const key = cell.slice(0, eq).trim();
+    if (!/^\w+$/.test(key)) continue;
+    let value = cell.slice(eq + 1).trim();
+    if (value.startsWith('"') && value.endsWith('"')) value = value.slice(1, -1);
+    fields[key] = value;
+  }
+  return fields;
+}
 
-  // Les exports FAZ/Excel varient selon la locale : virgule, point-virgule,
-  // tabulation ou barre verticale. Compter uniquement hors guillemets.
+function countDelimitedKvCells(line, sep) {
+  let count = 0;
+  for (const cell of parseCSVLine(line, sep)) {
+    if (/^\s*\w+=/.test(cell)) count++;
+    if (count >= 3) return count;
+  }
+  return count;
+}
+
+function detectFormat(firstLine) {
+  // Les exports FAZ "CSV" peuvent ne pas avoir d’en-tête : chaque ligne est une
+  // suite de cellules "clé=valeur". Cette forme doit être reconnue avant le KV
+  // classique, sinon sa première valeur absorbe toute la ligne.
   const candidates = ['\t', ',', ';', '|']
     .map(sep => ({ sep, count: countDelimiterOutsideQuotes(firstLine, sep) }))
     .sort((a, b) => b.count - a.count);
+  if (candidates[0].count >= 1 && countDelimitedKvCells(firstLine, candidates[0].sep) >= 3) {
+    return { format: 'csv-kv', sep: candidates[0].sep };
+  }
+
+  // Un vrai log KV FortiAnalyzer contient de nombreux couples key=val sur une ligne.
+  const kvCount = (firstLine.match(/\b\w+=\S/g) || []).length;
+  if (kvCount >= 3) return { format: 'kv', sep: null };
+
+  // CSV à en-têtes classique.
   if (candidates[0].count >= 1) return { format: 'csv', sep: candidates[0].sep };
 
   return { format: 'kv', sep: null };
@@ -377,8 +407,8 @@ async function parseStream(inputStream, onProgress) {
 
     let fields;
 
-    if (format === 'kv') {
-      fields = parseKV(line);
+    if (format === 'kv' || format === 'csv-kv') {
+      fields = format === 'csv-kv' ? parseDelimitedKvRow(line, sep) : parseKV(line);
       const t = fields.type;
       if (t && t !== 'traffic') { skipped++; skipReasons.nonTraffic++; continue; }
     } else {
