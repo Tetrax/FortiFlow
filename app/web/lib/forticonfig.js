@@ -1389,6 +1389,7 @@ function generateConfig(selectedPolicies, opts = {}) {
     addressGroups  = {},
     zones          = {},
     namingPrefix   = 'FF',
+    pbrOverride    = false,
     target         = 'fortigate',   // #9: 'fortigate' (CLI device) | 'fmg-script' (script Policy Package)
   } = opts;
 
@@ -1710,6 +1711,11 @@ function generateConfig(selectedPolicies, opts = {}) {
     L.push('# ══════════════════════════════════════════════════');
     L.push('');
   }
+  if (pbrOverride) {
+    L.push('# ATTENTION : exception PBR confirmée par l’ingénieur');
+    L.push('# Les interfaces ci-dessous sont celles sélectionnées dans FortiFlow ; le policy routing n’a pas été simulé.');
+    L.push('');
+  }
   L.push(`# Policies: ${policyBlocks.length}  |  Adresses: ${newAddresses.size}  |  Groupes: ${newAddrGroups.size}  |  Services: ${newServices.size}`);
   L.push('');
 
@@ -1892,7 +1898,7 @@ function segmentationEvidenceHosts(policy, side) {
   return match ? [match[1]] : [];
 }
 
-function preflightValidation(selectedPolicies, config, observedFlows = null) {
+function preflightValidation(selectedPolicies, config, observedFlows = null, options = {}) {
   const issues = []; // { level: 'warn'|'error', msg }
   const addresses      = config.addresses      || {};
   const addressGroups  = config.addressGroups   || {};
@@ -1903,10 +1909,28 @@ function preflightValidation(selectedPolicies, config, observedFlows = null) {
   const selectedScopes = new Set();
 
   if (config.hasPolicyRoutes) {
-    issues.push({ level: 'error', msg: 'Policy-Based Routing détecté : contexte PBR non pris en charge pour une génération certaine' });
+    if (options.allowPbrOverride === true) {
+      issues.push({
+        level: 'warn',
+        code: 'PBR_OVERRIDE',
+        msg: 'Exception PBR confirmée : les interfaces sélectionnées seront utilisées sans simulation du policy routing',
+      });
+    } else {
+      issues.push({
+        level: 'error',
+        code: 'PBR_CONTEXT',
+        overridable: true,
+        msg: 'Policy-Based Routing détecté : le chemin ne peut pas être certifié sans exception explicite',
+      });
+    }
   }
   if (config.hasNonDefaultVrf) {
-    issues.push({ level: 'error', msg: 'VRF non par défaut détectée : sélection de table VRF requise avant génération' });
+    issues.push({
+      level: 'error',
+      code: 'VRF_CONTEXT',
+      overridable: false,
+      msg: 'VRF non par défaut détectée : sélection de table VRF requise avant génération',
+    });
   }
 
   for (let i = 0; i < selectedPolicies.length; i++) {
