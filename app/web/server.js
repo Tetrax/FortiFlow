@@ -135,23 +135,48 @@ app.use((req, res, next) => {
 // Extracts sorted (most-specific first) subnet list from fortiConfig.addresses,
 // used to re-analyze flows with real CIDR boundaries instead of hardcoded /24.
 function extractKnownSubnets(fortiConfig) {
-  const addresses = fortiConfig?.addresses || {};
-  const subnets = [];
-  for (const addr of Object.values(addresses)) {
-    if (!addr.cidr || !addr.cidr.includes('/')) continue;
-    const slash = addr.cidr.lastIndexOf('/');
-    const ip  = addr.cidr.slice(0, slash);
-    const prefix = parseInt(addr.cidr.slice(slash + 1), 10);
-    if (isNaN(prefix) || prefix < 0 || prefix > 32) continue;
-    if (prefix === 0)  continue; // /0 catch-all (0.0.0.0/0) absorberait toutes les IPs → exclu
-    if (prefix === 32) continue; // /32 hosts: used for individual matching only, not subnet grouping
-    const parts = ip.split('.');
-    if (parts.length !== 4) continue;
-    const ipInt = parts.reduce((acc, p) => (acc * 256) + parseInt(p, 10), 0);
-    const mask  = prefix === 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) >>> 0;
-    subnets.push({ prefix, networkInt: (ipInt & mask) >>> 0, cidr: addr.cidr });
+  const byCidr = new Map();
+
+  const addCidr = (cidr, internal) => {
+    if (!cidr || !cidr.includes('/')) return;
+    const slash = cidr.lastIndexOf('/');
+    const ip = cidr.slice(0, slash);
+    const prefix = parseInt(cidr.slice(slash + 1), 10);
+    if (isNaN(prefix) || prefix <= 0 || prefix >= 32) return;
+    const parts = ip.split('.').map(Number);
+    if (parts.length !== 4 || parts.some(p => !Number.isInteger(p) || p < 0 || p > 255)) return;
+    const ipInt = parts.reduce((acc, p) => (acc * 256) + p, 0) >>> 0;
+    const mask = (0xFFFFFFFF << (32 - prefix)) >>> 0;
+    const networkInt = (ipInt & mask) >>> 0;
+    const network = [
+      (networkInt >>> 24) & 0xFF, (networkInt >>> 16) & 0xFF,
+      (networkInt >>> 8) & 0xFF, networkInt & 0xFF,
+    ].join('.');
+    const normalized = `${network}/${prefix}`;
+    const previous = byCidr.get(normalized);
+    byCidr.set(normalized, { prefix, networkInt, cidr: normalized, internal: Boolean(internal || previous?.internal) });
+  };
+
+  // Les objets d'adresse donnent les bonnes frontières CIDR, mais ne prouvent pas
+  // à eux seuls qu'une destination est interne (ils peuvent représenter Internet).
+  for (const addr of Object.values(fortiConfig?.addresses || {})) addCidr(addr.cidr, false);
+
+  // Une interface non-WAN rattachée au VDOM est une preuve forte de réseau interne,
+  // y compris lorsque l'entreprise utilise de l'adressage public en interne.
+  for (const iface of Object.values(fortiConfig?.interfaces || {})) {
+    if (!iface.isWan && !iface.isTunnel) addCidr(iface.cidr, true);
   }
-  return subnets.sort((a, b) => b.prefix - a.prefix);
+
+  return [...byCidr.values()].sort((a, b) => b.prefix - a.prefix);
+}
+
+function flowsForFortiConfig(flows, fortiConfig) {
+  const list = Array.isArray(flows) ? flows : [];
+  const selectedVdom = fortiConfig?.selectedVdom;
+  if (!selectedVdom) return list;
+  const hasVdomMetadata = list.some(flow => String(flow.vdom || '').trim());
+  if (!hasVdomMetadata) return list;
+  return list.filter(flow => String(flow.vdom || '').trim() === selectedVdom);
 }
 
 function requireSession(req, res) {
@@ -1369,7 +1394,8 @@ app.post('/api/deploy/config-upload', upload.single('conffile'), async (req, res
       const knownSubnets = extractKnownSubnets(fortiConfig);
       if (knownSubnets.length > 0) {
         const meta = s.data.meta;
-        const newAnalysis = buildAnalysis(s.data.flows, knownSubnets);
+        const scopedFlows = flowsForFortiConfig(s.data.flows, fortiConfig);
+        const newAnalysis = buildAnalysis(scopedFlows, knownSubnets);
         newAnalysis.meta = meta;
         s.data = newAnalysis;
         setSessionData(s.id, newAnalysis);
@@ -1419,6 +1445,18 @@ app.post('/api/deploy/config-vdom', express.json(), (req, res) => {
     const fortiConfig = parseFortiConfig(s.fortiConfigRawText, vdom);
     s.fortiConfig = fortiConfig;
     setFortiConfig(s.id, fortiConfig);
+
+    // Un changement de VDOM doit aussi recalculer les suggestions et exclure
+    // les logs portant explicitement un autre VDOM.
+    if (s.data?.flows?.length > 0) {
+      const meta = s.data.meta;
+      const knownSubnets = extractKnownSubnets(fortiConfig);
+      const scopedFlows = flowsForFortiConfig(s.data.flows, fortiConfig);
+      const newAnalysis = buildAnalysis(scopedFlows, knownSubnets);
+      newAnalysis.meta = meta;
+      s.data = newAnalysis;
+      setSessionData(s.id, newAnalysis);
+    }
 
     const policyMap = new Map();
     for (const pol of fortiConfig.existingPolicies || []) {
