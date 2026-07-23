@@ -1060,7 +1060,7 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
     const observedTuples = Array.isArray(p.serviceTuples) ? p.serviceTuples : [];
     const tupleProtoLabel = (proto) => /^(17|udp)$/i.test(String(proto)) ? 'UDP'
       : /^(6|tcp)$/i.test(String(proto)) ? 'TCP'
-      : protoNameForService(proto);
+      : String(proto || '').toUpperCase();
 
     if (p.services && p.services.length > 0) {
       for (const svc of p.services) {
