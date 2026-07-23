@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const { Readable } = require('node:stream');
 
 const { parseStream, normalizeDecision } = require('../lib/parser');
-const { buildAnalysis, flowDecision } = require('../lib/analyzer');
+const { buildAnalysis, flowDecision, consolidatePolicies } = require('../lib/analyzer');
 const { parseFortiConfig, generateConfig, preflightValidation } = require('../lib/forticonfig');
 
 function aggregate(overrides = {}) {
@@ -243,4 +243,28 @@ test('le preflight refuse une action invalide et les scopes VDOM mélangés', ()
   assert.equal(mixed.ok, false);
   assert.ok(mixed.issues.some(i => /Plusieurs équipements\/VDOM/.test(i.msg)));
   assert.ok(mixed.issues.some(i => /incompatible/.test(i.msg)));
+});
+
+
+test('la consolidation ne fusionne jamais deux scopes FortiGate/VDOM', () => {
+  const base = {
+    srcSubnet: '10.0.0.0/24',
+    dstTarget: '10.0.1.0/24',
+    dstType: 'private',
+    services: ['HTTPS'],
+    ports: [443],
+    protos: ['TCP'],
+    serviceTuples: [{ proto: '6', port: '443', service: 'HTTPS', sessions: 1 }],
+    sessions: 1,
+    sentBytes: 10,
+    rcvdBytes: 20,
+    noRcvdFlows: 0,
+    noRcvdSrcHosts: [],
+  };
+  const result = consolidatePolicies([
+    { ...base, scope: { devid: 'FGT-A', vdom: 'root' } },
+    { ...base, scope: { devid: 'FGT-A', vdom: 'tenant-b' } },
+  ]);
+  assert.equal(result.length, 2);
+  assert.deepEqual(result.map(p => p.scope.vdom).sort(), ['root', 'tenant-b']);
 });
