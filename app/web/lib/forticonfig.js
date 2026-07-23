@@ -1796,27 +1796,67 @@ function preflightValidation(selectedPolicies, config) {
   const zones          = config.zones           || {};
 
   const namesUsed = new Map(); // name → [policy indices]
+  const selectedScopes = new Set();
 
   for (let i = 0; i < selectedPolicies.length; i++) {
     const p = selectedPolicies[i];
     const a = p.analysis || {};
     const label = `Policy #${i + 1}`;
 
-    // Missing interfaces
-    const srcIntf = p._srcintf || a.srcIface;
-    const dstIntf = p._dstintf || a.dstIface;
-    if (!srcIntf) issues.push({ level: 'error', msg: `${label}: interface source manquante` });
-    if (!dstIntf) issues.push({ level: 'error', msg: `${label}: interface destination manquante` });
-    if (srcIntf && dstIntf && srcIntf === dstIntf) {
-      issues.push({ level: 'warn', msg: `${label}: même interface src/dst (${srcIntf}) — hairpin` });
+    // Interfaces : accepter les champs bruts et ceux résolus par l'analyse.
+    const srcValue = p.srcintf || p._srcintf || a.srcZone || a.srcIface;
+    const dstValue = p.dstintf || p._dstintf || a.dstZone || a.dstIface;
+    const srcIntfs = (Array.isArray(srcValue) ? srcValue : [srcValue]).filter(Boolean);
+    const dstIntfs = (Array.isArray(dstValue) ? dstValue : [dstValue]).filter(Boolean);
+    if (!srcIntfs.length) issues.push({ level: 'error', msg: `${label}: interface source manquante` });
+    if (!dstIntfs.length) issues.push({ level: 'error', msg: `${label}: interface destination manquante` });
+    if (srcIntfs.some(name => dstIntfs.includes(name))) {
+      issues.push({ level: 'warn', msg: `${label}: même interface présente en source et destination — hairpin` });
     }
 
-    // Validate interfaces exist in config
-    if (srcIntf && !interfaces[srcIntf] && !zones[srcIntf]) {
-      issues.push({ level: 'warn', msg: `${label}: interface source "${srcIntf}" absente de la config` });
+    // Une interface absente n'est pas un simple avertissement : la CLI serait invalide.
+    for (const srcIntf of srcIntfs) {
+      if (!interfaces[srcIntf] && !zones[srcIntf]) {
+        issues.push({ level: 'error', msg: `${label}: interface source "${srcIntf}" absente de la config` });
+      }
     }
-    if (dstIntf && !interfaces[dstIntf] && !zones[dstIntf]) {
-      issues.push({ level: 'warn', msg: `${label}: interface destination "${dstIntf}" absente de la config` });
+    for (const dstIntf of dstIntfs) {
+      if (!interfaces[dstIntf] && !zones[dstIntf]) {
+        issues.push({ level: 'error', msg: `${label}: interface destination "${dstIntf}" absente de la config` });
+      }
+    }
+
+    const action = String(p.action || p._action || 'accept').toLowerCase();
+    if (!['accept', 'deny'].includes(action)) {
+      issues.push({ level: 'error', msg: `${label}: action FortiGate invalide "${action}"` });
+    }
+    const logMode = String(p.log || p._log || 'all').toLowerCase();
+    if (!['all', 'utm', 'disable'].includes(logMode)) {
+      issues.push({ level: 'error', msg: `${label}: mode logtraffic invalide "${logMode}"` });
+    }
+
+    const scope = p.scope || {};
+    const scopeKey = `${scope.devid || scope.devname || ''}::${scope.vdom || ''}`;
+    if (scope.devid || scope.devname || scope.vdom) selectedScopes.add(scopeKey);
+    if (scope.vdom && config.selectedVdom && scope.vdom !== config.selectedVdom) {
+      issues.push({ level: 'error', msg: `${label}: flux du VDOM "${scope.vdom}" incompatible avec la config "${config.selectedVdom}"` });
+    }
+
+    const isWan = p._isWan || p.dstType === 'public';
+    if (isWan && p._dstUseAll !== true) {
+      const hasSpecificDst = (p.dstHosts || []).length > 0
+        || (p._multiDstSubnets || []).some(s => (s.hosts || []).length > 0)
+        || (p.dstTarget && p.dstTarget !== 'all');
+      if (!hasSpecificDst) {
+        issues.push({ level: 'error', msg: `${label}: destination WAN spécifique manquante` });
+      }
+    }
+    if (isWan && p._dstUseAll === true) {
+      issues.push({ level: 'warn', msg: `${label}: destination WAN explicitement élargie à "all"` });
+    }
+
+    if (!(a.services || []).length) {
+      issues.push({ level: 'error', msg: `${label}: aucun service déterminé — génération de ALL refusée` });
     }
 
     // Name collisions with existing objects
@@ -1838,6 +1878,10 @@ function preflightValidation(selectedPolicies, config) {
     const dupKey = `${srcName}|${dstName}|${svcKey}`;
     if (!namesUsed.has(dupKey)) namesUsed.set(dupKey, []);
     namesUsed.get(dupKey).push(i + 1);
+  }
+
+  if (selectedScopes.size > 1) {
+    issues.push({ level: 'error', msg: 'Plusieurs équipements/VDOM sont mélangés dans la même génération' });
   }
 
   // Detect duplicates
