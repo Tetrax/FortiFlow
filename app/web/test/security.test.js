@@ -94,6 +94,24 @@ test('les échecs DNS FortiOS restent distincts des flux acceptés et des action
   assert.equal(analysis.policies.length, 0);
 });
 
+test('le parser accepte les exports FAZ CSV sans en-tête composés de cellules key=value', async () => {
+  const csv = [
+    '"itime=1784816350","date=""2026-07-23""","time=""16:19:10""","type=""traffic""","action=""close""","dstintf=""AGGREGAT""","dstip=""10.1.6.103""","dstport=8531","policyid=1194","proto=6","rcvdbyte=6531","sentbyte=1750","service=""WSUS""","srcintf=""vlan-850""","srcip=""10.61.2.112""","srcport=62885"',
+    '"itime=1784816351","date=""2026-07-23""","time=""16:19:11""","type=""traffic""","action=""accept""","dstintf=""AGGREGAT""","dstip=""10.1.6.10""","dstport=53","policyid=1194","proto=17","rcvdbyte=179","sentbyte=69","service=""DNS""","srcintf=""vlan-850""","srcip=""10.50.2.249""","srcport=53883"',
+  ].join('\n');
+  const result = await parseStream(Readable.from([csv]));
+  const flows = [...result.flowMap.values()].sort((a, b) => a.dstport.localeCompare(b.dstport));
+  assert.equal(result.lineCount, 2);
+  assert.equal(result.skipped, 0);
+  assert.equal(flows.length, 2);
+  assert.equal(flows[0].srcip, '10.50.2.249');
+  assert.equal(flows[0].dstip, '10.1.6.10');
+  assert.equal(flows[0].service, 'DNS');
+  assert.equal(flows[0].decision, 'allow');
+  assert.equal(flows[1].srcip, '10.61.2.112');
+  assert.equal(flows[1].dstport, '8531');
+});
+
 test('le parser accepte les CSV FAZ au point-virgule avec directive Excel', async () => {
   const csv = [
     '\uFEFFsep=;',
