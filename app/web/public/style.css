@@ -2988,6 +2988,17 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   border-radius: 13px;
   background: var(--bg1);
 }
+.dashboard-capture-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  margin: 0;
+  padding: 12px 15px;
+  line-height: 1.55;
+}
+.dashboard-capture-alert strong { flex: 0 0 auto; }
+.dashboard-capture-alert span { color: var(--text2); }
+.dashboard-capture-alert code { font-family: var(--mono); color: var(--warn); }
 .card-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .card-heading > div { display: flex; align-items: center; gap: 9px; }
 .card-heading strong { font-size: 13px; }

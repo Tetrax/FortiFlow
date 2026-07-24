@@ -4,6 +4,45 @@ const fs       = require('fs');
 const path     = require('path');
 const readline = require('readline');
 const zlib     = require('zlib');
+const { Transform } = require('stream');
+
+const configuredDecompressedMb = Number.parseInt(process.env.MAX_DECOMPRESSED_SIZE_MB || '4096', 10);
+const MAX_DECOMPRESSED_BYTES = (
+  Number.isFinite(configuredDecompressedMb) && configuredDecompressedMb > 0
+    ? Math.min(configuredDecompressedMb, 32768)
+    : 4096
+) * 1024 * 1024;
+const configuredZipEntries = Number.parseInt(process.env.MAX_ARCHIVE_ENTRIES || '100', 10);
+const MAX_ARCHIVE_ENTRIES = Number.isFinite(configuredZipEntries) && configuredZipEntries > 0
+  ? Math.min(configuredZipEntries, 1000)
+  : 100;
+const configuredDedupeKeys = Number.parseInt(process.env.MAX_SESSION_DEDUPE_KEYS || '2000000', 10);
+const MAX_SESSION_DEDUPE_KEYS = Number.isFinite(configuredDedupeKeys) && configuredDedupeKeys > 0
+  ? configuredDedupeKeys
+  : 2000000;
+const configuredXlsxMb = Number.parseInt(process.env.MAX_XLSX_SIZE_MB || '100', 10);
+const MAX_XLSX_BYTES = (
+  Number.isFinite(configuredXlsxMb) && configuredXlsxMb > 0
+    ? Math.min(configuredXlsxMb, 512)
+    : 100
+) * 1024 * 1024;
+
+function decompressedLimitStream(shared = { bytes: 0 }) {
+  return new Transform({
+    transform(chunk, _encoding, callback) {
+      shared.bytes += chunk.length;
+      if (shared.bytes > MAX_DECOMPRESSED_BYTES) {
+        const error = new Error(
+          `Contenu décompressé trop volumineux (limite ${Math.round(MAX_DECOMPRESSED_BYTES / 1024 / 1024)} Mo)`
+        );
+        error.code = 'DECOMPRESSED_SIZE_LIMIT';
+        callback(error);
+        return;
+      }
+      callback(null, chunk);
+    },
+  });
+}
 
 // ─── Key=Value parser ─────────────────────────────────────────────────────────
 
@@ -101,6 +140,8 @@ const HEADER_MAP = {
 
   // Session / volumétrie complémentaire
   sessionid: 'sessionid', session_id: 'sessionid', 'session id': 'sessionid',
+  logid: 'logid', log_id: 'logid', 'log id': 'logid',
+  poluuid: 'poluuid', policyuuid: 'poluuid', 'policy uuid': 'poluuid',
   duration: 'duration', sentpkt: 'sentpkt', sent_pkts: 'sentpkt', 'packets sent': 'sentpkt',
   rcvdpkt: 'rcvdpkt', rcvd_pkts: 'rcvdpkt', 'packets received': 'rcvdpkt',
 
@@ -123,7 +164,7 @@ const UDP_SERVICES = new Set([
 // Ne jamais considérer une action inconnue comme autorisée. Les logs de fin de session
 // FortiOS utilisent notamment close/timeout/client-rst/server-rst pour des sessions acceptées.
 const ALLOW_ACTIONS = new Set([
-  'accept', 'allow', 'allowed', 'pass', 'close', 'timeout',
+  'accept', 'allow', 'allowed', 'pass', 'start', 'close', 'timeout',
   'client-rst', 'server-rst', 'ip-conn',
 ]);
 const DENY_ACTIONS = new Set([
@@ -365,6 +406,8 @@ function extractFlow(fields) {
     devid:      (fields.devid || '').trim(),
     vdom:       (fields.vd || '').trim(),
     sessionid:  (fields.sessionid || '').trim(),
+    logid:      (fields.logid || '').trim(),
+    poluuid:    (fields.poluuid || '').trim(),
     subtype,
     policytype,
     trandisp,
@@ -386,11 +429,54 @@ function extractFlow(fields) {
 
 // ─── Flow aggregation helper ──────────────────────────────────────────────────
 
-function aggregateFlow(flowMap, flow) {
+function createDedupeState() {
+  return {
+    sessions: new Map(),
+    duplicateRecords: 0,
+    sessionRecords: 0,
+    saturated: false,
+  };
+}
+
+function flowSessionKey(flow) {
+  if (!flow.sessionid) return '';
+  return [
+    flow.devid || flow.devname,
+    flow.vdom,
+    flow.sessionid,
+    flow.srcip,
+    flow.srcport,
+    flow.dstip,
+    flow.dstport,
+    flow.proto,
+    flow.policyid || flow.poluuid,
+    flow.srcintf,
+    flow.dstintf,
+    flow.subtype,
+    flow.policytype,
+    flow.trandisp,
+  ].join('|');
+}
+
+const TERMINAL_SESSION_ACTIONS = new Set(['close', 'timeout', 'client-rst', 'server-rst']);
+
+function sessionMetrics(flow) {
+  return {
+    sentbyte: flow.sentbyte,
+    rcvdbyte: flow.rcvdbyte,
+    sentpkt: flow.sentpkt,
+    rcvdpkt: flow.rcvdpkt,
+    duration: flow.duration,
+  };
+}
+
+function aggregateFlow(flowMap, flow, dedupeState = null) {
   if (!flow.srcip || !flow.dstip) return false;
   // Le scope équipement/VDOM fait partie de l'identité du flux : deux VDOM peuvent
   // légitimement utiliser les mêmes réseaux RFC1918 sans représenter le même contexte.
-  const key = `${flow.devid || flow.devname}|${flow.vdom}|${flow.srcip}|${flow.dstip}|${flow.dstport}|${flow.proto}|${flow.action}|${flow.service}|${flow.srcintf}|${flow.dstintf}|${flow.policyid}|${flow.subtype}|${flow.policytype}|${flow.trandisp}|${flow.evidenceIssues.join(',')}`;
+  // Le libellé de service n'est pas une identité réseau : FortiOS peut ne le
+  // renseigner qu'au log terminal. Le tuple protocole/port reste la preuve.
+  const key = `${flow.devid || flow.devname}|${flow.vdom}|${flow.srcip}|${flow.dstip}|${flow.dstport}|${flow.proto}|${flow.decision}|${flow.srcintf}|${flow.dstintf}|${flow.policyid}|${flow.subtype}|${flow.policytype}|${flow.trandisp}|${flow.evidenceIssues.join(',')}`;
   if (!flowMap.has(key)) {
     flowMap.set(key, {
       srcip: flow.srcip, dstip: flow.dstip,
@@ -398,6 +484,7 @@ function aggregateFlow(flowMap, flow) {
       proto: flow.proto, action: flow.action, decision: flow.decision, service: flow.service,
       srcintf: flow.srcintf, dstintf: flow.dstintf, policyid: flow.policyid, policyname: flow.policyname,
       devname: flow.devname, devid: flow.devid, vdom: flow.vdom,
+      logid: flow.logid, poluuid: flow.poluuid,
       protoSource: flow.protoSource,
       subtype: flow.subtype, policytype: flow.policytype, trandisp: flow.trandisp,
       transip: flow.transip, transport: flow.transport,
@@ -408,6 +495,50 @@ function aggregateFlow(flowMap, flow) {
     });
   }
   const e = flowMap.get(key);
+  if (!e.service && flow.service) e.service = flow.service;
+
+  const sessionKey = dedupeState ? flowSessionKey(flow) : '';
+  if (sessionKey && !dedupeState.saturated) {
+    dedupeState.sessionRecords++;
+    const previous = dedupeState.sessions.get(sessionKey);
+    // Un nouvel événement start après une terminaison explicite indique une
+    // réutilisation de l'identifiant FortiOS : il s'agit bien d'une autre session.
+    const reusedSession = previous
+      && flow.action === 'start'
+      && previous.terminal;
+    if (previous && !reusedSession) {
+      dedupeState.duplicateRecords++;
+      // Les compteurs FortiOS sont cumulatifs. Ajouter uniquement leur progression
+      // neutralise les doublons exacts et conserve la valeur terminale maximale.
+      e.sentBytes   += Math.max(0, flow.sentbyte - previous.metrics.sentbyte);
+      e.rcvdBytes   += Math.max(0, flow.rcvdbyte - previous.metrics.rcvdbyte);
+      e.sentPackets += Math.max(0, flow.sentpkt  - previous.metrics.sentpkt);
+      e.rcvdPackets += Math.max(0, flow.rcvdpkt  - previous.metrics.rcvdpkt);
+      e.duration     += Math.max(0, flow.duration - previous.metrics.duration);
+      previous.metrics.sentbyte = Math.max(previous.metrics.sentbyte, flow.sentbyte);
+      previous.metrics.rcvdbyte = Math.max(previous.metrics.rcvdbyte, flow.rcvdbyte);
+      previous.metrics.sentpkt  = Math.max(previous.metrics.sentpkt, flow.sentpkt);
+      previous.metrics.rcvdpkt  = Math.max(previous.metrics.rcvdpkt, flow.rcvdpkt);
+      previous.metrics.duration = Math.max(previous.metrics.duration, flow.duration);
+      previous.terminal ||= TERMINAL_SESSION_ACTIONS.has(flow.action);
+      if (flow.ts != null) {
+        if (e.firstTs == null || flow.ts < e.firstTs) e.firstTs = flow.ts;
+        if (e.lastTs  == null || flow.ts > e.lastTs)  e.lastTs  = flow.ts;
+      }
+      if (flow.day && !e.days.includes(flow.day)) e.days.push(flow.day);
+      return true;
+    }
+    if (dedupeState.sessions.size >= MAX_SESSION_DEDUPE_KEYS && !reusedSession) {
+      dedupeState.saturated = true;
+      dedupeState.sessions.clear();
+    } else {
+      dedupeState.sessions.set(sessionKey, {
+        metrics: sessionMetrics(flow),
+        terminal: TERMINAL_SESSION_ACTIONS.has(flow.action),
+      });
+    }
+  }
+
   e.count++;
   e.sentBytes   += flow.sentbyte;
   e.rcvdBytes   += flow.rcvdbyte;
@@ -425,8 +556,9 @@ function aggregateFlow(flowMap, flow) {
 
 // ─── Core streaming parser (text streams) ─────────────────────────────────────
 
-async function parseStream(inputStream, onProgress) {
+async function parseStream(inputStream, onProgress, sharedDedupeState = null) {
   const flowMap = new Map();
+  const dedupeState = sharedDedupeState || createDedupeState();
   let lineCount = 0;
   let skipped   = 0;
   const skipReasons = { nonTraffic: 0, invalidFlow: 0, ipv6: 0, archiveEntryError: 0 };
@@ -480,14 +612,25 @@ async function parseStream(inputStream, onProgress) {
     }
 
     const flow = extractFlow(fields);
-    if (!aggregateFlow(flowMap, flow)) {
+    if (!aggregateFlow(flowMap, flow, dedupeState)) {
       skipped++;
       if (flow.unsupportedReason === 'ipv6') skipReasons.ipv6++;
       else skipReasons.invalidFlow++;
     }
   }
 
-  return { flowMap, lineCount, skipped, skipReasons };
+  return {
+    flowMap,
+    lineCount,
+    skipped,
+    skipReasons,
+    dedupe: {
+      duplicateRecords: dedupeState.duplicateRecords,
+      sessionRecords: dedupeState.sessionRecords,
+      trackedSessions: dedupeState.saturated ? MAX_SESSION_DEDUPE_KEYS : dedupeState.sessions.size,
+      saturated: dedupeState.saturated,
+    },
+  };
 }
 
 // ─── XLSX parser ──────────────────────────────────────────────────────────────
@@ -509,6 +652,7 @@ async function parseXLSX(filePath, onProgress) {
   const headers = mapAndValidateCsvHeaders(rows[0], ',');
 
   const flowMap = new Map();
+  const dedupeState = createDedupeState();
   let lineCount = 0;
   let skipped   = 0;
   const skipReasons = { nonTraffic: 0, invalidFlow: 0, ipv6: 0, archiveEntryError: 0 };
@@ -529,14 +673,25 @@ async function parseXLSX(filePath, onProgress) {
       fields[headers[i]] = String(parts[i] ?? '').trim();
     }
     const flow = extractFlow(fields);
-    if (!aggregateFlow(flowMap, flow)) {
+    if (!aggregateFlow(flowMap, flow, dedupeState)) {
       skipped++;
       if (flow.unsupportedReason === 'ipv6') skipReasons.ipv6++;
       else skipReasons.invalidFlow++;
     }
   }
 
-  return { flowMap, lineCount, skipped, skipReasons };
+  return {
+    flowMap,
+    lineCount,
+    skipped,
+    skipReasons,
+    dedupe: {
+      duplicateRecords: dedupeState.duplicateRecords,
+      sessionRecords: dedupeState.sessionRecords,
+      trackedSessions: dedupeState.saturated ? MAX_SESSION_DEDUPE_KEYS : dedupeState.sessions.size,
+      saturated: dedupeState.saturated,
+    },
+  };
 }
 
 // ─── File entry point (GZ / ZIP / XLSX / plain) ───────────────────────────────
@@ -546,6 +701,14 @@ async function parseFile(filePath, onProgress) {
 
   // XLSX / XLS
   if (ext === '.xlsx' || ext === '.xls') {
+    const size = fs.statSync(filePath).size;
+    if (size > MAX_XLSX_BYTES) {
+      throw new Error(
+        `Classeur Excel trop volumineux pour un chargement mémoire sûr `
+        + `(${Math.ceil(size / 1024 / 1024)} Mo, limite ${Math.round(MAX_XLSX_BYTES / 1024 / 1024)} Mo). `
+        + 'Exportez les logs en CSV puis compressez-les en .gz.'
+      );
+    }
     return parseXLSX(filePath, onProgress);
   }
 
@@ -574,7 +737,9 @@ async function parseFile(filePath, onProgress) {
   let inputStream;
 
   if (ext === '.gz') {
-    inputStream = fs.createReadStream(filePath).pipe(zlib.createGunzip());
+    inputStream = fs.createReadStream(filePath)
+      .pipe(zlib.createGunzip())
+      .pipe(decompressedLimitStream());
 
   } else if (ext === '.zip') {
     let unzipper;
@@ -584,18 +749,31 @@ async function parseFile(filePath, onProgress) {
     const directory = await unzipper.Open.file(filePath);
     const entries = directory.files.filter(f => !f.path.startsWith('__MACOSX') && f.type === 'File');
     if (!entries.length) throw new Error('Archive ZIP vide ou format non supporté');
+    if (entries.length > MAX_ARCHIVE_ENTRIES) {
+      throw new Error(`Archive ZIP trop complexe : ${entries.length} fichiers (limite ${MAX_ARCHIVE_ENTRIES})`);
+    }
 
     // Parse all files in the ZIP and merge results
     const mergedFlowMap = new Map();
     let totalLines = 0;
     let totalSkipped = 0;
     const totalSkipReasons = { nonTraffic: 0, invalidFlow: 0, ipv6: 0, archiveEntryError: 0 };
+    // Un même export FAZ peut être découpé en plusieurs fichiers dans le ZIP.
+    // L’état doit donc être partagé entre les entrées pour neutraliser une paire
+    // start/close même lorsqu’elle traverse cette frontière.
+    const archiveDedupeState = createDedupeState();
+    const decompressedState = { bytes: 0 };
 
     for (const entry of entries) {
       try {
         let stream = entry.stream();
         if (entry.path.endsWith('.gz')) stream = stream.pipe(zlib.createGunzip());
-        const { flowMap, lineCount, skipped, skipReasons } = await parseStream(stream, progressCb);
+        stream = stream.pipe(decompressedLimitStream(decompressedState));
+        const { flowMap, lineCount, skipped, skipReasons } = await parseStream(
+          stream,
+          progressCb,
+          archiveDedupeState
+        );
         totalLines   += lineCount;
         totalSkipped += skipped;
         if (skipReasons) {
@@ -624,6 +802,7 @@ async function parseFile(filePath, onProgress) {
           }
         }
       } catch (err) {
+        if (err?.code === 'DECOMPRESSED_SIZE_LIMIT') throw err;
         // Continuer permet d'afficher les autres entrées, mais l'analyse restera
         // non certifiable : une archive partielle ne doit jamais générer du CLI.
         totalSkipped++;
@@ -631,7 +810,20 @@ async function parseFile(filePath, onProgress) {
       }
     }
 
-    return { flowMap: mergedFlowMap, lineCount: totalLines, skipped: totalSkipped, skipReasons: totalSkipReasons };
+    return {
+      flowMap: mergedFlowMap,
+      lineCount: totalLines,
+      skipped: totalSkipped,
+      skipReasons: totalSkipReasons,
+      dedupe: {
+        duplicateRecords: archiveDedupeState.duplicateRecords,
+        sessionRecords: archiveDedupeState.sessionRecords,
+        trackedSessions: archiveDedupeState.saturated
+          ? MAX_SESSION_DEDUPE_KEYS
+          : archiveDedupeState.sessions.size,
+        saturated: archiveDedupeState.saturated,
+      },
+    };
 
   } else {
     inputStream = fs.createReadStream(filePath);

@@ -69,7 +69,7 @@ function protoName(proto) {
 }
 
 const ALLOW_ACTIONS = new Set([
-  'accept', 'allow', 'allowed', 'pass', 'close', 'timeout',
+  'accept', 'allow', 'allowed', 'pass', 'start', 'close', 'timeout',
   'client-rst', 'server-rst', 'ip-conn',
 ]);
 const DENY_ACTIONS = new Set([
@@ -111,6 +111,21 @@ function flowScopeKey(flow) {
   return `${scope.devid || scope.devname || 'unknown-device'}::${scope.vdom || 'root'}`;
 }
 
+// Services dont l'absence de trafic retour ne constitue pas, à elle seule,
+// une preuve d'échec. On reste volontairement restrictif : DNS/NTP/DHCP ne
+// figurent pas ici car une réponse est normalement attendue.
+const EXPECTED_ONE_WAY_UDP_SERVICES = new Set([
+  'SYSLOG', 'SNMPTRAP', 'SNMP-TRAP', 'NETFLOW', 'SFlow', 'SFLOW',
+  'FORTIANALYZER', 'FORTIMANAGER',
+].map(value => value.toUpperCase()));
+
+function isExpectedOneWayFlow(flow) {
+  const proto = String(flow?.proto || '').toUpperCase();
+  if (proto !== '17' && proto !== 'UDP') return false;
+  const service = String(flow?.service || '').toUpperCase().trim();
+  return EXPECTED_ONE_WAY_UDP_SERVICES.has(service);
+}
+
 // ─── Main analysis ────────────────────────────────────────────────────────────
 
 // Single-pass builder: computes all 4 subnet-group variants + port stats in
@@ -142,7 +157,7 @@ function buildAllSubnetGroupsAndPorts(flows, topN = 25, knownSubnets = []) {
     const dstType = isInternal(flow.dstip) ? 'private' : 'public';
     if (!dstKey) return;
     if (!sg.dsts[dstKey]) {
-      sg.dsts[dstKey] = { key: dstKey, type: dstType, ports: new Set(), protos: new Set(), services: new Set(), serviceTuples: new Map(), policyIds: new Set(), dstIPs: new Set(), srcIPs: new Set(), count: 0, sentBytes: 0, rcvdBytes: 0, noRcvdFlows: 0, noRcvdSrcIPs: new Set(), firstTs: null, lastTs: null, days: new Set() };
+      sg.dsts[dstKey] = { key: dstKey, type: dstType, ports: new Set(), protos: new Set(), services: new Set(), serviceTuples: new Map(), policyIds: new Set(), dstIPs: new Set(), srcIPs: new Set(), count: 0, sentBytes: 0, rcvdBytes: 0, noRcvdFlows: 0, expectedOneWayFlows: 0, noRcvdSrcIPs: new Set(), firstTs: null, lastTs: null, days: new Set() };
     }
     const dst = sg.dsts[dstKey];
     if (flow.dstport)  dst.ports.add(flow.dstport);
@@ -164,7 +179,14 @@ function buildAllSubnetGroupsAndPorts(flows, topN = 25, knownSubnets = []) {
     dst.count      += flow.count;
     dst.sentBytes  += flow.sentBytes;
     dst.rcvdBytes  += flow.rcvdBytes;
-    if ((flow.rcvdBytes || 0) === 0) { dst.noRcvdFlows += flow.count; if (flow.srcip) dst.noRcvdSrcIPs.add(flow.srcip); }
+    if ((flow.rcvdBytes || 0) === 0 && (flow.rcvdPackets || 0) === 0) {
+      if (isExpectedOneWayFlow(flow)) {
+        dst.expectedOneWayFlows += flow.count;
+      } else {
+        dst.noRcvdFlows += flow.count;
+        if (flow.srcip) dst.noRcvdSrcIPs.add(flow.srcip);
+      }
+    }
     // #1: stats temporelles (flux agrégés portent firstTs/lastTs/days depuis le parser)
     if (flow.firstTs != null && (dst.firstTs == null || flow.firstTs < dst.firstTs)) dst.firstTs = flow.firstTs;
     if (flow.lastTs  != null && (dst.lastTs  == null || flow.lastTs  > dst.lastTs))  dst.lastTs  = flow.lastTs;
@@ -283,7 +305,14 @@ function buildAnalysis(flowInput, knownSubnets = []) {
   }
 
   const temporalDataAvailable = captureStartTs != null;
-  const captureDays = captureDaySet.size;
+  const captureActiveDays = captureDaySet.size;
+  const captureSpanDays = temporalDataAvailable && captureEndTs != null
+    ? Math.max(1, Math.floor((captureEndTs - captureStartTs) / 86400000) + 1)
+    : 0;
+  const captureDays = captureSpanDays || captureActiveDays;
+  const captureCoverageRatio = captureSpanDays > 0
+    ? Math.min(1, captureActiveDays / captureSpanDays)
+    : null;
 
   const srcIPsArr      = [...srcIPs];
   const dstIPsArr      = [...dstIPs];
@@ -390,6 +419,9 @@ function buildAnalysis(flowInput, knownSubnets = []) {
       captureStart: captureStartTs,
       captureEnd:   captureEndTs,
       captureDays,
+      captureActiveDays,
+      captureSpanDays,
+      captureCoverageRatio,
       temporalDataAvailable,
     },
     flows:    enrichedFlows,
@@ -407,14 +439,14 @@ function buildAnalysis(flowInput, knownSubnets = []) {
 // #1: niveau de confiance basé UNIQUEMENT sur des faits observés (jamais fabriqué).
 // Seuils transparents (exposés à l'UI) :
 //  - 'unknown'      : aucune donnée temporelle dans les logs
-//  - 'short-window' : capture ≤ 1 jour → impossible de juger la récurrence
-//  - 'high'         : vu ≥ 7 jours distincts OU sur ≥ 50 % des jours de la capture
+//  - 'short-window' : capture < 7 jours → impossible de juger la récurrence
+//  - 'high'         : vu ≥ 7 jours distincts ET sur ≥ 50 % de la fenêtre réelle
 //  - 'low'          : vu un seul jour
 //  - 'medium'       : entre les deux
 function computeConfidence(daysObserved, captureDays, temporalDataAvailable) {
   if (!temporalDataAvailable || daysObserved == null) return 'unknown';
-  if (captureDays <= 1) return 'short-window';
-  if (daysObserved >= 7 || daysObserved / captureDays >= 0.5) return 'high';
+  if (captureDays < 7) return 'short-window';
+  if (daysObserved >= 7 && daysObserved / captureDays >= 0.5) return 'high';
   if (daysObserved <= 1) return 'low';
   return 'medium';
 }
@@ -473,6 +505,7 @@ function buildPolicies(subnetGroups, captureCtx = {}) {
         sentBytes:     dst.sentBytes,
         rcvdBytes:     dst.rcvdBytes,
         noRcvdFlows:   dst.noRcvdFlows,
+        expectedOneWayFlows: dst.expectedOneWayFlows || 0,
         noRcvdSrcHosts: [...dst.noRcvdSrcIPs],
         // #1: fenêtre d'observation par policy (null si pas de timestamp dans les logs)
         firstSeen:     dst.firstTs,
@@ -646,4 +679,14 @@ function consolidatePolicies(rawPolicies) {
     });
 }
 
-module.exports = { isPrivate, isKnownInternal, ipType, getSubnet24, protoName, flowDecision, buildAnalysis, consolidatePolicies };
+module.exports = {
+  isPrivate,
+  isKnownInternal,
+  ipType,
+  getSubnet24,
+  protoName,
+  flowDecision,
+  isExpectedOneWayFlow,
+  buildAnalysis,
+  consolidatePolicies,
+};

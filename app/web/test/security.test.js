@@ -6,10 +6,17 @@ const { Readable } = require('node:stream');
 
 const { parseStream, normalizeDecision } = require('../lib/parser');
 const { buildAnalysis, flowDecision, consolidatePolicies } = require('../lib/analyzer');
-const { parseFortiConfig, analyzePolicies, generateConfig, preflightValidation, findAddress } = require('../lib/forticonfig');
+const {
+  parseFortiConfig,
+  analyzePolicies,
+  generateConfig,
+  preflightValidation,
+  findAddress,
+  resolveInterfaceByRoute,
+} = require('../lib/forticonfig');
 const { buildPoliciesByPlan } = require('../public/segmentation-plan.js');
 const { getCaptureDeploymentBlockers } = require('../lib/deploy-safety');
-const { buildHostPairCoverage } = require('../lib/coverage');
+const { buildHostPairCoverage, buildPolicyOrderIssues, resolveServiceNames } = require('../lib/coverage');
 
 function aggregate(overrides = {}) {
   return {
@@ -58,6 +65,7 @@ function wanPolicy(overrides = {}) {
 
 test('normalise les actions FortiOS et refuse les actions inconnues', () => {
   assert.equal(normalizeDecision('accept'), 'allow');
+  assert.equal(normalizeDecision('start'), 'allow');
   assert.equal(normalizeDecision('close'), 'allow');
   assert.equal(normalizeDecision('client-rst'), 'allow');
   assert.equal(normalizeDecision('deny'), 'deny');
@@ -80,6 +88,39 @@ test('normalise les actions FortiOS et refuse les actions inconnues', () => {
     sentBytes: 0,
     rcvdBytes: 0,
   }), 'failed');
+});
+
+test('déduplique les logs start/close d’une même session sans perdre les compteurs terminaux', async () => {
+  const common = 'type=traffic subtype=forward devname="FGT-A" devid="FGT123" vd="root" sessionid=9001 srcip=10.0.0.10 srcport=51000 dstip=10.0.1.20 dstport=443 proto=6 srcintf="lan" dstintf="servers" policyid=10';
+  const logs = [
+    `date=2026-07-23 time=10:00:00 action=start service="" sentbyte=200 rcvdbyte=300 ${common}`,
+    `date=2026-07-23 time=10:05:00 action=close service=HTTPS sentbyte=1200 rcvdbyte=3400 ${common}`,
+  ].join('\n');
+  const result = await parseStream(Readable.from([logs]));
+  const flows = [...result.flowMap.values()];
+
+  assert.equal(flows.length, 1);
+  assert.equal(flows[0].count, 1);
+  assert.equal(flows[0].sentBytes, 1200);
+  assert.equal(flows[0].rcvdBytes, 3400);
+  assert.equal(flows[0].service, 'HTTPS');
+  assert.equal(result.dedupe.duplicateRecords, 1);
+});
+
+test('compte une nouvelle session quand FortiOS réutilise un sessionid terminé', async () => {
+  const common = 'type=traffic subtype=forward devname="FGT-A" devid="FGT123" vd="root" sessionid=42 srcip=10.0.0.10 srcport=51000 dstip=10.0.1.20 dstport=443 proto=6 service=HTTPS srcintf="lan" dstintf="servers" policyid=10';
+  const logs = [
+    `date=2026-07-23 time=10:00:00 action=start sentbyte=0 rcvdbyte=0 ${common}`,
+    `date=2026-07-23 time=10:01:00 action=close sentbyte=100 rcvdbyte=200 ${common}`,
+    `date=2026-07-24 time=10:00:00 action=start sentbyte=10 rcvdbyte=20 ${common}`,
+  ].join('\n');
+  const result = await parseStream(Readable.from([logs]));
+  const flow = [...result.flowMap.values()][0];
+
+  assert.equal(flow.count, 2);
+  assert.equal(flow.sentBytes, 110);
+  assert.equal(flow.rcvdBytes, 220);
+  assert.equal(result.dedupe.duplicateRecords, 1);
 });
 
 test('les échecs DNS FortiOS restent distincts des flux acceptés et des actions inconnues', async () => {
@@ -362,6 +403,37 @@ test('la consolidation ne fusionne jamais deux scopes FortiGate/VDOM', () => {
   assert.deepEqual(result.map(p => p.scope.vdom).sort(), ['root', 'tenant-b']);
 });
 
+test('la confiance distingue les jours réellement observés de la plage calendaire', () => {
+  const dayOne = Date.parse('2026-07-01T10:00:00Z');
+  const dayThirty = Date.parse('2026-07-30T10:00:00Z');
+  const analysis = buildAnalysis([
+    aggregate({ firstTs: dayOne, lastTs: dayOne, days: ['2026-07-01'] }),
+    aggregate({ firstTs: dayThirty, lastTs: dayThirty, days: ['2026-07-30'] }),
+  ]);
+
+  assert.equal(analysis.stats.captureActiveDays, 2);
+  assert.equal(analysis.stats.captureSpanDays, 30);
+  assert.ok(analysis.stats.captureCoverageRatio < 0.07);
+  assert.equal(analysis.policies[0].daysObserved, 2);
+  assert.equal(analysis.policies[0].confidence, 'medium');
+});
+
+test('un flux UDP explicitement unidirectionnel n’est pas classé comme destination silencieuse', () => {
+  const analysis = buildAnalysis([
+    aggregate({
+      proto: '17',
+      dstport: '514',
+      service: 'SYSLOG',
+      sentBytes: 500,
+      rcvdBytes: 0,
+      rcvdPackets: 0,
+    }),
+  ]);
+
+  assert.equal(analysis.policies[0].noRcvdFlows, 0);
+  assert.equal(analysis.policies[0].expectedOneWayFlows, 1);
+});
+
 
 test('les flux IPv6 non pris en charge sont comptés explicitement', async () => {
   const log = 'date=2026-07-01 time=10:00:00 type=traffic devname="FGT-A" vd="root" srcip=2001:db8::10 dstip=2001:db8::20 dstport=443 proto=6 action=accept service=HTTPS';
@@ -534,7 +606,7 @@ test('le générateur refuse tout service non résolu sans tuple exact et ne ret
 });
 
 
-test('le preflight ignore la présence de PBR mais bloque une VRF non sélectionnée', () => {
+test('le preflight classe PBR en conditionnel et bloque une VRF non sélectionnée', () => {
   const policy = {
     srcintf: 'lan', dstintf: 'wan1',
     dstType: 'public', dstTarget: '8.8.8.8', dstHosts: ['8.8.8.8'], _dstUseAll: false,
@@ -551,10 +623,120 @@ test('le preflight ignore la présence de PBR mais bloque une VRF non sélection
   const vrf = preflightValidation([policy], { ...baseConfig, hasNonDefaultVrf: true });
 
   assert.equal(pbr.ok, true);
-  assert.equal(pbr.issues.some(i => /Policy-Based Routing|PBR/.test(i.msg)), false);
+  assert.ok(pbr.issues.some(i => i.code === 'ROUTING_CONTEXT_UNPROVEN'));
+  assert.equal(pbr.certification.level, 'conditional');
 
   assert.equal(vrf.ok, false);
   assert.ok(vrf.issues.some(i => i.code === 'VRF_CONTEXT'));
+});
+
+test('détecte uniquement les vraies règles PBR et SD-WAN dans leur section', () => {
+  const withoutRules = parseFortiConfig(`
+config system sdwan
+    config members
+        edit 1
+            set interface "wan1"
+        next
+    end
+end
+config firewall service custom
+    edit "HTTPS-CUSTOM"
+        set tcp-portrange 443
+    next
+end
+`);
+  assert.equal(withoutRules.hasPolicyRoutes, false);
+  assert.equal(withoutRules.hasSdwanRules, false);
+
+  const withRules = parseFortiConfig(`
+config router policy
+    edit 1
+        set input-device "lan"
+        set output-device "wan1"
+    next
+end
+config system sdwan
+    config service
+        edit 1
+            set dst "all"
+        next
+    end
+end
+`);
+  assert.equal(withRules.hasPolicyRoutes, true);
+  assert.equal(withRules.hasSdwanRules, true);
+});
+
+test('un ECMP vers plusieurs interfaces reste indéterminé au lieu de choisir un chemin arbitraire', () => {
+  const resolution = resolveInterfaceByRoute('8.8.8.8', [
+    { dst: '0.0.0.0/0', device: 'wan1', distance: 10, priority: 0 },
+    { dst: '0.0.0.0/0', device: 'wan2', distance: 10, priority: 0 },
+  ]);
+  assert.equal(resolution.device, null);
+  assert.equal(resolution.ambiguous, true);
+  assert.deepEqual(resolution.candidates.sort(), ['wan1', 'wan2']);
+
+  const analyzed = analyzePolicies([{
+    srcSubnet: '10.0.0.0/24',
+    flowSrcintf: 'lan',
+    dstTarget: '8.8.8.8',
+    dstType: 'public',
+    services: ['HTTPS'],
+    ports: [443],
+    protos: ['TCP'],
+    serviceTuples: [{ proto: '6', port: '443', service: 'HTTPS', sessions: 1 }],
+  }], {
+    addresses: {},
+    customServices: {},
+    interfaces: {
+      lan: { name: 'lan', cidr: '10.0.0.1/24' },
+      wan1: { name: 'wan1', isWan: true },
+      wan2: { name: 'wan2', isWan: true },
+    },
+    zones: {},
+    fullRoutes: [
+      { dst: '0.0.0.0/0', device: 'wan1', distance: 10, priority: 0 },
+      { dst: '0.0.0.0/0', device: 'wan2', distance: 10, priority: 0 },
+    ],
+    sdwanEnabled: false,
+    sdwanMembers: [],
+  })[0];
+
+  assert.equal(analyzed.analysis.dstIface, null);
+  assert.equal(analyzed.analysis.dstIfaceSource, 'ecmp-ambiguous');
+  assert.equal(analyzed.analysis.status, 'error');
+});
+
+test('les groupes de services imbriqués sont résolus sans élargir la couverture', () => {
+  const resolved = resolveServiceNames(
+    ['APPLICATIONS'],
+    { 'HTTPS-EXACT': { tcpPorts: [443], udpPorts: [] } },
+    {
+      WEB: { members: ['HTTPS-EXACT'] },
+      APPLICATIONS: { members: ['WEB'] },
+    },
+  );
+  assert.deepEqual([...resolved.tcp], [443]);
+  assert.equal(resolved.udp.size, 0);
+  assert.equal(resolved.unresolvable, false);
+});
+
+test('une deny précédente bloque la génération et une accept large la rend conditionnelle', () => {
+  const policy = {
+    srcHosts: ['10.0.0.10'],
+    dstHosts: ['10.0.1.20'],
+  };
+  const denied = buildPolicyOrderIssues([policy], {
+    '10.0.0.10|10.0.1.20': { verdict: 'blocked', broad: false },
+  });
+  assert.equal(denied[0].level, 'error');
+  assert.equal(denied[0].code, 'ORDER_BLOCKED_BY_EXISTING_DENY');
+
+  const broad = buildPolicyOrderIssues([policy], {
+    '10.0.0.10|10.0.1.20': { verdict: 'allowed', broad: true },
+  });
+  assert.equal(broad[0].level, 'warn');
+  assert.equal(broad[0].code, 'ORDER_SHADOWED_BY_BROAD_ACCEPT');
 });
 
 
@@ -811,6 +993,25 @@ test('les données non interprétables bloquent le CLI tandis que les échecs co
   const clean = getCaptureDeploymentBlockers({});
   assert.equal(clean.hasExcludedTraffic, false);
   assert.equal(clean.blocked, false);
+
+  const incomplete = getCaptureDeploymentBlockers({
+    meta: {
+      possibleFazDownloadLimit: 1000000,
+      dedupe: { duplicateRecords: 12, saturated: false },
+    },
+    stats: {
+      captureSpanDays: 30,
+      captureActiveDays: 5,
+      captureCoverageRatio: 5 / 30,
+    },
+  });
+  assert.equal(incomplete.blocked, false);
+  assert.equal(incomplete.evidenceLimited, true);
+  assert.deepEqual(
+    incomplete.certificationWarnings.sort(),
+    ['capture_calendar_gaps', 'possible_faz_download_limit'],
+  );
+  assert.equal(incomplete.duplicateSessionRecords, 12);
 
   const legacy = getCaptureDeploymentBlockers({
     flows: [{ ...aggregate(), deploymentEligible: undefined, count: 4 }],

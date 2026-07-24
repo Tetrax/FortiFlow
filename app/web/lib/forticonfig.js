@@ -93,6 +93,29 @@ function extractSections(lines, sectionNames) {
   return results;
 }
 
+function hasEditableConfigPath(lines, parentName, childName = null) {
+  const stack = [];
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    if (line.startsWith('config ')) {
+      stack.push(line.slice(7).trim());
+      continue;
+    }
+    if (line === 'end') {
+      stack.pop();
+      continue;
+    }
+    if (!line.startsWith('edit ')) continue;
+    const inParent = stack.includes(parentName);
+    const inTarget = childName
+      ? stack[stack.length - 1] === childName
+      : stack[stack.length - 1] === parentName;
+    if (inParent && inTarget) return true;
+  }
+  return false;
+}
+
 // ─── Subnet helpers ───────────────────────────────────────────────────────────
 
 function maskBits(mask) {
@@ -595,6 +618,12 @@ function parseFortiConfig(text, selectedVdom = null) {
   // Une VRF non par défaut exige un contexte de routage que la matrice
   // standard ne peut pas déduire de manière certaine.
   const hasNonDefaultVrf = Object.values(interfaces).some(iface => iface.vrf !== 0);
+  // Les règles PBR et les règles de service SD-WAN influencent le chemin réel
+  // en fonction du tuple. Elles sont signalées au preflight : la simple table
+  // de routage ne suffit alors pas à certifier l'interface de sortie.
+  const hasPolicyRoutes = hasEditableConfigPath(parseLines, 'router policy');
+  const hasSdwanRules = hasEditableConfigPath(parseLines, 'system sdwan', 'service')
+    || hasEditableConfigPath(parseLines, 'system virtual-wan-link', 'service');
 
   // ── Security profiles ──
   const securityProfiles = {
@@ -605,7 +634,7 @@ function parseFortiConfig(text, selectedVdom = null) {
     profileGroup: Object.keys(_sections['firewall profile-group'] || {}),
   };
 
-  return { addresses, addressGroups, customServices, serviceGroups, interfaces, zones, sdwanMembers, sdwanZoneNames, sdwanEnabled, sdwanIntfName, vdomList, selectedVdom: activeVdom, hasVdom: vdomList.length > 0, staticRoutes, fullRoutes, hasBgp, hasOspf, hasNonDefaultVrf, existingPolicies, securityProfiles };
+  return { addresses, addressGroups, customServices, serviceGroups, interfaces, zones, sdwanMembers, sdwanZoneNames, sdwanEnabled, sdwanIntfName, vdomList, selectedVdom: activeVdom, hasVdom: vdomList.length > 0, staticRoutes, fullRoutes, hasBgp, hasOspf, hasNonDefaultVrf, hasPolicyRoutes, hasSdwanRules, existingPolicies, securityProfiles };
 }
 
 // ─── Static routes + BGP parser ──────────────────────────────────────────────
@@ -751,11 +780,12 @@ function parseBgpNetworkTable(text) {
 // PRE-CONDITION: routes DOIT être trié par préfixe décroissant (via sortRoutes)
 // — la première correspondance trouvée est la plus spécifique
 // skipDefault=true pour les recherches srcintf (pas de fallback 0.0.0.0/0)
-function findInterfaceByRoute(dstCidr, routes, skipDefault) {
-  if (!routes || routes.length === 0) return null;
+function resolveInterfaceByRoute(dstCidr, routes, skipDefault) {
+  const unresolved = { device: null, ambiguous: false, candidates: [] };
+  if (!routes || routes.length === 0) return unresolved;
   const targetIp = (dstCidr || '').split('/')[0];
   let targetInt;
-  try { targetInt = ip2int(targetIp); } catch { return null; }
+  try { targetInt = ip2int(targetIp); } catch { return unresolved; }
 
   // Collecter toutes les routes correspondantes, puis appliquer la sélection
   // FortiGate. Si plusieurs interfaces restent ex æquo (ECMP), ne pas en choisir
@@ -770,7 +800,7 @@ function findInterfaceByRoute(dstCidr, routes, skipDefault) {
       if (pfx === 0 || (ip2int(routeIp) & mask) === (targetInt & mask)) matches.push(route);
     } catch { /* route invalide ignorée */ }
   }
-  if (!matches.length) return null;
+  if (!matches.length) return unresolved;
   sortRoutes(matches);
   const best = matches[0];
   const bestPrefix = parseInt(best.dst.split('/')[1] || '0', 10);
@@ -780,7 +810,11 @@ function findInterfaceByRoute(dstCidr, routes, skipDefault) {
     (route.priority ?? 0) === (best.priority ?? 0)
   );
   const devices = [...new Set(equivalent.map(route => route.device).filter(Boolean))];
-  return devices.length === 1 ? devices[0] : null;
+  return {
+    device: devices.length === 1 ? devices[0] : null,
+    ambiguous: devices.length > 1,
+    candidates: devices,
+  };
 }
 
 // Parse SDWAN members from raw text (handles nested config)
@@ -1320,10 +1354,12 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
       srcIfaceName   = p.flowSrcintf;
       srcIfaceSource = 'log';
     } else {
-      const srcRouteDevice = findInterfaceByRoute(p.srcSubnet, routes, true);
-      if (srcRouteDevice) {
-        srcIfaceName   = srcRouteDevice;
+      const srcRoute = resolveInterfaceByRoute(p.srcSubnet, routes, true);
+      if (srcRoute.device) {
+        srcIfaceName   = srcRoute.device;
         srcIfaceSource = 'route';
+      } else if (srcRoute.ambiguous) {
+        srcIfaceSource = 'ecmp-ambiguous';
       }
     }
 
@@ -1339,16 +1375,20 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
         dstIfaceSource = 'sdwan';
       } else {
         // 2. Route lookup (default route ou route spécifique)
-        const routeDevice = findInterfaceByRoute(p.dstTarget || '0.0.0.0', routes);
-        if (routeDevice) {
+        const route = resolveInterfaceByRoute(p.dstTarget || '0.0.0.0', routes);
+        if (route.device) {
           // Si SD-WAN actif et que la route pointe vers un membre SD-WAN → utiliser l'interface virtuelle
-          if (fortiConfig.sdwanEnabled && fortiConfig.sdwanMembers.includes(routeDevice)) {
-            dstIfaceName   = fortiConfig.sdwanIntfName || routeDevice;
+          if (fortiConfig.sdwanEnabled && fortiConfig.sdwanMembers.includes(route.device)) {
+            dstIfaceName   = fortiConfig.sdwanIntfName || route.device;
             dstIfaceSource = 'sdwan';
           } else {
-            dstIfaceName   = routeDevice;
+            dstIfaceName   = route.device;
             dstIfaceSource = 'route';
           }
+        } else if (route.ambiguous) {
+          // Un ECMP vers plusieurs interfaces ne permet pas de certifier le chemin
+          // d'une policy à partir de la table de routage seule.
+          dstIfaceSource = 'ecmp-ambiguous';
         } else if (fortiConfig.sdwanEnabled && fortiConfig.sdwanIntfName) {
           dstIfaceName   = fortiConfig.sdwanIntfName;
           dstIfaceSource = 'sdwan';
@@ -1361,10 +1401,12 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
       }
     } else {
       // 1. Route lookup (plus précis que le matching par subnet)
-      const routeDevice = findInterfaceByRoute(p.dstTarget, routes);
-      if (routeDevice) {
-        dstIfaceName   = routeDevice;
+      const route = resolveInterfaceByRoute(p.dstTarget, routes);
+      if (route.device) {
+        dstIfaceName   = route.device;
         dstIfaceSource = 'route';
+      } else if (route.ambiguous) {
+        dstIfaceSource = 'ecmp-ambiguous';
       } else {
         // 2. Fallback : subnet-to-interface matching
         dstIface       = findInterfaceForSubnet(p.dstTarget, interfaces);
@@ -2044,7 +2086,7 @@ function segmentationServiceMatchesTuple(service, tuple) {
 
 function segmentationFlowAllowed(flow) {
   if (String(flow?.decision || '').toLowerCase() === 'allow') return true;
-  return new Set(['accept', 'allow', 'allowed', 'pass', 'close', 'timeout', 'client-rst', 'server-rst', 'ip-conn'])
+  return new Set(['accept', 'allow', 'allowed', 'pass', 'start', 'close', 'timeout', 'client-rst', 'server-rst', 'ip-conn'])
     .has(String(flow?.action || '').toLowerCase());
 }
 
@@ -2078,12 +2120,24 @@ function preflightValidation(selectedPolicies, config, observedFlows = null) {
   let exactScopePolicies = 0;
   let generalizedPolicies = 0;
   let unclassifiedPolicies = 0;
+  const routingContextUnproven = Boolean(config.hasPolicyRoutes || config.hasSdwanRules);
 
   if (config.hasNonDefaultVrf) {
     issues.push({
       level: 'error',
       code: 'VRF_CONTEXT',
       msg: 'VRF non par défaut détectée : sélection de table VRF requise avant génération',
+    });
+  }
+  if (routingContextUnproven) {
+    const contexts = [
+      config.hasPolicyRoutes ? 'PBR' : '',
+      config.hasSdwanRules ? 'règles SD-WAN' : '',
+    ].filter(Boolean).join(' et ');
+    issues.push({
+      level: 'warn',
+      code: 'ROUTING_CONTEXT_UNPROVEN',
+      msg: `${contexts} détecté(s) : les interfaces observées restent utilisables, mais le chemin ne peut pas être certifié uniquement avec la table de routage`,
     });
   }
 
@@ -2332,11 +2386,13 @@ function preflightValidation(selectedPolicies, config, observedFlows = null) {
   const warnings = issues.filter(i => i.level === 'warn').length;
   const certification = {
     level: errors > 0 ? 'rejected'
-      : (generalizedPolicies > 0 || unclassifiedPolicies > 0) ? 'generalized'
+      : routingContextUnproven ? 'conditional'
+        : (generalizedPolicies > 0 || unclassifiedPolicies > 0) ? 'generalized'
         : 'exact',
     exactPolicies: exactScopePolicies,
     generalizedPolicies,
     unclassifiedPolicies,
+    routingContextUnproven,
   };
   return { issues, errors, warnings, ok: errors === 0, certification };
 }
@@ -2382,5 +2438,6 @@ module.exports = {
   parseOspfRoutingTable,
   parseBgpNetworkTable,
   sortRoutes,
+  resolveInterfaceByRoute,
   formatExistingPolicies,
 };

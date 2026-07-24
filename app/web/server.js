@@ -6,7 +6,7 @@ const path             = require('path');
 const fs               = require('fs');
 const { WebSocketServer } = require('ws');
 
-const { buildAnalysis, consolidatePolicies, flowDecision } = require('./lib/analyzer');
+const { buildAnalysis, consolidatePolicies, flowDecision, isExpectedOneWayFlow } = require('./lib/analyzer');
 const { AnalysisPool }                                     = require('./lib/analysis-pool');
 const { createSession, getSession, setSessionData, setFortiConfig,
         setSessionError, deleteSession, getSessionCachePath,
@@ -16,12 +16,21 @@ const { parseFortiConfig, analyzePolicies,
         preflightValidation,
         parseFullRoutingTable, parseOspfRoutingTable, parseBgpNetworkTable,
         sortRoutes, formatExistingPolicies }             = require('./lib/forticonfig');
-const { buildHostPairCoverage }                          = require('./lib/coverage');
+const { buildHostPairCoverage, buildPolicyOrderIssues }  = require('./lib/coverage');
 const { getCaptureDeploymentBlockers }                    = require('./lib/deploy-safety');
 
 const app   = express();
 const PORT  = process.env.PORT || 3737;
 const tsNow = () => new Date().toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '-');
+const cliCommentText = value => String(value ?? '')
+  .replace(/[\r\n\u0000-\u001f\u007f]/g, ' ')
+  .replace(/#/g, '_')
+  .trim()
+  .slice(0, 240);
+const isoDay = value => {
+  const date = new Date(Number(value));
+  return Number.isNaN(date.getTime()) ? '?' : date.toISOString().slice(0, 10);
+};
 
 // ─── Upload storage ───────────────────────────────────────────────────────────
 
@@ -33,6 +42,12 @@ const MAX_UPLOAD_SIZE_MB = Number.isFinite(configuredUploadMb) && configuredUplo
   ? Math.min(configuredUploadMb, 10240)
   : 2048;
 const MAX_UPLOAD_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024;
+const configuredWorkspaceMb = Number.parseInt(process.env.MAX_WORKSPACE_UNCOMPRESSED_MB || '1024', 10);
+const MAX_WORKSPACE_UNCOMPRESSED_BYTES = (
+  Number.isFinite(configuredWorkspaceMb) && configuredWorkspaceMb > 0
+    ? Math.min(configuredWorkspaceMb, 4096)
+    : 1024
+) * 1024 * 1024;
 
 // Parsing and analysis are CPU-intensive. They run outside the API event loop so
 // large FAZ exports cannot freeze navigation, health checks or other sessions.
@@ -124,6 +139,13 @@ const upload = multer({
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Referrer-Policy', 'same-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  next();
+});
 app.use(express.static(path.join(__dirname, 'public'), {
   setHeaders(res, filePath) {
     if (filePath.endsWith('.js') || filePath.endsWith('.css')) {
@@ -200,6 +222,89 @@ function requireSession(req, res) {
   return s;
 }
 
+function parseWorkspaceJson(jsonText) {
+  return JSON.parse(jsonText, (key, value) => {
+    if (key === '__proto__' || key === 'prototype' || key === 'constructor') {
+      throw new Error(`Clé interdite dans le workspace : ${key}`);
+    }
+    return value;
+  });
+}
+
+function validateWorkspaceBody(body) {
+  if (!body || body._ffws !== 2 || !body.data || typeof body.data !== 'object' || Array.isArray(body.data)) {
+    throw new Error('Fichier workspace invalide ou version incompatible');
+  }
+  if (body.data.flows != null && !Array.isArray(body.data.flows)) {
+    throw new Error('Liste de flux invalide');
+  }
+  if ((body.data.flows?.length || 0) > 2000000) {
+    throw new Error('Workspace trop volumineux : plus de 2 000 000 flux agrégés');
+  }
+  if (body.data.stats != null && (typeof body.data.stats !== 'object' || Array.isArray(body.data.stats))) {
+    throw new Error('Statistiques de workspace invalides');
+  }
+  if (body.fortiConfig != null && (typeof body.fortiConfig !== 'object' || Array.isArray(body.fortiConfig))) {
+    throw new Error('Configuration FortiGate invalide dans le workspace');
+  }
+  return body;
+}
+
+function augmentPreflightEvidence(result, sessionData, fortiConfig, policies) {
+  const deploymentBlockers = getCaptureDeploymentBlockers(sessionData, fortiConfig);
+  const extraIssues = [];
+
+  if (deploymentBlockers.blocked) {
+    extraIssues.push({
+      level: 'error',
+      code: 'CAPTURE_NOT_CERTIFIABLE',
+      msg: `Capture non certifiable : ${deploymentBlockers.blockedReasons.join(', ')}`,
+    });
+  }
+  if (deploymentBlockers.possibleFazDownloadLimit) {
+    extraIssues.push({
+      level: 'warn',
+      code: 'POSSIBLE_FAZ_DOWNLOAD_LIMIT',
+      msg: `Le fichier contient exactement ${deploymentBlockers.possibleFazDownloadLimit.toLocaleString('fr-FR')} lignes : un plafond d'export FortiAnalyzer est possible, la complétude de la période doit être confirmée`,
+    });
+  }
+  if (deploymentBlockers.dedupeSaturated) {
+    extraIssues.push({
+      level: 'warn',
+      code: 'SESSION_DEDUPE_LIMIT',
+      msg: 'La limite de déduplication des identifiants de session a été atteinte : les règles restent fondées sur les tuples observés, mais les volumes peuvent être surestimés',
+    });
+  }
+  if ((deploymentBlockers.certificationWarnings || []).includes('capture_calendar_gaps')) {
+    extraIssues.push({
+      level: 'warn',
+      code: 'CAPTURE_CALENDAR_GAPS',
+      msg: `Des journaux sont présents sur ${deploymentBlockers.captureActiveDays} jour(s) parmi ${deploymentBlockers.captureSpanDays} jour(s) couverts par la fenêtre`,
+    });
+  }
+
+  const { hostPairCoverage } = buildHostPairCoverage(sessionData?.flows || [], fortiConfig || {});
+  extraIssues.push(...buildPolicyOrderIssues(policies, hostPairCoverage));
+
+  result.issues.push(...extraIssues);
+  result.errors = result.issues.filter(issue => issue.level === 'error').length;
+  result.warnings = result.issues.filter(issue => issue.level === 'warn').length;
+  result.ok = result.errors === 0;
+
+  if (result.certification) {
+    if (result.errors > 0) {
+      result.certification.level = 'rejected';
+    } else if (extraIssues.some(issue => issue.level === 'warn')) {
+      result.certification.level = 'conditional';
+    }
+    result.certification.evidenceWarnings = extraIssues
+      .filter(issue => issue.level === 'warn')
+      .map(issue => issue.code);
+  }
+
+  return { result, deploymentBlockers, hostPairCoverage };
+}
+
 // Vérifie si une valeur IP correspond au terme recherché.
 // Utilise une limite de fin de chiffre pour éviter que "10.1.6.19" matche "10.1.6.192".
 function ipTermMatches(value, term) {
@@ -246,7 +351,10 @@ function sendCsv(res, filename, rows, columns) {
       let v = row[c];
       if (Array.isArray(v)) v = v.join(';');
       v = String(v ?? '');
-      return (v.includes(',') || v.includes(';')) ? `"${v.replace(/"/g, '""')}"` : v;
+      // Empêche Excel/LibreOffice d'interpréter une valeur issue des logs comme
+      // une formule lors de l'ouverture du CSV.
+      if (/^[=+\-@]/.test(v)) v = `'${v}`;
+      return /[",;\r\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
     });
     res.write(line.join(',') + '\n');
   }
@@ -504,12 +612,20 @@ app.get('/api/policies', (req, res) => {
   const includeNoRcvd = req.query.include_no_rcvd === '1';
   let excluded = { total: 0, dstTargets: [] };
   if (!includeNoRcvd) {
-    const excl = policies.filter(p => p.rcvdBytes === 0);
+    const excl = policies.filter(p =>
+      p.rcvdBytes === 0
+      && Number(p.expectedOneWayFlows || 0) === 0
+      && Number(p.noRcvdFlows || 0) > 0
+    );
     excluded = {
       total: excl.length,
       dstTargets: [...new Set(excl.map(p => p.dstTarget))].slice(0, 10),
     };
-    policies = policies.filter(p => p.rcvdBytes > 0);
+    policies = policies.filter(p =>
+      p.rcvdBytes > 0
+      || Number(p.expectedOneWayFlows || 0) > 0
+      || Number(p.noRcvdFlows || 0) === 0
+    );
   }
 
   // #1: fenêtre d'observation globale (pour la bannière + le calcul de confiance côté UI)
@@ -518,6 +634,9 @@ app.get('/api/policies', (req, res) => {
     start: st.captureStart ?? null,
     end:   st.captureEnd ?? null,
     days:  st.captureDays ?? 0,
+    activeDays: st.captureActiveDays ?? st.captureDays ?? 0,
+    spanDays: st.captureSpanDays ?? st.captureDays ?? 0,
+    coverageRatio: st.captureCoverageRatio ?? null,
     available: !!st.temporalDataAvailable,
   };
   res.json({ policies, excluded, captureWindow });
@@ -540,12 +659,20 @@ app.get('/api/raw-policies', (req, res) => {
   const includeNoRcvd = req.query.include_no_rcvd === '1';
   let excluded = { total: 0, dstTargets: [] };
   if (!includeNoRcvd) {
-    const exclFlows = flows.filter(f => f.rcvdBytes === 0);
+    const exclFlows = flows.filter(f =>
+      f.rcvdBytes === 0
+      && Number(f.rcvdPackets || 0) === 0
+      && !isExpectedOneWayFlow(f)
+    );
     excluded = {
       total: exclFlows.length,
       dstTargets: [...new Set(exclFlows.map(f => f.dstip))].slice(0, 10),
     };
-    flows = flows.filter(f => f.rcvdBytes > 0);
+    flows = flows.filter(f =>
+      f.rcvdBytes > 0
+      || Number(f.rcvdPackets || 0) > 0
+      || isExpectedOneWayFlow(f)
+    );
   }
 
   // Une règle par (srcip, dstip, service/port) — notation /32
@@ -1058,15 +1185,16 @@ app.post('/api/import/workspace', express.raw({ type: ['application/octet-stream
     let jsonText;
     if (buf[0] === 0x1f && buf[1] === 0x8b) {
       jsonText = await new Promise((resolve, reject) =>
-        zlib.gunzip(buf, (err, out) => err ? reject(err) : resolve(out.toString('utf8')))
+        zlib.gunzip(
+          buf,
+          { maxOutputLength: MAX_WORKSPACE_UNCOMPRESSED_BYTES },
+          (err, out) => err ? reject(err) : resolve(out.toString('utf8'))
+        )
       );
     } else {
       jsonText = buf.toString('utf8');
     }
-    const body = JSON.parse(jsonText);
-    if (!body || body._ffws !== 2 || !body.data) {
-      return res.status(400).json({ error: 'Fichier workspace invalide ou version incompatible' });
-    }
+    const body = validateWorkspaceBody(parseWorkspaceJson(jsonText));
     const id = createSession();
     setSessionData(id, body.data);
     if (body.fortiConfig) setFortiConfig(id, body.fortiConfig);
@@ -1127,10 +1255,13 @@ app.get('/api/workspaces/:id', async (req, res) => {
     const zlib = require('zlib');
     const compressed = require('fs').readFileSync(path.join(WS_HISTORY_DIR, entry.filename));
     const json = await new Promise((resolve, reject) =>
-      zlib.gunzip(compressed, (err, buf) => err ? reject(err) : resolve(buf.toString('utf8')))
+      zlib.gunzip(
+        compressed,
+        { maxOutputLength: MAX_WORKSPACE_UNCOMPRESSED_BYTES },
+        (err, buf) => err ? reject(err) : resolve(buf.toString('utf8'))
+      )
     );
-    const body = JSON.parse(json);
-    if (!body._ffws || !body.data) return res.status(400).json({ error: 'Workspace invalide' });
+    const body = validateWorkspaceBody(parseWorkspaceJson(json));
     const newId = createSession();
     setSessionData(newId, body.data);
     if (body.fortiConfig) setFortiConfig(newId, body.fortiConfig);
@@ -1613,16 +1744,8 @@ app.post('/api/deploy/preflight', (req, res) => {
 
   try {
     const result = preflightValidation(selectedPolicies, s.fortiConfig, s.data?.flows || []);
-    const deploymentBlockers = getCaptureDeploymentBlockers(s.data, s.fortiConfig);
-    if (deploymentBlockers.blocked) {
-      result.issues.unshift({
-        level: 'error',
-        code: 'CAPTURE_NOT_CERTIFIABLE',
-        msg: `Capture non certifiable : ${deploymentBlockers.blockedReasons.join(', ')}`,
-      });
-      result.errors += 1;
-      result.ok = false;
-    }
+    const augmented = augmentPreflightEvidence(result, s.data, s.fortiConfig, selectedPolicies);
+    const deploymentBlockers = augmented.deploymentBlockers;
     res.json({ ...result, deploymentBlockers });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1676,6 +1799,7 @@ app.post('/api/deploy/generate', (req, res) => {
     // Les contrôles bloquants s'appliquent à la CLI finale, pas à la préparation de la matrice.
     if (!o.analysisOnly) {
       const requestedPreflight = preflightValidation(selectedPolicies, configToUse, s.data?.flows || []);
+      augmentPreflightEvidence(requestedPreflight, s.data, configToUse, selectedPolicies);
       if (!requestedPreflight.ok) {
         return res.status(422).json({
           error: 'Génération refusée : le plan demandé dépasse les flux observés',
@@ -1754,6 +1878,7 @@ app.post('/api/deploy/generate', (req, res) => {
     // une CLI finale. Le mode analysisOnly ne produit aucune configuration.
     if (!o.analysisOnly) {
       finalPreflight = preflightValidation(analyzed, configToUse, s.data?.flows || []);
+      augmentPreflightEvidence(finalPreflight, s.data, configToUse, analyzed);
       if (!finalPreflight.ok) {
         return res.status(422).json({
           error: 'Génération refusée par le contrôle preflight',
@@ -1779,10 +1904,29 @@ app.post('/api/deploy/generate', (req, res) => {
       const cert = finalPreflight.certification;
       const label = cert.level === 'exact'
         ? 'EXACT — tuples hôte/hôte/service prouvés'
-        : 'GENERALISE — périmètre réseau ou services regroupés choisi';
+        : cert.level === 'conditional'
+          ? 'CONDITIONNEL — tuples prouvés, contexte ou complétude à confirmer'
+          : 'GENERALISE — périmètre réseau ou services regroupés choisi';
+      const sourceMeta = s.data?.meta || {};
+      const captureStats = s.data?.stats || {};
+      const traceLines = [
+        `# Source: ${cliCommentText(sourceMeta.filename || 'inconnue')}`,
+        `# Lignes lues: ${Number(sourceMeta.lineCount || 0)} | Flux agrégés: ${Number(sourceMeta.uniqueFlows || captureStats.uniqueFlows || 0)}`,
+      ];
+      if (captureStats.temporalDataAvailable) {
+        traceLines.push(
+          `# Observation: ${isoDay(captureStats.captureStart)} -> ${isoDay(captureStats.captureEnd)} `
+          + `| jours actifs: ${Number(captureStats.captureActiveDays || 0)}/${Number(captureStats.captureSpanDays || captureStats.captureDays || 0)}`
+        );
+      }
+      const evidenceWarnings = (cert.evidenceWarnings || []).filter(Boolean);
+      if (evidenceWarnings.length) {
+        traceLines.push(`# Alertes de preuve: ${cliCommentText(evidenceWarnings.join(', '))}`);
+      }
       cli = [
         `# FortiFlow certification: ${label}`,
         `# Exactes: ${cert.exactPolicies} | Généralisées: ${cert.generalizedPolicies} | Non classées: ${cert.unclassifiedPolicies}`,
+        ...traceLines,
         cli,
       ].join('\n');
     }

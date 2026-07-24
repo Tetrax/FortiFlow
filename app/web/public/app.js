@@ -415,7 +415,7 @@ function renderUpload() {
           <div class="drop-title">Importer les journaux de trafic</div>
           <div class="drop-sub">Glissez le fichier ici ou sélectionnez-le depuis votre poste.<br><em>LOG</em> <em>TXT</em> <em>CSV</em> <em>XLSX</em> <em>GZ</em> <em>ZIP</em></div>
           <button class="upload-btn" id="btn-pick">Choisir un fichier</button>
-          <div class="import-meta">FortiGate syslog et exports FortiAnalyzer · jusqu’à 2 Go</div>
+          <div class="import-meta">FortiGate syslog et exports FortiAnalyzer · jusqu’à 2 Go en LOG/CSV/GZ/ZIP · Excel limité à 100 Mo</div>
         </div>
         <label class="resume-workspace">
           <span class="resume-icon">↺</span>
@@ -462,6 +462,18 @@ async function dashboard() {
   const parsed = m?.lineCount || 0;
   const usablePct = parsed ? Math.max(0, Math.round((parsed - skipped) / parsed * 100)) : 0;
   const skip = m?.skipReasons || {};
+  const possibleFazLimit = Number(m?.possibleFazDownloadLimit || 0);
+  const duplicateRecords = Number(m?.dedupe?.duplicateRecords || 0);
+  const captureSpanDays = Number(s?.captureSpanDays || s?.captureDays || 0);
+  const captureActiveDays = Number(s?.captureActiveDays || s?.captureDays || 0);
+  const hasCalendarGaps = captureSpanDays >= 7 && captureActiveDays / captureSpanDays < 0.8;
+  const captureNotice = (possibleFazLimit || hasCalendarGaps) ? `
+    <div class="alert alert-warn dashboard-capture-alert">
+      <strong>Complétude de l’export à confirmer</strong>
+      <span>${possibleFazLimit ? `Le fichier contient exactement ${fmtNum(possibleFazLimit)} lignes, ce qui peut correspondre au plafond de téléchargement FortiAnalyzer. ` : ''}
+      ${captureSpanDays ? `Des événements sont présents sur ${fmtNum(captureActiveDays)} jour(s) dans une fenêtre de ${fmtNum(captureSpanDays)} jour(s).` : ''}
+      Vérifiez <code>download-max-logs</code> ou découpez l’export par période.</span>
+    </div>` : '';
 
   el(_renderTarget || 'content').innerHTML = `
     <div class="dashboard-v2">
@@ -479,18 +491,19 @@ async function dashboard() {
       </section>
 
       <section class="kpi-grid">
-        <article class="kpi-card primary"><small>Sessions observées</small><strong>${fmtNum(s.totalSessions)}</strong><span>volume analysé</span></article>
+        <article class="kpi-card primary"><small>Échanges observés</small><strong>${fmtNum(s.totalSessions)}</strong><span>sessions dédupliquées quand l’identifiant est présent</span></article>
         <article class="kpi-card"><small>Flux uniques</small><strong>${fmtNum(s.uniqueFlows)}</strong><span>source / destination / service</span></article>
-        <article class="kpi-card success"><small>Flux acceptés</small><strong>${pct}%</strong><span>${fmtNum(s.acceptSessions)} sessions exploitables</span></article>
+        <article class="kpi-card success"><small>Trafic retenu</small><strong>${pct}%</strong><span>${fmtNum(s.acceptSessions)} échanges explicitement acceptés</span></article>
         <article class="kpi-card"><small>Hôtes internes</small><strong>${fmtNum(s.privateSrcIPs)}</strong><span>${fmtNum(s.srcSubnets)} réseaux source /24</span></article>
         <article class="kpi-card danger"><small>Refusés ou bloqués</small><strong>${fmtNum(s.denySessions)}</strong><span>jamais transformés en règle accept</span></article>
       </section>
+      ${captureNotice}
 
       <section class="dashboard-grid">
         <article class="quality-card">
           <div class="card-heading">
             <div><span class="status-dot ${usablePct >= 90 ? 'ok' : 'warn'}"></span><strong>Qualité des données</strong></div>
-            <b>${usablePct}% exploitable</b>
+            <b>${usablePct}% interprétable</b>
           </div>
           <div class="quality-meter"><span style="width:${usablePct}%"></span></div>
           <div class="quality-stats">
@@ -499,7 +512,8 @@ async function dashboard() {
             <div><strong>${fmtNum(skip.invalidFlow || 0)}</strong><span>flux incomplets</span></div>
             <div><strong>${fmtNum(skip.ipv6 || 0)}</strong><span>IPv6 non traité</span></div>
           </div>
-          <p>Les éléments écartés restent informatifs mais ne sont jamais utilisés pour générer une policy.</p>
+          <p>Ce pourcentage mesure la lisibilité du fichier, pas la complétude temporelle ni la certification du déploiement.
+          ${duplicateRecords ? `${fmtNum(duplicateRecords)} doublon(s) de session ont été neutralisés.` : ''}</p>
         </article>
 
         <article class="next-step-card">
@@ -865,7 +879,7 @@ function renderMatrix(data, mode = 'accept', signal) {
     <div><span>Sources actives</span><strong>${fmtNum(activeSources)}</strong></div>
     <div><span>Destinations actives</span><strong>${fmtNum(activeDestinations)}</strong></div>
     <div><span>Relations observées</span><strong>${fmtNum(cells.length)}</strong></div>
-    <div><span>Sessions représentées</span><strong>${fmtNum(totalSessions)}</strong></div>`;
+    <div><span>Échanges représentés</span><strong>${fmtNum(totalSessions)}</strong></div>`;
 
   const topCells = [...cells].sort((a, b) => b.count - a.count).slice(0, 8);
   el('matrix-insights').innerHTML = `
@@ -1185,7 +1199,7 @@ function renderGroups(subnets) {
         <div class="subnet-header" onclick="toggleCard(this)">
           <div>
             <div class="subnet-name">${subnet}</div>
-            <div class="subnet-meta">${sg.srcIPs.length} hôte(s) · ${privDsts} dst LAN · ${pubDsts} dst WAN · ${fmtNum(totalSessions)} sessions</div>
+            <div class="subnet-meta">${sg.srcIPs.length} hôte(s) · ${privDsts} dst LAN · ${pubDsts} dst WAN · ${fmtNum(totalSessions)} échanges</div>
           </div>
           <div style="display:flex;align-items:center;gap:8px;">
             <button class="host-btn" onclick="event.stopPropagation();toggleHostPanel('${subnetB64}','${subnet}')">
@@ -1237,6 +1251,9 @@ async function toggleHostPanel(subnetB64, subnet) {
     try {
       const hosts = await api(`/api/hosts?subnet=${encodeURIComponent(subnet)}`);
       panel.innerHTML = renderHostPanel(hosts, subnet);
+      panel.querySelectorAll('[data-filter-host]').forEach(btn => {
+        btn.addEventListener('click', () => filterFlowsByHost(btn.dataset.filterHost || ''));
+      });
       panel.dataset.loaded = '1';
     } catch (e) {
       panel.innerHTML = `<div class="alert alert-error" style="margin:8px 16px">Erreur : ${escHtml(e.message)}</div>`;
@@ -1253,26 +1270,26 @@ function renderHostPanel(hosts, subnet) {
   const rows = hosts.map(h => {
     const dstRows = h.dsts.slice(0, 8).map(d => {
       const svc = d.services.slice(0, 4).join(', ') || d.ports.slice(0, 4).join(', ') || '–';
-      return `<span class="host-dst">${typeTag(d.type)} <span class="mono">${d.key}</span> <em>${svc}</em> · ${fmtNum(d.count)} sess</span>`;
+      return `<span class="host-dst">${typeTag(d.type)} <span class="mono">${escHtml(d.key)}</span> <em>${escHtml(svc)}</em> · ${fmtNum(d.count)} événement(s)</span>`;
     }).join('');
     const more = h.dsts.length > 8 ? `<span class="host-dst-more">+${h.dsts.length - 8} dest.</span>` : '';
 
     return `
       <div class="host-row">
         <div class="host-ip-col">
-          <span class="host-ip mono">${h.ip}</span>
-          <span class="host-sess">${fmtNum(h.count)} sess</span>
+          <span class="host-ip mono">${escHtml(h.ip)}</span>
+          <span class="host-sess">${fmtNum(h.count)} événement(s)</span>
         </div>
         <div class="host-dsts-col">${dstRows}${more}</div>
         <div class="host-actions-col">
-          <button class="drill-btn" onclick="filterFlowsByHost('${h.ip}')">→ Flux</button>
+          <button class="drill-btn" data-filter-host="${escHtml(h.ip)}">→ Flux</button>
         </div>
       </div>`;
   }).join('');
 
   return `
     <div class="host-panel-inner">
-      <div class="host-panel-title">Détail des ${hosts.length} hôte(s) — ${subnet}</div>
+      <div class="host-panel-title">Détail des ${hosts.length} hôte(s) — ${escHtml(subnet)}</div>
       ${rows}
     </div>`;
 }
@@ -5413,7 +5430,7 @@ function updateNoRcvdToggleBtn() {
   const count   = deployState._noRcvdCount || 0;
   if (barText) {
     barText.textContent = `⚠ ${count} police${count > 1 ? 's' : ''} avec destination silencieuse`
-      + ` (≥80% flows sans réponse) — port fermé ou hôte injoignable`;
+      + ` (≥80% échanges sans réponse attendue) — port fermé ou hôte injoignable probable`;
   }
   if (btn) {
     btn.textContent = deployState.hideNoRcvd ? 'Afficher' : 'Masquer';
@@ -7724,8 +7741,12 @@ function _captureBanner() {
   }
   const d0 = _fmtDay(cw.start);
   const d1 = _fmtDay(cw.end);
-  let s = `📅 Observation : ${d0} → ${d1} (${cw.days} jour${cw.days > 1 ? 's' : ''})`;
-  if (cw.days <= 1) s += ` · <span style="color:var(--warn,#d97706)">récurrence non évaluable (capture ≤ 1 jour)</span>`;
+  const spanDays = Number(cw.spanDays || cw.days || 0);
+  const activeDays = Number(cw.activeDays || cw.days || 0);
+  let s = `📅 Observation : ${d0} → ${d1} (${spanDays} jour${spanDays > 1 ? 's' : ''})`;
+  if (activeDays !== spanDays) s += ` · ${activeDays} jour${activeDays > 1 ? 's' : ''} avec événements`;
+  if (spanDays < 7) s += ` · <span style="color:var(--warn,#d97706)">récurrence non évaluable (fenêtre &lt; 7 jours)</span>`;
+  else if (activeDays / spanDays < 0.8) s += ` · <span style="color:var(--warn,#d97706)">trous calendaires à confirmer</span>`;
   return `<span style="color:var(--text2)">${s}</span>`;
 }
 
@@ -7740,7 +7761,7 @@ function _confidenceBadge(p) {
   const days = p.daysObserved;
   const cw = deployState.captureWindow || {};
   const fmtAgo = (ts) => { const d = Math.floor((Date.now() - ts) / 86400000); return !isFinite(d) ? '' : d <= 0 ? "aujourd'hui" : `il y a ${d}j`; };
-  const tip = `Observé sur ${days} jour(s)${cw.days ? ` / ${cw.days} de capture` : ''}`
+  const tip = `Observé sur ${days} jour(s)${(cw.spanDays || cw.days) ? ` / ${cw.spanDays || cw.days} de fenêtre` : ''}`
     + (p.firstSeen ? ` · 1er ${_fmtDay(p.firstSeen)}` : '')
     + (p.lastSeen ? ` · dernier ${_fmtDay(p.lastSeen)} (${fmtAgo(p.lastSeen)})` : '');
   const color = c === 'high' ? '#16a34a' : c === 'low' ? '#d97706' : 'var(--text2)';
@@ -7943,6 +7964,8 @@ function _granularityBar() {
   const invalidCount = Number(blockers.invalidFlowRecords || 0);
   const archiveErrors = Number(blockers.archiveEntryErrors || 0);
   const nonDeployableCount = Number(blockers.nonDeployableSessions || 0);
+  const possibleFazLimit = Number(blockers.possibleFazDownloadLimit || 0);
+  const duplicateSessionRecords = Number(blockers.duplicateSessionRecords || 0);
   const blockerTotal = unknownCount + failedCount + ipv6Count + invalidCount + archiveErrors + nonDeployableCount;
   const excludedDetails = [
     failedCount > 0 ? `${fmtNum(failedCount)} tentative${failedCount > 1 ? 's' : ''} de connexion échouée${failedCount > 1 ? 's' : ''}` : '',
@@ -7953,21 +7976,31 @@ function _granularityBar() {
     nonDeployableCount > 0 ? `${fmtNum(nonDeployableCount)} session${nonDeployableCount > 1 ? 's' : ''} sans preuve de chemin/protocole exploitable` : '',
     blockers.multipleScopes ? `${fmtNum(blockers.scopeCount || 0)} contextes équipement/VDOM mélangés` : '',
     blockers.vdomEvidenceMissing ? 'VDOM de la configuration absent des logs' : '',
+    possibleFazLimit ? `exactement ${fmtNum(possibleFazLimit)} lignes : plafond FAZ possible` : '',
+    blockers.dedupeSaturated ? 'limite de déduplication des sessions atteinte' : '',
+    duplicateSessionRecords > 0 ? `${fmtNum(duplicateSessionRecords)} doublon(s) de session neutralisé(s)` : '',
+    (blockers.certificationWarnings || []).includes('capture_calendar_gaps')
+      ? `${fmtNum(blockers.captureActiveDays || 0)} jour(s) actifs sur ${fmtNum(blockers.captureSpanDays || 0)} jour(s)`
+      : '',
   ].filter(Boolean).join(' · ');
   const safetyTitle = blockers.blocked
     ? 'Capture non certifiable pour le déploiement'
+    : blockers.evidenceLimited
+      ? 'Complétude de la capture à confirmer'
     : unknownCount > 0
     ? 'Trafic non classifié exclu des règles'
     : failedCount > 0
       ? 'Tentatives échouées écartées des règles'
       : 'Trafic IPv6 exclu des règles';
-  const safetyNotice = blockers.hasExcludedTraffic ? `
+  const safetyNotice = (blockers.hasExcludedTraffic || blockers.evidenceLimited) ? `
     <div class="seg-safety-warning" role="status">
       <strong>${safetyTitle}</strong>
       <span>${blockerTotal > 0 ? `${fmtNum(blockerTotal)} événement${blockerTotal > 1 ? 's' : ''} non retenu${blockerTotal > 1 ? 's' : ''} : ` : ''}${excludedDetails}.
         ${blockers.blocked
           ? 'Le CLI final est bloqué tant que le périmètre ou les données sources ne permettent pas une preuve fiable.'
-          : 'Ces événements restent visibles dans l’analyse, mais seuls les flux explicitement acceptés peuvent produire des règles.'}
+          : blockers.evidenceLimited
+            ? 'La génération reste possible, mais la certification est conditionnelle tant que la complétude ou le chemin n’est pas confirmé.'
+            : 'Ces événements restent visibles dans l’analyse, mais seuls les flux explicitement acceptés peuvent produire des règles.'}
       </span>
     </div>` : '';
   const optionGroup = (dimension, options) => `
@@ -8516,7 +8549,11 @@ function showPreflightModal(pf) {
     const errors  = pf.issues.filter(i => i.level === 'error');
     const warns   = pf.issues.filter(i => i.level === 'warn');
     const icon    = pf.errors > 0 ? '🛑' : '⚠️';
-    const title   = pf.errors > 0 ? 'Erreurs détectées' : 'Avertissements';
+    const title   = pf.errors > 0
+      ? 'Génération bloquée'
+      : pf.certification?.level === 'conditional'
+        ? 'Validation conditionnelle'
+        : 'Points à vérifier';
 
     const errHtml = errors.map(i => `<div class="preflight-item pf-error">✗ ${escHtml(i.msg)}</div>`).join('');
     const warnHtml = warns.map(i => `<div class="preflight-item pf-warn">⚠ ${escHtml(i.msg)}</div>`).join('');
@@ -8530,7 +8567,7 @@ function showPreflightModal(pf) {
         ${warns.length ? `<div class="preflight-section"><div class="preflight-section-title">Avertissements (${warns.length})</div>${warnHtml}</div>` : ''}
         <div class="preflight-actions">
           <button class="btn-sm" id="pf-cancel">Annuler</button>
-          ${pf.errors === 0 ? `<button class="btn-accent" id="pf-continue">Continuer quand même</button>` : ''}
+          ${pf.errors === 0 ? `<button class="btn-accent" id="pf-continue">Générer avec ces avertissements</button>` : ''}
         </div>
       </div>`;
 

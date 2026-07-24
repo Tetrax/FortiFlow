@@ -7,8 +7,16 @@ function getCaptureDeploymentBlockers(sessionData, fortiConfig = null) {
   const archiveEntryErrors = Number(data.meta?.skipReasons?.archiveEntryError || 0);
   const unknownActionSessions = Number(data.stats?.unknownSessions || 0);
   const failedConnectionSessions = Number(data.stats?.failedSessions || 0);
+  const possibleFazDownloadLimit = Number(data.meta?.possibleFazDownloadLimit || 0) || null;
+  const dedupeSaturated = Boolean(data.meta?.dedupe?.saturated);
+  const duplicateSessionRecords = Number(data.meta?.dedupe?.duplicateRecords || 0);
+  const captureSpanDays = Number(data.stats?.captureSpanDays || data.stats?.captureDays || 0);
+  const captureActiveDays = Number(data.stats?.captureActiveDays || data.stats?.captureDays || 0);
+  const captureCoverageRatio = data.stats?.captureCoverageRatio == null
+    ? null
+    : Number(data.stats.captureCoverageRatio);
   const allowActions = new Set([
-    'accept', 'allow', 'allowed', 'pass', 'close', 'timeout',
+    'accept', 'allow', 'allowed', 'pass', 'start', 'close', 'timeout',
     'client-rst', 'server-rst', 'ip-conn',
   ]);
   const legacyUnprovenSessions = (data.flows || []).reduce((total, flow) => {
@@ -41,12 +49,26 @@ function getCaptureDeploymentBlockers(sessionData, fortiConfig = null) {
   if (nonDeployableSessions > 0) blockedReasons.push('unproven_forward_flows');
   if (multipleScopes) blockedReasons.push('multiple_devices_or_vdoms');
   if (vdomEvidenceMissing) blockedReasons.push('vdom_evidence_missing');
+  const certificationWarnings = [];
+  if (possibleFazDownloadLimit) certificationWarnings.push('possible_faz_download_limit');
+  if (dedupeSaturated) certificationWarnings.push('session_dedupe_limit');
+  if (captureCoverageRatio != null && captureSpanDays >= 7 && captureCoverageRatio < 0.8) {
+    certificationWarnings.push('capture_calendar_gaps');
+  }
   return {
     unsupportedIpv6,
     invalidFlowRecords,
     archiveEntryErrors,
     unknownActionSessions,
     failedConnectionSessions,
+    possibleFazDownloadLimit,
+    dedupeSaturated,
+    duplicateSessionRecords,
+    captureSpanDays,
+    captureActiveDays,
+    captureCoverageRatio,
+    certificationWarnings,
+    evidenceLimited: certificationWarnings.length > 0,
     nonDeployableSessions,
     evidenceIssueSessions: data.stats?.evidenceIssueSessions || {},
     multipleScopes,

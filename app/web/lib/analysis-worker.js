@@ -17,6 +17,11 @@ function emptyFlowError({ lineCount, skipReasons }) {
   );
 }
 
+function possibleFazDownloadLimit(lineCount) {
+  const knownLimits = new Set([100000, 500000, 1000000, 2000000, 5000000]);
+  return knownLimits.has(Number(lineCount)) ? Number(lineCount) : null;
+}
+
 async function run() {
   const { filePath, filename, cache } = workerData;
 
@@ -49,6 +54,13 @@ async function run() {
     lineCount: parsed.lineCount,
     skipped: parsed.skipped,
     skipReasons: parsed.skipReasons,
+    dedupe: parsed.dedupe || {
+      duplicateRecords: 0,
+      sessionRecords: 0,
+      trackedSessions: 0,
+      saturated: false,
+    },
+    possibleFazDownloadLimit: possibleFazDownloadLimit(parsed.lineCount),
     uniqueFlows: parsed.flowMap.size,
     filename,
   };

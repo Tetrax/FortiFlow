@@ -70,8 +70,18 @@ function resolveAddrNames(names, addresses, addressGroups) {
 }
 
 // Résout une liste de noms de services en ensembles de ports concrets.
-function resolveServiceNames(names, customServices) {
+function resolveServiceNames(names, customServices, serviceGroups = {}, visiting = new Set()) {
   const svc = { allAll: false, allTcp: false, allUdp: false, allIcmp: false, tcp: new Set(), udp: new Set(), icmpAny: false, unresolvable: false };
+  const merge = child => {
+    svc.allAll ||= child.allAll;
+    svc.allTcp ||= child.allTcp;
+    svc.allUdp ||= child.allUdp;
+    svc.allIcmp ||= child.allIcmp;
+    svc.icmpAny ||= child.icmpAny;
+    svc.unresolvable ||= child.unresolvable;
+    child.tcp.forEach(port => svc.tcp.add(port));
+    child.udp.forEach(port => svc.udp.add(port));
+  };
   for (const raw of (names || [])) {
     const name = stripQuotes(raw);
     if (!name) continue;
@@ -94,6 +104,16 @@ function resolveServiceNames(names, customServices) {
       }
       continue;
     }
+    if (serviceGroups[name]) {
+      if (visiting.has(name)) {
+        svc.unresolvable = true;
+        continue;
+      }
+      const nextVisiting = new Set(visiting);
+      nextVisiting.add(name);
+      merge(resolveServiceNames(serviceGroups[name].members || [], customServices, serviceGroups, nextVisiting));
+      continue;
+    }
     svc.unresolvable = true; // service inconnu (built-in non listé, custom absent)
   }
   return svc;
@@ -101,7 +121,7 @@ function resolveServiceNames(names, customServices) {
 
 // Pré-résout toutes les policies existantes ACTIVES, dans l'ordre du fichier (first-match).
 function resolveExistingPolicies(fortiConfig) {
-  const { existingPolicies = [], addresses = {}, addressGroups = {}, customServices = {}, zones = {} } = fortiConfig || {};
+  const { existingPolicies = [], addresses = {}, addressGroups = {}, customServices = {}, serviceGroups = {}, zones = {} } = fortiConfig || {};
   // Map zone (minuscule) → interfaces membres : une règle sur une zone couvre ses interfaces.
   // Les logs FortiAnalyzer rapportent souvent l'interface/VLAN membre, pas le nom de zone.
   const zoneMembers = {};
@@ -122,7 +142,7 @@ function resolveExistingPolicies(fortiConfig) {
     .map(p => {
       const src = resolveAddrNames(p.srcaddr, addresses, addressGroups);
       const dst = resolveAddrNames(p.dstaddr, addresses, addressGroups);
-      const svc = resolveServiceNames(p.service, customServices);
+      const svc = resolveServiceNames(p.service, customServices, serviceGroups);
       return {
         policyid: p.policyid,
         name:     p.name || '',
@@ -240,19 +260,77 @@ function buildHostPairCoverage(flows, fortiConfig) {
   }
   // Finaliser (Sets → arrays, verdict dérivé) — JSON-safe pour le transport
   const final = {};
-  const dbg = { allowed: 0, allowedBroad: 0, blocked: 0, new: 0, uncertain: 0 };
   for (const [k, e] of Object.entries(out)) {
     const v = deriveVerdict(e.t);
-    dbg[v] = (dbg[v] || 0) + 1;
-    if (v === 'allowed' && e.broad) dbg.allowedBroad++;
     final[k] = { verdict: v, ruleIds: [...e.ruleIds], blockIds: [...e.blockIds], broad: !!e.broad };
   }
-  console.log(`[DBG coverage] policies résolues=${resolved.length} paires=${Object.keys(final).length} verdicts=${JSON.stringify(dbg)}`);
   return { hostPairCoverage: final, hasConfig: true };
+}
+
+// Une policy générée avec "edit 0" est ajoutée après les policies existantes.
+// Cette fonction vérifie donc si une règle antérieure rendrait la proposition
+// inatteignable ou inutile. Elle travaille uniquement sur des paires hôte/hôte
+// déjà classifiées par le moteur conservateur ci-dessus.
+function buildPolicyOrderIssues(policies, hostPairCoverage) {
+  const issues = [];
+  for (let index = 0; index < (policies || []).length; index++) {
+    const policy = policies[index] || {};
+    const srcHosts = Array.isArray(policy.srcHosts) ? policy.srcHosts.filter(Boolean) : [];
+    let dstHosts = Array.isArray(policy.dstHosts) ? policy.dstHosts.filter(Boolean) : [];
+    if (!dstHosts.length && policy.dstTarget) {
+      const target = String(policy.dstTarget).replace(/\/32$/, '');
+      if (/^\d+\.\d+\.\d+\.\d+$/.test(target)) dstHosts = [target];
+    }
+    if (!srcHosts.length || !dstHosts.length) continue;
+
+    const verdicts = [];
+    for (const src of srcHosts) {
+      for (const dst of dstHosts) {
+        const evidence = hostPairCoverage?.[`${src}|${dst}`];
+        if (evidence) verdicts.push(evidence);
+      }
+    }
+    if (!verdicts.length) continue;
+
+    const label = `Policy #${index + 1}`;
+    if (verdicts.some(item => item.verdict === 'blocked')) {
+      issues.push({
+        level: 'error',
+        code: 'ORDER_BLOCKED_BY_EXISTING_DENY',
+        msg: `${label}: une policy deny existante matche déjà ce trafic ; une règle ajoutée en fin de table serait inatteignable`,
+      });
+      continue;
+    }
+    if (verdicts.some(item => item.verdict === 'allowed' && item.broad)) {
+      issues.push({
+        level: 'warn',
+        code: 'ORDER_SHADOWED_BY_BROAD_ACCEPT',
+        msg: `${label}: une règle accept large existante couvre déjà ce trafic ; ajouter cette règle ne resserrera pas la segmentation tant que la règle large n'est pas modifiée`,
+      });
+      continue;
+    }
+    if (verdicts.every(item => item.verdict === 'allowed')) {
+      issues.push({
+        level: 'warn',
+        code: 'ORDER_DUPLICATE_EXISTING_ALLOW',
+        msg: `${label}: le trafic est déjà autorisé par une policy précédente ; la nouvelle règle serait redondante`,
+      });
+      continue;
+    }
+    if (verdicts.some(item => ['uncertain', 'partial'].includes(item.verdict))) {
+      issues.push({
+        level: 'warn',
+        code: 'ORDER_UNCERTAIN',
+        msg: `${label}: l'ordre first-match ne peut pas être prouvé pour toutes les paires hôte/hôte`,
+      });
+    }
+  }
+  return issues;
 }
 
 module.exports = {
   buildHostPairCoverage,
+  buildPolicyOrderIssues,
   // exportés pour tests unitaires
   resolveExistingPolicies,
   classifyFlow,

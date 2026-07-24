@@ -12,6 +12,14 @@ services:
       - PORT=3737
       # Taille maximale d’un export FAZ brut (Mo)
       - MAX_UPLOAD_SIZE_MB=2048
+      # Garde-fous des formats compressés et chargés en mémoire
+      - MAX_DECOMPRESSED_SIZE_MB=4096
+      - MAX_ARCHIVE_ENTRIES=100
+      - MAX_XLSX_SIZE_MB=100
+      - MAX_WORKSPACE_UNCOMPRESSED_MB=1024
+      # Nombre maximal d’identifiants de session conservés pour neutraliser
+      # les doublons start/close FortiOS.
+      - MAX_SESSION_DEDUPE_KEYS=2000000
       # Les analyses lourdes s'exécutent hors du thread HTTP. Un worker par défaut
       # évite de saturer la mémoire avec plusieurs exports FAZ volumineux.
       - MAX_ANALYSIS_WORKERS=1
