@@ -7594,7 +7594,7 @@ function _coverageBadge(p) {
   const rule = (ids) => ids.length ? (ids.length === 1 ? `règle ${ids[0]}` : `${ids.length} règles`) : '';
   switch (c.status) {
     case 'allowed':   return ` <span style="font-size:9px;color:#16a34a" title="Tout le trafic de cette policy est déjà autorisé par une règle PRÉCISE existante (${rule(c.ruleIds)}). Rien à resserrer.">✓ déjà OK</span>`;
-    case 'allowed-broad': return ` <span style="font-size:9px;color:#d97706" title="La règle proposée est précise, mais ce trafic est actuellement autorisé par une règle FortiGate existante large/permissive (${rule(c.ruleIds)}) — service ALL ou adresse any/all. Cette règle existante est à resserrer.">⚠ règle existante large</span>`;
+    case 'allowed-broad': return ''; // Signal conservé dans le récapitulatif global, sans répéter le libellé sur chaque ligne.
     case 'blocked':   return ` <span style="font-size:9px;color:#dc2626" title="Ce trafic est actuellement BLOQUÉ par la config existante (${rule(c.blockIds)}). Créer une règle accept au-dessus changerait le comportement — à valider.">⛔ bloquée</span>`;
     case 'new':       return ` <span style="font-size:9px;color:#2563eb" title="Aucune règle existante ne couvre ce trafic — règle à créer.">● nouvelle</span>`;
     case 'partial':   return ` <span style="font-size:9px;color:#d97706" title="Partielle : ${c.counts.allowed || 0} paire(s) déjà OK, ${c.counts.new || 0} nouvelle(s)${c.counts.blocked ? `, ${c.counts.blocked} bloquée(s)` : ''}. À examiner.">◐ partielle</span>`;
