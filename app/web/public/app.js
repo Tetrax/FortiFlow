@@ -103,14 +103,45 @@ function showProgress(show, text = '', detail = '') {
   if (bar && !show) bar.style.width = '0%';
 }
 
-function setProgressInfo({ lines = 0, pct, linesPerSec, eta } = {}) {
-  const detail   = el('progress-detail');
-  const barFill  = el('progress-bar-fill');
-  const pctStr   = pct   != null ? ` · ${pct}%`            : '';
+function setProgressInfo({
+  phase = 'parsing',
+  lines = 0,
+  pct,
+  linesPerSec,
+  eta,
+  queuePosition,
+  queued,
+} = {}) {
+  const detail = el('progress-detail');
+  const barFill = el('progress-bar-fill');
+  const title = el('progress-text');
+
+  if (phase === 'queued') {
+    if (title) title.textContent = 'Analyse en attente';
+    if (detail) {
+      detail.textContent = `Position ${queuePosition || 1} dans la file${queued > 1 ? ` · ${queued} fichiers en attente` : ''}`;
+    }
+    if (barFill) barFill.style.width = '3%';
+    return;
+  }
+
+  if (phase === 'starting') {
+    if (title) title.textContent = 'Préparation du moteur…';
+    if (detail) detail.textContent = 'Ouverture du fichier dans un worker isolé';
+    if (barFill) barFill.style.width = '5%';
+    return;
+  }
+
+  const phaseLabel = phase === 'analysis'
+    ? 'Construction de la matrice et des règles'
+    : 'Lecture et normalisation des journaux';
+  if (title) title.textContent = phase === 'analysis' ? 'Analyse des flux…' : 'Import des journaux…';
+
+  const pctStr = pct != null ? ` · ${pct}%` : '';
   const speedStr = linesPerSec > 0 ? ` · ${fmtNum(linesPerSec)} l/s` : '';
-  const etaStr   = eta   != null ? ` · ETA ${eta}s`        : '';
-  if (detail) detail.textContent = `${fmtNum(lines)} lignes${pctStr}${speedStr}${etaStr}`;
-  if (barFill && pct != null) barFill.style.width = `${Math.min(pct, 99)}%`;
+  const etaStr = eta != null && eta > 0 ? ` · reste environ ${eta}s` : '';
+  if (detail) detail.textContent = `${phaseLabel} · ${fmtNum(lines)} lignes${pctStr}${speedStr}${etaStr}`;
+  if (barFill && pct != null) barFill.style.width = `${Math.min(Math.max(pct, 5), 99)}%`;
 }
 
 async function handleUpload(file) {

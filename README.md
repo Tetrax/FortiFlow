@@ -40,6 +40,25 @@ npm test
 
 GitHub Actions vérifie également la syntaxe JavaScript et les invariants de sécurité à chaque modification de `main`.
 
+## Architecture du traitement
+
+Le serveur HTTP reste disponible pendant les imports volumineux :
+
+- l’upload est écrit sur disque en streaming ;
+- le parsing et la construction de la matrice s’exécutent dans un worker Node.js isolé ;
+- une file d’attente bornée empêche plusieurs exports FAZ de saturer la mémoire ;
+- les résultats conservent exactement le même format de session et de workspace.
+
+Variables Docker :
+
+| Variable | Rôle | Défaut |
+|----------|------|--------|
+| `MAX_ANALYSIS_WORKERS` | Analyses simultanées | `1` |
+| `MAX_ANALYSIS_QUEUE` | Fichiers supplémentaires en attente | `3` |
+| `ANALYSIS_WORKER_MEMORY_MB` | Plafond mémoire par worker, `0` pour la limite Node | `0` |
+
+Pour des fichiers proches de 1–2 Go, conserver un seul worker est recommandé afin de privilégier la stabilité du VPS.
+
 ---
 
 ## Usage rapide du CLI Python

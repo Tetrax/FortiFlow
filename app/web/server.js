@@ -6,8 +6,8 @@ const path             = require('path');
 const fs               = require('fs');
 const { WebSocketServer } = require('ws');
 
-const { parseFile }                                      = require('./lib/parser');
-const { buildAnalysis, consolidatePolicies, flowDecision } = require('./lib/analyzer');
+const { consolidatePolicies, flowDecision }               = require('./lib/analyzer');
+const { AnalysisPool }                                     = require('./lib/analysis-pool');
 const { createSession, getSession, setSessionData, setFortiConfig,
         setSessionError, deleteSession, getStats, listSessions } = require('./lib/store');
 const { parseFortiConfig, analyzePolicies,
@@ -32,6 +32,10 @@ const MAX_UPLOAD_SIZE_MB = Number.isFinite(configuredUploadMb) && configuredUplo
   ? Math.min(configuredUploadMb, 10240)
   : 2048;
 const MAX_UPLOAD_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024;
+
+// Parsing and analysis are CPU-intensive. They run outside the API event loop so
+// large FAZ exports cannot freeze navigation, health checks or other sessions.
+const analysisPool = new AnalysisPool();
 
 const WS_HISTORY_DIR = path.join(__dirname, 'workspaces');
 fs.mkdirSync(WS_HISTORY_DIR, { recursive: true });
@@ -252,7 +256,7 @@ function sendCsv(res, filename, rows, columns) {
 
 // GET /api/health — server health & memory monitoring (no session required)
 app.get('/api/health', (_req, res) => {
-  res.json(getStats());
+  res.json({ ...getStats(), analysis: analysisPool.stats() });
 });
 
 // ─── Admin routes (/admin page) ───────────────────────────────────────────────
@@ -266,6 +270,7 @@ app.get('/api/admin/sessions', (_req, res) => {
 app.delete('/api/admin/sessions/:id', (req, res) => {
   const s = getSession(req.params.id);
   if (!s) return res.status(404).json({ error: 'Session introuvable' });
+  analysisPool.cancel(req.params.id);
   deleteSession(req.params.id);
   res.json({ ok: true });
 });
@@ -273,7 +278,10 @@ app.delete('/api/admin/sessions/:id', (req, res) => {
 // DELETE /api/admin/sessions — supprime TOUTES les sessions
 app.delete('/api/admin/sessions', (_req, res) => {
   const sessions = listSessions();
-  sessions.forEach(s => deleteSession(s.id));
+  sessions.forEach(s => {
+    analysisPool.cancel(s.id);
+    deleteSession(s.id);
+  });
   res.json({ deleted: sessions.length });
 });
 
@@ -287,48 +295,43 @@ app.get('/admin', (_req, res) => {
 app.post('/api/upload', upload.single('logfile'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Aucun fichier reçu' });
 
+  const filePath = req.file.path;
+  if (!analysisPool.canAccept()) {
+    fs.unlink(filePath, () => {});
+    return res.status(503).json({
+      error: 'Le moteur d’analyse traite déjà plusieurs fichiers. Réessayez quand une analyse en cours est terminée.',
+      analysis: analysisPool.stats(),
+    });
+  }
+
   const sessionId = createSession();
-  const filePath  = req.file.path;
-  const filename  = req.file.originalname;
+  const filename = req.file.originalname;
+  const session = getSession(sessionId);
 
-  // Réponse immédiate → le client ouvre /api/progress/:sessionId
-  res.json({ sessionId });
+  // The HTTP response stays immediate; progress is then streamed over WebSocket/SSE.
+  res.json({ sessionId, analysis: analysisPool.stats() });
 
-  // Parse asynchrone (non-bloquant pour les autres requêtes)
-  setImmediate(async () => {
-    const session = getSession(sessionId);
-    try {
-      const onProgress = (info) => {
-        if (session) {
-          session.progress = info;
-          session.emitter.emit('progress', info);
-        }
-      };
+  const onProgress = info => {
+    const current = getSession(sessionId);
+    if (!current) return;
+    current.progress = info;
+    current.emitter.emit('progress', info);
+  };
 
-      const { flowMap, lineCount, skipped, skipReasons } = await parseFile(filePath, onProgress);
-      if (flowMap.size === 0) {
-        const reasons = [];
-        if (skipReasons?.invalidFlow) reasons.push(`${skipReasons.invalidFlow} ligne(s) sans IP source/destination exploitable`);
-        if (skipReasons?.nonTraffic) reasons.push(`${skipReasons.nonTraffic} ligne(s) hors trafic`);
-        if (skipReasons?.ipv6) reasons.push(`${skipReasons.ipv6} flux IPv6 non pris en charge`);
-        const detail = reasons.length ? ` Détail : ${reasons.join(', ')}.` : '';
-        throw new Error(
-          `Fichier lu (${lineCount.toLocaleString('fr-FR')} lignes), mais aucun flux exploitable n’a été trouvé.${detail} ` +
-          'Vérifiez le séparateur CSV et la présence des colonnes srcip, dstip, action, service/dstport et proto.'
-        );
-      }
-      const analysis = buildAnalysis(flowMap);
-      analysis.meta  = { lineCount, skipped, skipReasons, uniqueFlows: flowMap.size, filename };
+  analysisPool.run({ jobId: sessionId, filePath, filename, onProgress })
+    .then(analysis => {
+      const current = getSession(sessionId);
+      if (!current) return;
       setSessionData(sessionId, analysis);
-
-      session?.emitter.emit('done', { stats: analysis.stats, meta: analysis.meta });
-    } catch (err) {
+      current.emitter.emit('done', { stats: analysis.stats, meta: analysis.meta });
+    })
+    .catch(err => {
+      const current = getSession(sessionId);
+      if (!current || err.code === 'ANALYSIS_CANCELLED') return;
       setSessionError(sessionId, err.message);
-      session?.emitter.emit('error', { error: err.message });
-    } finally {
-      fs.unlink(filePath, () => {});
-    }
-  });
+      current.emitter.emit('error', { error: err.message });
+    })
+    .finally(() => fs.unlink(filePath, () => {}));
 });
 
 // GET /api/progress/:id — SSE stream de progression du parse
@@ -1356,6 +1359,7 @@ app.post('/api/import/policies-xlsx', upload.single('policies'), async (req, res
 
 // DELETE /api/session/:session — free memory
 app.delete('/api/session/:session', (req, res) => {
+  analysisPool.cancel(req.params.session);
   deleteSession(req.params.session);
   res.json({ ok: true });
 });

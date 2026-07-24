@@ -12,6 +12,12 @@ services:
       - PORT=3737
       # Taille maximale d’un export FAZ brut (Mo)
       - MAX_UPLOAD_SIZE_MB=2048
+      # Les analyses lourdes s'exécutent hors du thread HTTP. Un worker par défaut
+      # évite de saturer la mémoire avec plusieurs exports FAZ volumineux.
+      - MAX_ANALYSIS_WORKERS=1
+      - MAX_ANALYSIS_QUEUE=3
+      # Optionnel : plafond mémoire par worker (Mo), 0 = limite Node par défaut.
+      - ANALYSIS_WORKER_MEMORY_MB=0
       # HTTPS optionnel — décommenter si certificats disponibles :
       # - SSL_KEY=/certs/privkey.pem
       # - SSL_CERT=/certs/fullchain.pem
