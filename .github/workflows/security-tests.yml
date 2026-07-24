@@ -16,9 +16,9 @@ jobs:
         working-directory: app/web
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Use Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
       - name: Check JavaScript syntax
@@ -26,6 +26,8 @@ jobs:
           node --check server.js
           node --check public/app.js
           node --check lib/parser.js
+          node --check lib/analysis-pool.js
+          node --check lib/analysis-worker.js
           node --check lib/analyzer.js
           node --check lib/forticonfig.js
       - name: Run tests

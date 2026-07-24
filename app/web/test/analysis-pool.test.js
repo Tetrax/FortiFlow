@@ -34,7 +34,9 @@ test('le parsing lourd est isolé dans un worker sans modifier le résultat du m
   assert.equal(analysis.meta.lineCount, 2);
   assert.equal(analysis.meta.uniqueFlows, 2);
   assert.equal(analysis.stats.acceptSessions, 2);
-  assert.equal(analysis.policies.length, 2);
+  assert.equal(analysis.policies.length, 1);
+  assert.equal(analysis.policies[0].sessions, 2);
+  assert.equal(analysis.policies[0].serviceTuples.length, 2);
   assert.ok(phases.includes('starting'));
   assert.ok(phases.includes('parsing'));
   assert.ok(phases.includes('analysis'));
