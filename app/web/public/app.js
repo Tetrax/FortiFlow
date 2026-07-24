@@ -7583,7 +7583,7 @@ function _policyCoverage(p) {
   else if (t.uncertain === observed) status = 'uncertain';
   else if (t.allowed || t.blocked || t.partial) status = 'partial';
   else status = t.uncertain ? 'uncertain' : 'new';
-  // « autorisé mais par une règle LARGE » : techniquement permis, mais à resserrer (≠ déjà OK).
+  // La proposition peut être précise tout en étant déjà couverte par une règle FortiGate existante LARGE.
   if (status === 'allowed' && anyBroad) status = 'allowed-broad';
   return { status, ruleIds: [...ruleIds], blockIds: [...blockIds], counts: t, total: observed };
 }
@@ -7594,7 +7594,7 @@ function _coverageBadge(p) {
   const rule = (ids) => ids.length ? (ids.length === 1 ? `règle ${ids[0]}` : `${ids.length} règles`) : '';
   switch (c.status) {
     case 'allowed':   return ` <span style="font-size:9px;color:#16a34a" title="Tout le trafic de cette policy est déjà autorisé par une règle PRÉCISE existante (${rule(c.ruleIds)}). Rien à resserrer.">✓ déjà OK</span>`;
-    case 'allowed-broad': return ` <span style="font-size:9px;color:#d97706" title="Trafic autorisé, mais par une règle LARGE/permissive (${rule(c.ruleIds)}) — service ALL ou any/all. Techniquement permis, mais c'est exactement ce qu'il faut RESSERRER.">⚠ règle large</span>`;
+    case 'allowed-broad': return ` <span style="font-size:9px;color:#d97706" title="La règle proposée est précise, mais ce trafic est actuellement autorisé par une règle FortiGate existante large/permissive (${rule(c.ruleIds)}) — service ALL ou adresse any/all. Cette règle existante est à resserrer.">⚠ règle existante large</span>`;
     case 'blocked':   return ` <span style="font-size:9px;color:#dc2626" title="Ce trafic est actuellement BLOQUÉ par la config existante (${rule(c.blockIds)}). Créer une règle accept au-dessus changerait le comportement — à valider.">⛔ bloquée</span>`;
     case 'new':       return ` <span style="font-size:9px;color:#2563eb" title="Aucune règle existante ne couvre ce trafic — règle à créer.">● nouvelle</span>`;
     case 'partial':   return ` <span style="font-size:9px;color:#d97706" title="Partielle : ${c.counts.allowed || 0} paire(s) déjà OK, ${c.counts.new || 0} nouvelle(s)${c.counts.blocked ? `, ${c.counts.blocked} bloquée(s)` : ''}. À examiner.">◐ partielle</span>`;
@@ -7616,8 +7616,8 @@ function _coverageBanner() {
     else if (c.status === 'blocked') bl++; else if (c.status === 'partial') pa++; else un++;
   }
   const active = deployState.coverageFilter === 'new';
-  const btn = ` <button id="cov-filter-toggle" class="btn-sm" style="font-size:10px;padding:1px 6px" title="Masquer les policies déjà couvertes par une règle PRÉCISE (garde les 'règle large' à resserrer)">${active ? '✓ ' : ''}masquer déjà OK</button>`;
-  return `<span style="color:var(--text2)">🛡 vs config : <span style="color:#2563eb">${nw} nouvelles</span> · <span style="color:#16a34a">${al} déjà OK</span>${br ? ` · <span style="color:#d97706">${br} règle large (à resserrer)</span>` : ''}${bl ? ` · <span style="color:#dc2626">${bl} bloquées</span>` : ''}${pa ? ` · <span style="color:#d97706">${pa} partielles</span>` : ''}${un ? ` · ${un} à vérifier` : ''}${btn}</span>`;
+  const btn = ` <button id="cov-filter-toggle" class="btn-sm" style="font-size:10px;padding:1px 6px" title="Masquer les policies déjà couvertes par une règle PRÉCISE (conserve celles couvertes par une règle existante large à resserrer)">${active ? '✓ ' : ''}masquer déjà OK</button>`;
+  return `<span style="color:var(--text2)">🛡 vs config : <span style="color:#2563eb">${nw} nouvelles</span> · <span style="color:#16a34a">${al} déjà OK</span>${br ? ` · <span style="color:#d97706">${br} via règle existante large (à resserrer)</span>` : ''}${bl ? ` · <span style="color:#dc2626">${bl} bloquées</span>` : ''}${pa ? ` · <span style="color:#d97706">${pa} partielles</span>` : ''}${un ? ` · ${un} à vérifier` : ''}${btn}</span>`;
 }
 
 // Profils simples : les axes restent personnalisables sans exposer la complexité du moteur.
