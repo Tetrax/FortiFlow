@@ -7,7 +7,19 @@ function getCaptureDeploymentBlockers(sessionData, fortiConfig = null) {
   const archiveEntryErrors = Number(data.meta?.skipReasons?.archiveEntryError || 0);
   const unknownActionSessions = Number(data.stats?.unknownSessions || 0);
   const failedConnectionSessions = Number(data.stats?.failedSessions || 0);
-  const nonDeployableSessions = Number(data.stats?.nonDeployableSessions || 0);
+  const allowActions = new Set([
+    'accept', 'allow', 'allowed', 'pass', 'close', 'timeout',
+    'client-rst', 'server-rst', 'ip-conn',
+  ]);
+  const legacyUnprovenSessions = (data.flows || []).reduce((total, flow) => {
+    const allowed = String(flow?.decision || '').toLowerCase() === 'allow'
+      || allowActions.has(String(flow?.action || '').toLowerCase());
+    return allowed && flow?.deploymentEligible !== true ? total + Number(flow?.count || 1) : total;
+  }, 0);
+  const nonDeployableSessions = Math.max(
+    Number(data.stats?.nonDeployableSessions || 0),
+    legacyUnprovenSessions,
+  );
   const scopes = Array.isArray(data.scopes) ? data.scopes : [];
   const multipleScopes = scopes.length > 1;
   const vdomEvidenceMissing = Boolean(

@@ -19,6 +19,7 @@ function aggregate(overrides = {}) {
     proto: '6',
     action: 'accept',
     decision: 'allow',
+    deploymentEligible: true,
     service: 'HTTPS',
     srcintf: 'lan',
     dstintf: 'servers',
@@ -810,4 +811,12 @@ test('les données non interprétables bloquent le CLI tandis que les échecs co
   const clean = getCaptureDeploymentBlockers({});
   assert.equal(clean.hasExcludedTraffic, false);
   assert.equal(clean.blocked, false);
+
+  const legacy = getCaptureDeploymentBlockers({
+    flows: [{ ...aggregate(), deploymentEligible: undefined, count: 4 }],
+    stats: {},
+  });
+  assert.equal(legacy.nonDeployableSessions, 4);
+  assert.equal(legacy.blocked, true);
+  assert.ok(legacy.blockedReasons.includes('unproven_forward_flows'));
 });

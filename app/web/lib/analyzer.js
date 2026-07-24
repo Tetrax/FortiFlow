@@ -175,7 +175,7 @@ function buildAllSubnetGroupsAndPorts(flows, topN = 25, knownSubnets = []) {
     const decision = flowDecision(f);
     const isDeny   = decision === 'deny';
     const isAccept = decision === 'allow';
-    const isDeployable = f.deploymentEligible !== false;
+    const isDeployable = f.deploymentEligible === true;
 
     addToGroup(all, f);
     if (isAccept && isDeployable) {
@@ -260,9 +260,10 @@ function buildAnalysis(flowInput, knownSubnets = []) {
     const decision = flowDecision(f);
     if (decision === 'allow') {
       acceptSessions += f.count;
-      if (f.deploymentEligible === false) {
+      if (f.deploymentEligible !== true) {
         nonDeployableSessions += f.count;
-        for (const issue of (f.evidenceIssues || [])) {
+        const issues = (f.evidenceIssues || []).length ? f.evidenceIssues : ['legacy_evidence_missing'];
+        for (const issue of issues) {
           evidenceIssueSessions[issue] = (evidenceIssueSessions[issue] || 0) + f.count;
         }
       }

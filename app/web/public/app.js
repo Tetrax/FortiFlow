@@ -23,7 +23,7 @@ const state = {
   flows:    { page: 1, filters: {}, sort: 'count', order: 'desc', total: 0, _fromPolicy: null },
   policies: { dst_type: '', viewMode: 'aggregated', includeNoRcvd: false },
   matrix:   { action: 'accept' },
-  subView:  { analyse: 'flows', polices: 'policies' },
+  subView:  { analyse: 'flows', inventory: 'groups', polices: 'policies' },
 };
 
 let _renderTarget = null;
@@ -344,15 +344,16 @@ function navigateTo(view) {
   const subViewMap = {
     flows:          ['analyse', 'flows'],
     matrix:         ['analyse', 'matrix'],
-    groups:         ['analyse', 'groups'],
-    ports:          ['analyse', 'ports'],
+    groups:         ['analyse', 'inventory', 'groups'],
+    ports:          ['analyse', 'inventory', 'ports'],
     policies:       ['polices', 'policies'],
     consilpolicies: ['polices', 'consilpolicies'],
     denied:         ['polices', 'denied'],
   };
   if (subViewMap[view]) {
-    const [parent, sub] = subViewMap[view];
+    const [parent, sub, inventorySub] = subViewMap[view];
     state.subView[parent] = sub;
+    if (inventorySub) state.subView.inventory = inventorySub;
     view = parent;
   }
 
@@ -554,6 +555,20 @@ async function flows() {
     <div id="flows-table-wrap"></div>
     <div class="pagination" id="flows-pagination"></div>`;
 
+  const restoredFilters = state.flows.filters || {};
+  const filterFields = {
+    'f-srcip': restoredFilters.srcip || restoredFilters.srcSubnet || '',
+    'f-dstip': restoredFilters.dstip || restoredFilters.dstTarget || '',
+    'f-port': restoredFilters.port || '',
+    'f-proto': restoredFilters.proto || '',
+    'f-action': restoredFilters.action || '',
+    'f-dst-type': restoredFilters.dst_type || '',
+  };
+  Object.entries(filterFields).forEach(([id, value]) => {
+    const field = el(id);
+    if (field) field.value = value;
+  });
+
   el('btn-apply-filter').addEventListener('click', () => {
     state.flows.filters = {
       srcip:    el('f-srcip').value.trim(),
@@ -589,6 +604,10 @@ async function flows() {
       const parts = [];
       if (f.srcSubnet) parts.push(`src : ${f.srcSubnet}`);
       if (f.dstTarget) parts.push(`dst : ${f.dstTarget}`);
+      if (f.srcip)     parts.push(`src : ${f.srcip}`);
+      if (f.dstip)     parts.push(`dst : ${f.dstip}`);
+      if (f.port)      parts.push(`port : ${f.port}`);
+      if (f.proto)     parts.push(`proto : ${f.proto}`);
       if (f.service)   parts.push(`svc : ${f.service}`);
       const wrap = document.createElement('div');
       wrap.style.cssText = 'background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.27);border-radius:6px;padding:6px 12px;margin-bottom:6px;font-size:12px;display:flex;justify-content:space-between;align-items:center;gap:8px';
@@ -598,7 +617,7 @@ async function flows() {
       const hint = document.createElement('span');
       hint.style.cssText = 'color:var(--text3);margin-left:8px';
       hint.textContent = parts.join(' · ');
-      info.append('Filtré depuis deploy — ', bold, hint);
+      info.append('Filtre actif — ', bold, hint);
       const clearBtn = document.createElement('button');
       clearBtn.className = 'btn-sm';
       clearBtn.textContent = '✕ Effacer';
@@ -741,7 +760,7 @@ function renderPagination(data) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// View: Matrix (Canvas heatmap)
+// View: Matrix (responsive Canvas heatmap + decision summary)
 // ═══════════════════════════════════════════════════════════════
 
 async function matrix() {
@@ -750,28 +769,35 @@ async function matrix() {
   const { signal } = _viewAbort;
 
   el(_renderTarget || 'content').innerHTML = `
-    <div class="section-header">
+    <div class="matrix-toolbar">
       <div>
-        <div class="section-title">Heatmap LAN → LAN</div>
-        <div class="section-sub">Intensité = nombre de sessions entre subnets /24 privés</div>
+        <div class="section-title">Communications internes</div>
+        <div class="section-sub">Chaque case relie un réseau source à un réseau destination. Plus la couleur est forte, plus le volume de sessions est élevé.</div>
       </div>
-      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <div class="matrix-actions">
         <div class="matrix-toggle">
           <button class="toggle-btn ${state.matrix.action === 'accept' ? 'active accept' : ''}" data-action="accept">✔ Acceptés</button>
           <button class="toggle-btn ${state.matrix.action === 'deny'   ? 'active deny'   : ''}" data-action="deny">✖ Refusés</button>
         </div>
-        <div style="display:flex;gap:6px">
+        <div class="matrix-exports">
           <button id="btn-matrix-export-img"  class="btn-sm" title="Exporter en image PNG">⬇ PNG</button>
           <button id="btn-matrix-export-xlsx" class="btn-sm" title="Exporter en Excel">⬇ Excel</button>
         </div>
       </div>
     </div>
-    <div id="matrix-wrap"><canvas id="matrix-canvas"></canvas></div>
-    <div class="matrix-legend">
-      <span>Faible</span>
-      <canvas id="legend-canvas" class="legend-gradient" width="120" height="12"></canvas>
-      <span>Élevé</span>
-      <span style="margin-left:16px;color:var(--text2);font-size:11px;">Survol = détail · Clic = filtrer les flux</span>
+    <div id="matrix-summary" class="matrix-summary" aria-live="polite"></div>
+    <div class="matrix-layout">
+      <section class="matrix-card">
+        <div class="matrix-axis-hint"><span>Destination →</span><span>Source ↓</span></div>
+        <div id="matrix-wrap"><canvas id="matrix-canvas"></canvas></div>
+        <div class="matrix-legend">
+          <span>Faible</span>
+          <canvas id="legend-canvas" class="legend-gradient" width="120" height="12"></canvas>
+          <span>Élevé</span>
+          <span class="matrix-help">Survolez pour le détail · cliquez pour ouvrir les flux</span>
+        </div>
+      </section>
+      <aside id="matrix-insights" class="matrix-insights"></aside>
     </div>`;
 
   // Toggle wiring
@@ -782,6 +808,8 @@ async function matrix() {
         b.className = `toggle-btn${b.dataset.action === state.matrix.action ? ' active ' + b.dataset.action : ''}`;
       });
       el('matrix-wrap').innerHTML = '<div class="empty-state"><div class="progress-spinner" style="margin:0 auto"></div></div>';
+      el('matrix-summary').innerHTML = '';
+      el('matrix-insights').innerHTML = '<div class="matrix-insights-loading">Actualisation…</div>';
       try {
         const data = await api(`/api/matrix?action=${state.matrix.action}`);
         el('matrix-wrap').innerHTML = '<canvas id="matrix-canvas"></canvas>';
@@ -830,134 +858,181 @@ function renderMatrix(data, mode = 'accept', signal) {
     return;
   }
 
-  const CELL  = 32;
-  const FONT  = '11px monospace';
-  const PAD   = 8;
+  const totalSessions = cells.reduce((sum, c) => sum + (Number(c.count) || 0), 0);
+  const activeSources = new Set(cells.map(c => c.src)).size;
+  const activeDestinations = new Set(cells.map(c => c.dst)).size;
+  el('matrix-summary').innerHTML = `
+    <div><span>Sources actives</span><strong>${fmtNum(activeSources)}</strong></div>
+    <div><span>Destinations actives</span><strong>${fmtNum(activeDestinations)}</strong></div>
+    <div><span>Relations observées</span><strong>${fmtNum(cells.length)}</strong></div>
+    <div><span>Sessions représentées</span><strong>${fmtNum(totalSessions)}</strong></div>`;
 
-  // Measure the longest label to set left margin dynamically
-  const tmpCanvas = document.createElement('canvas');
-  const tmpCtx    = tmpCanvas.getContext('2d');
-  tmpCtx.font = FONT;
-  const longestSrc = Math.max(...srcSubnets.map(s => tmpCtx.measureText(s.replace('.0/24', '.x')).width));
-  const longestDst = Math.max(...dstSubnets.map(s => tmpCtx.measureText(s.replace('.0/24', '.x')).width));
+  const topCells = [...cells].sort((a, b) => b.count - a.count).slice(0, 8);
+  el('matrix-insights').innerHTML = `
+    <div class="matrix-insights-head">
+      <div><span>À examiner</span><strong>Principales communications</strong></div>
+      <small>Triées par sessions</small>
+    </div>
+    <div class="matrix-top-list">
+      ${topCells.map((c, i) => `
+        <button class="matrix-top-item" data-si="${c.si}" data-di="${c.di}">
+          <span class="matrix-top-rank">${i + 1}</span>
+          <span class="matrix-top-route"><strong>${escHtml(shortSubnetLabel(c.src))}</strong><i>→</i><strong>${escHtml(shortSubnetLabel(c.dst))}</strong></span>
+          <span class="matrix-top-count">${fmtNum(c.count)}</span>
+          <small>${escHtml((c.services || []).slice(0, 3).join(', ') || (c.ports || []).slice(0, 3).join(', ') || 'Service non identifié')}</small>
+        </button>`).join('')}
+    </div>`;
 
-  // Left margin = longest src label + padding
-  const LABEL_LEFT = Math.ceil(longestSrc) + 16;
-  // Top margin = longest dst label projected at 45° + padding
-  const LABEL_TOP  = Math.ceil(longestDst * Math.sin(Math.PI / 4)) + 24;
+  const openCell = c => {
+    if (!c) return;
+    state.flows.filters = { srcip: c.src.replace('.0/24',''), dstip: c.dst.replace('.0/24','') };
+    state.flows._fromPolicy = `${shortSubnetLabel(c.src)} → ${shortSubnetLabel(c.dst)}`;
+    state.flows.page = 1;
+    navigateTo('flows');
+  };
 
-  const W = LABEL_LEFT + dstSubnets.length * CELL + PAD;
-  const H = LABEL_TOP  + srcSubnets.length * CELL + PAD;
+  el('matrix-insights').querySelectorAll('.matrix-top-item').forEach(btn => {
+    btn.addEventListener('click', () => {
+      openCell(cells.find(c => String(c.si) === btn.dataset.si && String(c.di) === btn.dataset.di));
+    }, signal ? { signal } : undefined);
+  });
 
+  const shortLabelsSrc = srcSubnets.map(shortSubnetLabel);
+  const shortLabelsDst = dstSubnets.map(shortSubnetLabel);
+  const FONT = '10px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+  const CELL_H = 36;
+  const PAD = 10;
   const canvas = el('matrix-canvas');
-  canvas.width  = W;
-  canvas.height = H;
   const ctx = canvas.getContext('2d');
-
-  // Background
-  ctx.fillStyle = '#0e0e1a';
-  ctx.fillRect(0, 0, W, H);
+  const tooltip = el('matrix-tooltip');
+  const cellMap = new Map();
+  cells.forEach(c => cellMap.set(`${c.si},${c.di}`, c));
+  let layout = null;
+  let offscreen = null;
+  let lastWidth = 0;
 
   // Legend canvas — vert pour accept, rouge pour deny
   const lc = el('legend-canvas');
   if (lc) {
     const lctx = lc.getContext('2d');
     const grad = lctx.createLinearGradient(0, 0, 120, 0);
-    grad.addColorStop(0, '#0e0e1a');
+    const isLight = document.documentElement.dataset.theme === 'light';
+    grad.addColorStop(0, isLight ? '#eef1f7' : '#171924');
     if (mode === 'deny') {
-      grad.addColorStop(0.5, '#550000');
-      grad.addColorStop(1,   '#ff1744');
+      grad.addColorStop(0.5, isLight ? '#efa9a9' : '#6d2929');
+      grad.addColorStop(1,   isLight ? '#b42323' : '#e25c5c');
     } else {
-      grad.addColorStop(0.5, '#005533');
-      grad.addColorStop(1,   '#00e676');
+      grad.addColorStop(0.5, isLight ? '#9fd4b7' : '#205b41');
+      grad.addColorStop(1,   isLight ? '#157347' : '#49b982');
     }
     lctx.fillStyle = grad;
     lctx.fillRect(0, 0, 120, 12);
   }
 
-  // Cell map for hit detection
-  const cellMap = new Map();
-  cells.forEach(c => cellMap.set(`${c.si},${c.di}`, c));
+  const draw = () => {
+    const wrap = el('matrix-wrap');
+    if (!wrap || !canvas.isConnected) return;
+    const available = Math.max(540, Math.floor(wrap.clientWidth - 2));
+    const tmpCanvas = document.createElement('canvas');
+    const tmpCtx = tmpCanvas.getContext('2d');
+    tmpCtx.font = FONT;
+    const longestSrc = Math.max(...shortLabelsSrc.map(s => tmpCtx.measureText(s).width));
+    const longestDst = Math.max(...shortLabelsDst.map(s => tmpCtx.measureText(s).width));
+    const labelLeft = Math.max(92, Math.ceil(longestSrc) + 22);
+    const cellW = Math.max(34, Math.min(92, Math.floor((available - labelLeft - PAD) / dstSubnets.length)));
+    const horizontalLabels = cellW >= longestDst + 12;
+    const labelTop = horizontalLabels ? 54 : Math.max(78, Math.ceil(longestDst * 0.72) + 28);
+    const width = Math.max(available, labelLeft + dstSubnets.length * cellW + PAD);
+    const height = labelTop + srcSubnets.length * CELL_H + PAD;
+    layout = { labelLeft, labelTop, cellW, width, height };
+    lastWidth = available;
 
-  // Draw column labels (dst subnets) — rotated -45°, anchored at bottom-left of each column
-  ctx.font = FONT;
-  ctx.fillStyle = '#9090b0';
-  ctx.textAlign = 'left';
-  for (let di = 0; di < dstSubnets.length; di++) {
-    const x = LABEL_LEFT + di * CELL + CELL / 2;
-    const y = LABEL_TOP - 6;
-    ctx.save();
-    ctx.translate(x, y);
-    ctx.rotate(-Math.PI / 4);
-    ctx.fillText(dstSubnets[di].replace('.0/24', '.x'), 0, 0);
-    ctx.restore();
-  }
+    canvas.width = width;
+    canvas.height = height;
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
 
-  // Draw row labels (src subnets) — right-aligned, vertically centred on each row
-  ctx.font = FONT;
-  ctx.fillStyle = '#9090b0';
-  ctx.textAlign = 'right';
-  ctx.textBaseline = 'middle';
-  for (let si = 0; si < srcSubnets.length; si++) {
-    const y = LABEL_TOP + si * CELL + CELL / 2;
-    ctx.fillText(srcSubnets[si].replace('.0/24', '.x'), LABEL_LEFT - 8, y);
-  }
-  ctx.textBaseline = 'alphabetic';
+    const css = getComputedStyle(document.documentElement);
+    const bg = css.getPropertyValue('--bg1').trim() || '#0f0f16';
+    const idle = css.getPropertyValue('--bg2').trim() || '#15151e';
+    const diagonal = css.getPropertyValue('--bg3').trim() || '#1c1c28';
+    const border = css.getPropertyValue('--border').trim() || '#28283a';
+    const muted = css.getPropertyValue('--text2').trim() || '#7870a0';
+    const text = css.getPropertyValue('--text').trim() || '#ede9f6';
+    const isLight = document.documentElement.dataset.theme === 'light';
 
-  // Draw cells
-  for (let si = 0; si < srcSubnets.length; si++) {
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, width, height);
+    ctx.font = FONT;
+    ctx.fillStyle = muted;
+
     for (let di = 0; di < dstSubnets.length; di++) {
-      const x = LABEL_LEFT + di * CELL;
-      const y = LABEL_TOP  + si * CELL;
-
-      // Grid cell background
-      ctx.fillStyle = si === di ? '#12122a' : '#0b0b18';
-      ctx.fillRect(x + 1, y + 1, CELL - 2, CELL - 2);
-
-      const c = cellMap.get(`${si},${di}`);
-      if (c) {
-        const t = maxCount > 0 ? Math.log1p(c.count) / Math.log1p(maxCount) : 0;
-        // Couleur : vert (accept) ou rouge (deny) sur échelle log
-        if (mode === 'deny') {
-          const r = Math.round(80 + t * 175);
-          ctx.fillStyle = `rgb(${r},${Math.round(t * 23)},${Math.round(t * 20)})`;
-        } else {
-          const g = Math.round(60 + t * 170);
-          const b = Math.round(60 + t * 58);
-          ctx.fillStyle = `rgb(0,${g},${b})`;
-        }
-        ctx.fillRect(x + 1, y + 1, CELL - 2, CELL - 2);
-
-        // Session count inside cell
-        const textColor = mode === 'deny'
-          ? (t > 0.55 ? '#000' : '#ff5252')
-          : (t > 0.55 ? '#000' : '#00e676');
-        ctx.fillStyle = textColor;
-        ctx.font = '9px monospace';
+      const x = labelLeft + di * cellW + cellW / 2;
+      const y = labelTop - 14;
+      ctx.save();
+      ctx.translate(x, y);
+      if (horizontalLabels) {
         ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(c.count > 9999 ? '9k+' : c.count, x + CELL / 2, y + CELL / 2);
-        ctx.textBaseline = 'alphabetic';
+      } else {
+        ctx.rotate(-Math.PI / 4);
+        ctx.textAlign = 'left';
+      }
+      ctx.fillText(shortLabelsDst[di], 0, 0);
+      ctx.restore();
+    }
+
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    for (let si = 0; si < srcSubnets.length; si++) {
+      const y = labelTop + si * CELL_H + CELL_H / 2;
+      ctx.fillText(shortLabelsSrc[si], labelLeft - 12, y);
+    }
+
+    for (let si = 0; si < srcSubnets.length; si++) {
+      for (let di = 0; di < dstSubnets.length; di++) {
+        const x = labelLeft + di * cellW;
+        const y = labelTop + si * CELL_H;
+        ctx.fillStyle = srcSubnets[si] === dstSubnets[di] ? diagonal : idle;
+        ctx.fillRect(x + 1, y + 1, cellW - 2, CELL_H - 2);
+        ctx.strokeStyle = border;
+        ctx.lineWidth = 0.5;
+        ctx.strokeRect(x + 1, y + 1, cellW - 2, CELL_H - 2);
+
+        const c = cellMap.get(`${si},${di}`);
+        if (!c) continue;
+        const t = maxCount > 0 ? Math.log1p(c.count) / Math.log1p(maxCount) : 0;
+        const lightness = isLight ? Math.round(91 - t * 50) : Math.round(16 + t * 37);
+        ctx.fillStyle = mode === 'deny'
+          ? `hsl(3 68% ${lightness}%)`
+          : `hsl(151 55% ${lightness}%)`;
+        ctx.fillRect(x + 1, y + 1, cellW - 2, CELL_H - 2);
+        ctx.fillStyle = t > 0.62 ? (isLight ? '#fff' : '#07120d') : text;
+        ctx.font = '600 9px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(formatCompactCount(c.count), x + cellW / 2, y + CELL_H / 2);
+        ctx.font = FONT;
       }
     }
-  }
+    ctx.textBaseline = 'alphabetic';
 
-  // Save the static render into an offscreen canvas for hover redraw
-  const offscreen = document.createElement('canvas');
-  offscreen.width  = W;
-  offscreen.height = H;
-  offscreen.getContext('2d').drawImage(canvas, 0, 0);
+    offscreen = document.createElement('canvas');
+    offscreen.width = width;
+    offscreen.height = height;
+    offscreen.getContext('2d').drawImage(canvas, 0, 0);
+  };
+
+  draw();
 
   // Tooltip on hover — with early-exit if same cell (P7)
-  const tooltip = el('matrix-tooltip');
   let _lastHoverCell = { si: -1, di: -1 };
 
-  canvas.addEventListener('mousemove', e => {
+  canvas.onmousemove = e => {
+    if (!layout || !offscreen) return;
     const rect = canvas.getBoundingClientRect();
     const mx = (e.clientX - rect.left) * (canvas.width  / rect.width);
     const my = (e.clientY - rect.top)  * (canvas.height / rect.height);
-    const di = Math.floor((mx - LABEL_LEFT) / CELL);
-    const si = Math.floor((my - LABEL_TOP)  / CELL);
+    const di = Math.floor((mx - layout.labelLeft) / layout.cellW);
+    const si = Math.floor((my - layout.labelTop) / CELL_H);
 
     // Early-exit: same cell as last frame → skip redraw
     if (si === _lastHoverCell.si && di === _lastHoverCell.di) {
@@ -975,12 +1050,11 @@ function renderMatrix(data, mode = 'accept', signal) {
       // Restore static image first, then draw highlight on top
       ctx.drawImage(offscreen, 0, 0);
       if (c) {
-        // Highlight the hovered cell with a white border overlay
-        const hx = LABEL_LEFT + di * CELL;
-        const hy = LABEL_TOP  + si * CELL;
+        const hx = layout.labelLeft + di * layout.cellW;
+        const hy = layout.labelTop + si * CELL_H;
         ctx.strokeStyle = 'rgba(255,255,255,0.7)';
-        ctx.lineWidth   = 1.5;
-        ctx.strokeRect(hx + 1, hy + 1, CELL - 2, CELL - 2);
+        ctx.lineWidth = 2;
+        ctx.strokeRect(hx + 2, hy + 2, layout.cellW - 4, CELL_H - 4);
 
         const svcStr  = c.services?.length ? c.services.join(', ') : '–';
         const portStr = c.ports?.length    ? c.ports.join(', ')    : '–';
@@ -1000,41 +1074,54 @@ function renderMatrix(data, mode = 'accept', signal) {
       ctx.drawImage(offscreen, 0, 0);
       tooltip.style.display = 'none';
     }
-  }, signal ? { signal } : undefined);
+  };
 
-  canvas.addEventListener('mouseleave', () => {
+  canvas.onmouseleave = () => {
     _lastHoverCell = { si: -1, di: -1 };
-    ctx.drawImage(offscreen, 0, 0);
+    if (offscreen) ctx.drawImage(offscreen, 0, 0);
     tooltip.style.display = 'none';
-  }, signal ? { signal } : undefined);
+  };
 
-  // Click → filter flows
-  canvas.addEventListener('click', e => {
+  canvas.onclick = e => {
+    if (!layout) return;
     const rect = canvas.getBoundingClientRect();
     const mx = (e.clientX - rect.left) * (canvas.width  / rect.width);
     const my = (e.clientY - rect.top)  * (canvas.height / rect.height);
-    const di = Math.floor((mx - LABEL_LEFT) / CELL);
-    const si = Math.floor((my - LABEL_TOP)  / CELL);
+    const di = Math.floor((mx - layout.labelLeft) / layout.cellW);
+    const si = Math.floor((my - layout.labelTop) / CELL_H);
 
     if (si >= 0 && di >= 0 && si < srcSubnets.length && di < dstSubnets.length) {
-      const c = cellMap.get(`${si},${di}`);
-      if (c) {
-        // Navigate to deploy tab with src/dst pre-filtered
-        if (deployState.analyzed && deployState.analyzed.length > 0) {
-          deployState.searchFilter = `${c.src} ${c.dst}`.replace(/\.0\/24/g, '');
-          deployState.page = 1;
-          navigateTo('deploy');
-        } else {
-          // Fallback: navigate to flows if deploy not yet analyzed
-          state.flows.filters = { srcip: c.src.replace('.0/24',''), dstip: c.dst.replace('.0/24','') };
-          state.flows.page = 1;
-          navigateTo('flows');
-        }
-      }
+      openCell(cellMap.get(`${si},${di}`));
     }
-  }, signal ? { signal } : undefined);
+  };
 
   canvas.style.cursor = 'crosshair';
+
+  if (typeof ResizeObserver !== 'undefined') {
+    let resizeFrame = 0;
+    const observer = new ResizeObserver(() => {
+      const nextWidth = Math.floor(el('matrix-wrap')?.clientWidth || 0);
+      if (!nextWidth || Math.abs(nextWidth - lastWidth) < 24) return;
+      cancelAnimationFrame(resizeFrame);
+      resizeFrame = requestAnimationFrame(draw);
+    });
+    observer.observe(el('matrix-wrap'));
+    signal?.addEventListener('abort', () => {
+      cancelAnimationFrame(resizeFrame);
+      observer.disconnect();
+    }, { once: true });
+  }
+}
+
+function shortSubnetLabel(subnet) {
+  return String(subnet || '').replace(/\.0\/24$/, '.x');
+}
+
+function formatCompactCount(value) {
+  return new Intl.NumberFormat('fr-FR', {
+    notation: 'compact',
+    maximumFractionDigits: 1,
+  }).format(Number(value) || 0);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1094,7 +1181,7 @@ function renderGroups(subnets) {
     const subnetB64 = btoa(subnet);  // safe ID for the host panel
 
     return `
-      <div class="subnet-card" id="card-${cardId}">
+      <div class="subnet-card" id="card-${cardId}" data-subnet-search="${escHtml(`${subnet} ${sg.srcIPs.join(' ')}`.toLowerCase())}">
         <div class="subnet-header" onclick="toggleCard(this)">
           <div>
             <div class="subnet-name">${subnet}</div>
@@ -1112,7 +1199,19 @@ function renderGroups(subnets) {
       </div>`;
   }).join('');
 
-  el(_renderTarget || 'content').innerHTML = cards;
+  el(_renderTarget || 'content').innerHTML = `
+    <div class="inventory-tools">
+      <div><strong>${fmtNum(entries.length)} réseaux observés</strong><small>Classés du plus actif au moins actif</small></div>
+      <label class="inventory-search"><span>⌕</span><input id="inventory-network-search" type="search" placeholder="Rechercher un réseau ou une IP…"></label>
+    </div>
+    <div id="inventory-network-list">${cards}</div>`;
+
+  el('inventory-network-search')?.addEventListener('input', e => {
+    const query = e.target.value.trim().toLowerCase();
+    el('inventory-network-list').querySelectorAll('.subnet-card').forEach(card => {
+      card.style.display = !query || card.dataset.subnetSearch.includes(query) ? '' : 'none';
+    });
+  });
 }
 
 function toggleCard(header) {
@@ -1302,11 +1401,12 @@ function renderPoliciesTable(policies, excluded) {
     const drillBtn = p.srcSubnet && p.dstTarget
       ? '<button class="drill-btn" onclick="togglePolicyDrill(' + i + ',\'' + srcB64 + '\',\'' + dstB64 + '\')">&#9662; H\u00f4tes</button>'
       : '';
+    const serviceSummary = renderCandidateServiceSummary(p.serviceDesc);
     return '<tr id="pr-' + i + '">'
       + '<td class="mono" style="color:var(--text2)">' + (i + 1) + '</td>'
       + '<td class="mono">' + typeTag('private') + ' ' + escHtml(p.srcSubnet) + '</td>'
       + '<td class="mono">' + typeTag(p.dstType) + ' ' + escHtml(p.dstTarget) + '</td>'
-      + '<td style="max-width:260px;white-space:normal;font-family:var(--mono);font-size:11px;">' + escHtml(p.serviceDesc) + '</td>'
+      + '<td class="candidate-services-cell" title="' + escHtml(p.serviceDesc) + '">' + serviceSummary + '</td>'
       + '<td class="mono">' + (p.sessions > 0 ? fmtNum(p.sessions) : '\u2013') + '</td>'
       + '<td class="mono">' + fmtBytes(p.sentBytes + p.rcvdBytes) + '</td>'
       + '<td>' + actionTag(p.action) + '</td>'
@@ -1347,6 +1447,21 @@ function renderPoliciesTable(policies, excluded) {
   parts.push('</table></div>');
   parts.push('</div>');
   wrap.innerHTML = parts.join('');
+}
+
+function renderCandidateServiceSummary(description) {
+  const services = String(description || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+  if (!services.length) return '<span class="candidate-service-empty">Non identifié</span>';
+  const visible = services.slice(0, 4)
+    .map(service => `<span class="candidate-service">${escHtml(service)}</span>`)
+    .join('');
+  const extra = services.length > 4
+    ? `<span class="candidate-service-more">+${services.length - 4}</span>`
+    : '';
+  return `<div class="candidate-service-list">${visible}${extra}</div>`;
 }
 
 function toggleIncludeNoRcvd() {
@@ -1434,27 +1549,29 @@ function renderPolicyDrillTable(flows, srcSubnet, dstTarget) {
 async function ports() {
   if (_viewAbort) _viewAbort.abort();
   _viewAbort = new AbortController();
-  // signal available for future listeners; ports() renders via innerHTML — no direct listeners to attach
+  const { signal } = _viewAbort;
   el(_renderTarget || 'content').innerHTML = '<div class="empty-state"><div class="progress-spinner" style="margin:0 auto"></div></div>';
   try {
     const data = await api('/api/ports');
-    renderPorts(data);
+    renderPorts(data, signal);
   } catch (e) {
     el(_renderTarget || 'content').innerHTML = `<div class="alert alert-error">${escHtml(e.message)}</div>`;
   }
 }
 
-function renderPorts({ tcp = [], udp = [] }) {
+function renderPorts({ tcp = [], udp = [] }, signal) {
   const maxTcp = tcp[0]?.count || 1;
   const maxUdp = udp[0]?.count || 1;
 
-  function portRows(list, color, max) {
+  function portRows(list, color, max, proto) {
     if (!list.length) return '<div class="empty-state" style="padding:24px">Aucune donnée</div>';
     return list.map((p, i) => {
       const barPct = Math.round((p.count / max) * 100);
-      const label  = p.name ? `<span class="port-name">${p.name}</span>` : '';
+      const label  = p.name
+        ? `<span class="port-name">${escHtml(p.name)}</span>`
+        : '<span class="port-name port-name-unknown">Non nommé</span>';
       return `
-        <div class="port-row">
+        <button class="port-row ${p.name ? '' : 'unknown'}" data-port="${p.port}" data-proto="${proto}" title="Afficher les flux ${proto} sur le port ${p.port}">
           <div class="port-rank">${i + 1}</div>
           <div class="port-num mono">${p.port}</div>
           <div class="port-label">${label}</div>
@@ -1463,21 +1580,38 @@ function renderPorts({ tcp = [], udp = [] }) {
           </div>
           <div class="port-count mono">${fmtNum(p.count)}</div>
           <div class="port-pct">${p.pct}%</div>
-        </div>`;
+        </button>`;
     }).join('');
   }
 
+  const unknownPorts = [...tcp, ...udp].filter(p => !p.name).length;
+  const namedPorts = tcp.length + udp.length - unknownPorts;
   el(_renderTarget || 'content').innerHTML = `
+    <div class="ports-overview">
+      <div><strong>${fmtNum(namedPorts)} services identifiés</strong><small>Les noms connus accélèrent la revue des règles.</small></div>
+      <div class="${unknownPorts ? 'warn' : 'ok'}"><strong>${fmtNum(unknownPorts)} ports non nommés</strong><small>${unknownPorts ? 'À vérifier selon les applications du client.' : 'Aucun port inconnu dans ce classement.'}</small></div>
+      <span>Cliquez sur une ligne pour ouvrir les flux correspondants.</span>
+    </div>
     <div class="ports-grid">
       <div class="ports-col">
         <div class="ports-col-header" style="color:var(--accent)">Top 25 TCP — Ports destination</div>
-        <div class="ports-list">${portRows(tcp, 'var(--accent)', maxTcp)}</div>
+        <div class="ports-list">${portRows(tcp, 'var(--accent)', maxTcp, 'TCP')}</div>
       </div>
       <div class="ports-col">
         <div class="ports-col-header" style="color:var(--accent2)">Top 25 UDP — Ports destination</div>
-        <div class="ports-list">${portRows(udp, 'var(--accent2)', maxUdp)}</div>
+        <div class="ports-list">${portRows(udp, 'var(--accent2)', maxUdp, 'UDP')}</div>
       </div>
     </div>`;
+
+  el(_renderTarget || 'content').querySelectorAll('.port-row[data-port]').forEach(row => {
+    row.addEventListener('click', () => {
+      state.flows.filters = { port: row.dataset.port, proto: row.dataset.proto };
+      state.flows._fromPolicy = `Port ${row.dataset.proto}/${row.dataset.port}`;
+      state.flows.page = 1;
+      state.subView.analyse = 'flows';
+      analyse();
+    }, signal ? { signal } : undefined);
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -3746,8 +3880,7 @@ async function analyse() {
   const pills = [
     { key: 'flows',  label: 'Flux observés', icon: '≡' },
     { key: 'matrix', label: 'Matrice des flux', icon: '⊞' },
-    { key: 'groups', label: 'Actifs & groupes', icon: '⊕' },
-    { key: 'ports',  label: 'Services & ports', icon: '◫' },
+    { key: 'inventory', label: 'Inventaire', icon: '◇' },
   ];
   const pillsHtml = pills.map(p =>
     `<button class="sub-pill ${p.key === sub ? 'active' : ''}" data-sub="${p.key}">${p.icon} ${p.label}</button>`
@@ -3772,9 +3905,43 @@ async function analyse() {
   // Render sub-view into #sub-content
   _renderTarget = 'sub-content';
   try {
-    const subViews = { flows, matrix, groups, ports };
+    const subViews = { flows, matrix, inventory };
     await (subViews[sub] || flows)();
   } finally { _renderTarget = null; }
+}
+
+async function inventory() {
+  const active = state.subView.inventory || 'groups';
+  const target = _renderTarget || 'content';
+  el(target).innerHTML = `
+    <div class="inventory-head">
+      <div>
+        <span class="inventory-eyebrow">Inventaire observé</span>
+        <strong>${active === 'groups' ? 'Réseaux et hôtes actifs' : 'Services et ports utilisés'}</strong>
+        <small>${active === 'groups'
+          ? 'Identifiez les réseaux les plus actifs, puis ouvrez un réseau pour voir ses destinations et ses hôtes.'
+          : 'Repérez les services dominants et les ports inhabituels avant de définir les règles.'}</small>
+      </div>
+      <div class="inventory-switch" role="group" aria-label="Type d’inventaire">
+        <button class="${active === 'groups' ? 'active' : ''}" data-inventory="groups">Réseaux & hôtes</button>
+        <button class="${active === 'ports' ? 'active' : ''}" data-inventory="ports">Services & ports</button>
+      </div>
+    </div>
+    <div id="inventory-content"></div>`;
+
+  el(target).querySelectorAll('[data-inventory]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      state.subView.inventory = btn.dataset.inventory;
+      analyse();
+    });
+  });
+
+  _renderTarget = 'inventory-content';
+  try {
+    await (active === 'ports' ? ports() : groups());
+  } finally {
+    _renderTarget = null;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -3784,8 +3951,8 @@ async function analyse() {
 async function polices() {
   const sub = state.subView.polices;
   const pills = [
-    { key: 'policies',       label: 'Règles observées', icon: '◎' },
-    { key: 'consilpolicies', label: 'Optimisations', icon: '⚡' },
+    { key: 'policies',       label: 'Règles candidates', icon: '◎' },
+    { key: 'consilpolicies', label: 'Regroupements possibles', icon: '⚡' },
     { key: 'denied',         label: 'Refusés & scans', icon: '⊘' },
   ];
   const pillsHtml = pills.map(p =>
@@ -3795,8 +3962,8 @@ async function polices() {
   el(_renderTarget || 'content').innerHTML = `
     <div class="view-guide">
       <span class="view-guide-step">3</span>
-      <div><strong>Préparer la politique cible</strong><small>Distinguez les flux légitimes, les regroupements possibles et les événements à examiner avant le déploiement.</small></div>
-      <button class="btn-accent" onclick="navigateTo('deploy')">Passer au déploiement →</button>
+      <div><strong>Revoir les règles avant le déploiement</strong><small>Étape de contrôle facultative : comparez les candidats, les regroupements et les refus sans modifier la future configuration.</small></div>
+      <button class="btn-accent" onclick="navigateTo('deploy')">Continuer vers le déploiement →</button>
     </div>
     <div class="sub-pill-bar">${pillsHtml}</div>
     <div id="sub-content"></div>`;
