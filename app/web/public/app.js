@@ -132,10 +132,18 @@ function setProgressInfo({
     return;
   }
 
-  const phaseLabel = phase === 'analysis'
-    ? 'Construction de la matrice et des règles'
-    : 'Lecture et normalisation des journaux';
-  if (title) title.textContent = phase === 'analysis' ? 'Analyse des flux…' : 'Import des journaux…';
+  const phaseLabel = {
+    analysis: 'Construction de la matrice et des règles',
+    persistence: 'Sauvegarde du workspace',
+    parsing: 'Lecture et normalisation des journaux',
+  }[phase] || 'Traitement des journaux';
+  if (title) {
+    title.textContent = phase === 'analysis'
+      ? 'Analyse des flux…'
+      : phase === 'persistence'
+        ? 'Finalisation de l’analyse…'
+        : 'Import des journaux…';
+  }
 
   const pctStr = pct != null ? ` · ${pct}%` : '';
   const speedStr = linesPerSec > 0 ? ` · ${fmtNum(linesPerSec)} l/s` : '';

@@ -32,7 +32,7 @@ class AnalysisPool {
     };
   }
 
-  run({ jobId, filePath, filename, onProgress }) {
+  run({ jobId, filePath, filename, cache, onProgress }) {
     if (!jobId || !filePath) {
       return Promise.reject(Object.assign(new Error('Job d’analyse invalide'), { code: 'INVALID_ANALYSIS_JOB' }));
     }
@@ -48,6 +48,7 @@ class AnalysisPool {
         jobId,
         filePath,
         filename,
+        cache,
         onProgress: typeof onProgress === 'function' ? onProgress : () => {},
         resolve,
         reject,
@@ -111,7 +112,7 @@ class AnalysisPool {
 
   _start(job) {
     const workerOptions = {
-      workerData: { filePath: job.filePath, filename: job.filename },
+      workerData: { filePath: job.filePath, filename: job.filename, cache: job.cache || null },
     };
     if (this.workerMemoryMb >= 256) {
       workerOptions.resourceLimits = { maxOldGenerationSizeMb: this.workerMemoryMb };
@@ -129,7 +130,10 @@ class AnalysisPool {
         return;
       }
       if (message.type === 'result') {
-        this._settle(job, null, message.analysis);
+        this._settle(job, null, {
+          analysis: message.analysis,
+          cacheSaved: Boolean(message.cacheSaved),
+        });
         return;
       }
       if (message.type === 'error') {

@@ -9,7 +9,8 @@ const { WebSocketServer } = require('ws');
 const { consolidatePolicies, flowDecision }               = require('./lib/analyzer');
 const { AnalysisPool }                                     = require('./lib/analysis-pool');
 const { createSession, getSession, setSessionData, setFortiConfig,
-        setSessionError, deleteSession, getStats, listSessions } = require('./lib/store');
+        setSessionError, deleteSession, getSessionCachePath,
+        getStats, listSessions } = require('./lib/store');
 const { parseFortiConfig, analyzePolicies,
         generateConfig, validateAgainstExisting,
         preflightValidation,
@@ -318,11 +319,22 @@ app.post('/api/upload', upload.single('logfile'), (req, res) => {
     current.emitter.emit('progress', info);
   };
 
-  analysisPool.run({ jobId: sessionId, filePath, filename, onProgress })
-    .then(analysis => {
+  analysisPool.run({
+    jobId: sessionId,
+    filePath,
+    filename,
+    cache: {
+      id: sessionId,
+      path: getSessionCachePath(sessionId),
+      createdAt: session.createdAt,
+      lastAccess: session.lastAccess,
+    },
+    onProgress,
+  })
+    .then(({ analysis, cacheSaved }) => {
       const current = getSession(sessionId);
       if (!current) return;
-      setSessionData(sessionId, analysis);
+      setSessionData(sessionId, analysis, { persist: !cacheSaved });
       current.emitter.emit('done', { stats: analysis.stats, meta: analysis.meta });
     })
     .catch(err => {

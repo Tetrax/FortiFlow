@@ -99,9 +99,18 @@ function getSession(id) {
   return s;
 }
 
-function setSessionData(id, data) {
+function setSessionData(id, data, options = {}) {
   const s = sessions.get(id);
-  if (s) { s.data = data; s.status = 'ready'; s.lastAccess = Date.now(); _save(id); }
+  if (s) {
+    s.data = data;
+    s.status = 'ready';
+    s.lastAccess = Date.now();
+    if (options.persist !== false) _save(id);
+  }
+}
+
+function getSessionCachePath(id) {
+  return _cachePath(id);
 }
 
 function setFortiConfig(id, fortiConfig) {
@@ -163,4 +172,14 @@ function listSessions() {
   }));
 }
 
-module.exports = { createSession, getSession, setSessionData, setFortiConfig, setSessionError, deleteSession, getStats, listSessions };
+module.exports = {
+  createSession,
+  getSession,
+  setSessionData,
+  setFortiConfig,
+  setSessionError,
+  deleteSession,
+  getSessionCachePath,
+  getStats,
+  listSessions,
+};

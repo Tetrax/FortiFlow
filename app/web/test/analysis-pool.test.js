@@ -24,12 +24,25 @@ test('le parsing lourd est isolé dans un worker sans modifier le résultat du m
   });
 
   const phases = [];
-  const analysis = await pool.run({
+  const cachePath = path.join(dir, 'worker-session.json');
+  const { analysis, cacheSaved } = await pool.run({
     jobId: 'worker-test',
     filePath,
     filename: 'traffic.log',
+    cache: {
+      id: 'worker-test',
+      path: cachePath,
+      createdAt: 1,
+      lastAccess: 2,
+    },
     onProgress: progress => phases.push(progress.phase),
   });
+
+  assert.equal(cacheSaved, true);
+  const persisted = JSON.parse(await fs.readFile(cachePath, 'utf8'));
+  assert.equal(persisted.id, 'worker-test');
+  assert.equal(persisted.status, 'ready');
+  assert.equal(persisted.data.meta.uniqueFlows, 2);
 
   assert.equal(analysis.meta.lineCount, 2);
   assert.equal(analysis.meta.uniqueFlows, 2);
@@ -40,6 +53,7 @@ test('le parsing lourd est isolé dans un worker sans modifier le résultat du m
   assert.ok(phases.includes('starting'));
   assert.ok(phases.includes('parsing'));
   assert.ok(phases.includes('analysis'));
+  assert.ok(phases.includes('persistence'));
   assert.deepEqual(pool.stats(), {
     active: 0,
     queued: 0,

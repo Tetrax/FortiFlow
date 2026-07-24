@@ -1,5 +1,6 @@
 'use strict';
 
+const fs = require('node:fs/promises');
 const { parentPort, workerData } = require('node:worker_threads');
 const { parseFile } = require('./parser');
 const { buildAnalysis } = require('./analyzer');
@@ -17,7 +18,7 @@ function emptyFlowError({ lineCount, skipReasons }) {
 }
 
 async function run() {
-  const { filePath, filename } = workerData;
+  const { filePath, filename, cache } = workerData;
 
   parentPort.postMessage({
     type: 'progress',
@@ -52,7 +53,31 @@ async function run() {
     filename,
   };
 
-  parentPort.postMessage({ type: 'result', analysis });
+  let cacheSaved = false;
+  if (cache?.path && cache?.id) {
+    const tmpPath = `${cache.path}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      parentPort.postMessage({
+        type: 'progress',
+        data: { phase: 'persistence', lines: parsed.lineCount, pct: 99, linesPerSec: 0, eta: 0 },
+      });
+      const payload = JSON.stringify({
+        id: cache.id,
+        createdAt: cache.createdAt,
+        lastAccess: Date.now(),
+        status: 'ready',
+        data: analysis,
+        fortiConfig: null,
+      });
+      await fs.writeFile(tmpPath, payload, 'utf8');
+      await fs.rename(tmpPath, cache.path);
+      cacheSaved = true;
+    } catch {
+      await fs.unlink(tmpPath).catch(() => {});
+    }
+  }
+
+  parentPort.postMessage({ type: 'result', analysis, cacheSaved });
 }
 
 run()
