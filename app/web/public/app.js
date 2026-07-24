@@ -3816,7 +3816,19 @@ function populateDrawer(idx) {
       const dispLabel = stripPd(svc.label || svc.name);
       const dispName  = stripPd(svc.name);
       const rawKey    = svc.label || svc.name; // keep raw for data-svc-key (CLI needs full name)
-      return `<div class="drawer-field" title="${escHtml(svc.portHint || '')}"><span class="drawer-field-label">${escHtml(dispLabel)}</span><span class="drawer-field-value" style="color:var(--success)">&#10003; ${escHtml(dispName)}${badgeHtml(svc.source === 'predefined' ? 'predefined' : 'config')}</span><button class="btn-del-item" data-del-type="svc" data-svc-key="${escHtml(rawKey)}" title="Retirer ce service de la policy">✕</button></div>`;
+      return `<div class="drawer-service-row is-existing" title="${escHtml(svc.portHint || '')}">
+        <span class="drawer-service-select-spacer" aria-hidden="true"></span>
+        <span class="drawer-service-identity">
+          <strong>${escHtml(dispLabel)}</strong>
+          ${svc.portHint ? `<small>${escHtml(svc.portHint)}</small>` : ''}
+        </span>
+        <span class="drawer-service-object">
+          <span class="drawer-service-ok" aria-hidden="true">&#10003;</span>
+          <span class="drawer-service-object-name">${escHtml(dispName)}</span>
+          ${badgeHtml(svc.source === 'predefined' ? 'predefined' : 'config')}
+        </span>
+        <button class="btn-del-item" data-del-type="svc" data-svc-key="${escHtml(rawKey)}" title="Retirer ce service de la policy">✕</button>
+      </div>`;
     }
     // Detect port-notation labels like "UDP/11436" from FortiGate logs
     const _pnm = svc.label?.match(/^(TCP|UDP)\/(\d+)$/i);
@@ -3831,14 +3843,21 @@ function populateDrawer(idx) {
     // — never when it's the raw multi-port "observé" fallback (misleading for named services)
     const precisHint = svc.portHint && !svc.portHint.includes('observé');
     const hintTitle = svc.portHint || '(nom issu des logs FortiGate — port/protocol non résolu dans la config chargée)';
-    const hintText = precisHint
-      ? `<span style="font-size:9px;color:var(--text2);margin-left:4px" title="${escHtml(hintTitle)}">${escHtml(svc.portHint)}</span>`
-      : '';
-    return `<div class="drawer-field${isSelectable ? ' svc-selectable' : ''}" data-svc-key="${escHtml(svcKey)}" style="cursor:${isSelectable?'pointer':'default'};${isSelected ? 'background:rgba(99,179,237,0.10);border-radius:4px;outline:1px solid var(--accent);' : ''}">
-      ${isSelectable ? `<input type="checkbox" class="svc-sel-chk" ${isSelected?'checked':''} style="margin-right:4px;cursor:pointer;flex-shrink:0">` : ''}
-      <span class="drawer-field-label" title="${escHtml(hintTitle)}">${escHtml(svc.label || `${svc.port}/${svc.proto}`)}</span>
-      ${svc.isNamed && !_pnm ? hintText : ''}
-      <input class="drawer-input drawer-svc-name" data-svc-key="${escHtml(svcKey)}" value="${escHtml(inputVal(svc.suggestedName, svcAutoName))}" placeholder="${escHtml(svcDefaultName)}" onclick="event.stopPropagation()">${badgeHtml('auto')}
+    const transportText = precisHint
+      ? svc.portHint
+      : [svcProto, svcPort].filter(Boolean).join(' : ') || 'Protocole/port issu des logs';
+    return `<div class="drawer-service-row is-generated${isSelectable ? ' svc-selectable' : ''}${isSelected ? ' is-selected' : ''}" data-svc-key="${escHtml(svcKey)}" style="cursor:${isSelectable?'pointer':'default'}">
+      ${isSelectable
+        ? `<input type="checkbox" class="svc-sel-chk" ${isSelected?'checked':''} aria-label="Sélectionner ${escHtml(svc.label || `${svc.port}/${svc.proto}`)} pour fusion">`
+        : '<span class="drawer-service-select-spacer" aria-hidden="true"></span>'}
+      <span class="drawer-service-identity" title="${escHtml(hintTitle)}">
+        <strong>${escHtml(svc.label || `${svc.port}/${svc.proto}`)}</strong>
+        <small>${escHtml(transportText)}</small>
+      </span>
+      <span class="drawer-service-editor">
+        <input class="drawer-input drawer-svc-name" data-svc-key="${escHtml(svcKey)}" value="${escHtml(inputVal(svc.suggestedName, svcAutoName))}" placeholder="${escHtml(svcDefaultName)}" onclick="event.stopPropagation()">
+        ${badgeHtml('auto')}
+      </span>
       <button class="btn-del-item" data-del-type="svc" data-svc-key="${escHtml(svcKey)}" title="Retirer ce service de la policy">✕</button>
     </div>`;
   }).join('');
@@ -3883,7 +3902,7 @@ function populateDrawer(idx) {
       <div class="drawer-section-title">Interface de destination</div>
       <div class="drawer-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-dstintf">${ifOptsDst}</select></div>
     </div>
-    ${svcList.length ? `<div class="drawer-section drawer-section-services"><div class="drawer-section-title">Services (${svcList.length})${selectableSvcs.length > 1 ? `<label style="font-size:10px;color:var(--text2);font-weight:400;margin-left:8px;display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" class="svc-sel-all" ${selectedSvcs.length === selectableSvcs.length ? 'checked' : ''} style="cursor:pointer;margin:0"> Tout sélectionner</label>` : ''}</div>${svcsHtml}${mergeBar}${propagateBanner}</div>` : ''}
+    ${svcList.length ? `<div class="drawer-section drawer-section-services"><div class="drawer-section-title">Services (${svcList.length})${selectableSvcs.length > 1 ? `<label style="font-size:10px;color:var(--text2);font-weight:400;margin-left:8px;display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" class="svc-sel-all" ${selectedSvcs.length === selectableSvcs.length ? 'checked' : ''} style="cursor:pointer;margin:0"> Tout sélectionner</label>` : ''}</div><div class="drawer-service-columns" aria-hidden="true"><span>Service observé</span><span>Objet FortiGate</span></div><div class="drawer-service-list">${svcsHtml}</div>${mergeBar}${propagateBanner}</div>` : ''}
     ${buildDrawerSecProfiles(p, idx)}
   `;
 }
