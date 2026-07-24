@@ -3,39 +3,43 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>FortiFlow — Analyseur de logs FortiGate</title>
-  <link rel="stylesheet" href="style.css?v=20260723a">
+  <title>FortiFlow — Segmentation FortiGate</title>
+  <link rel="stylesheet" href="style.css?v=20260724b">
 </head>
 <body>
 
 <div id="app">
-  <!-- Sidebar -->
-  <nav id="sidebar">
+  <nav id="sidebar" aria-label="Parcours FortiFlow">
     <div class="sidebar-logo">
       <div class="logo-brand">SNS Security</div>
       <div class="logo-text">FortiFlow</div>
-      <div class="logo-sub">Traffic Log Analyzer</div>
+      <div class="logo-sub">FortiGate Segmentation Studio</div>
     </div>
 
-    <div class="sidebar-section">
-      <div class="sidebar-label">Navigation</div>
+    <div class="sidebar-section sidebar-workflow">
+      <div class="sidebar-label">Parcours</div>
       <div class="nav-item active" data-view="dashboard" role="button" tabindex="0">
-        <span class="nav-icon">◈</span> Dashboard
+        <span class="nav-step">1</span>
+        <span class="nav-copy"><strong>Démarrer</strong><small>Logs et qualité des données</small></span>
+        <span class="nav-badge" id="badge-dashboard">●</span>
       </div>
       <div class="nav-item" data-view="analyse" role="button" tabindex="0">
-        <span class="nav-icon">≡</span> Analyse
+        <span class="nav-step">2</span>
+        <span class="nav-copy"><strong>Explorer</strong><small>Flux, matrice et services</small></span>
         <span class="nav-badge" id="badge-analyse">–</span>
       </div>
       <div class="nav-item" data-view="polices" role="button" tabindex="0">
-        <span class="nav-icon">◎</span> Policies
+        <span class="nav-step">3</span>
+        <span class="nav-copy"><strong>Préparer</strong><small>Règles et optimisations</small></span>
         <span class="nav-badge" id="badge-polices">–</span>
       </div>
       <div class="nav-item" data-view="deploy" role="button" tabindex="0">
-        <span class="nav-icon">⊙</span> Déploiement
+        <span class="nav-step">4</span>
+        <span class="nav-copy"><strong>Déployer</strong><small>Contexte FortiGate et CLI</small></span>
+        <span class="nav-badge" id="badge-deploy">–</span>
       </div>
     </div>
 
-    <!-- Hidden badge targets for backward compat -->
     <span id="badge-flows" style="display:none"></span>
     <span id="badge-groups" style="display:none"></span>
     <span id="badge-policies" style="display:none"></span>
@@ -43,7 +47,7 @@
     <span id="badge-denied" style="display:none"></span>
 
     <div class="sidebar-section">
-      <div class="sidebar-label">Ressources</div>
+      <div class="sidebar-label">Aide</div>
       <a class="nav-item nav-item-pdf" href="/GUIDE_UTILISATEUR.pdf" target="_blank" download>
         <span class="nav-icon nav-icon-pdf">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -54,55 +58,51 @@
             <polyline points="9 9 10 9"/>
           </svg>
         </span>
-        Guide utilisateur
+        <span class="nav-copy"><strong>Guide utilisateur</strong><small>Méthode et références</small></span>
         <span class="nav-pdf-badge">PDF</span>
       </a>
     </div>
 
-
     <div id="sidebar-history" class="sidebar-section" style="display:none">
-      <div class="sidebar-label">Historique</div>
+      <div class="sidebar-label">Analyses récentes</div>
       <div id="ws-history-list"></div>
     </div>
 
     <div id="sidebar-session" class="sidebar-session" style="display:none">
-      <div>Session active</div>
+      <div class="session-status"><span></span> Analyse active</div>
       <div class="session-file" id="session-filename"></div>
-      <div class="session-clear" id="btn-clear-session">✕ Fermer la session</div>
+      <div class="session-clear" id="btn-clear-session">Fermer l’analyse</div>
     </div>
   </nav>
 
-  <!-- Main -->
-  <div id="main">
-    <div id="topbar">
-      <div>
-        <div class="topbar-title" id="view-title">FortiFlow</div>
-        <div class="topbar-sub"  id="view-sub">Chargez un fichier de log pour commencer</div>
+  <main id="main">
+    <header id="topbar">
+      <div class="topbar-copy">
+        <div class="topbar-title" id="view-title">Démarrer</div>
+        <div class="topbar-sub" id="view-sub">Importer les journaux et vérifier la qualité des données</div>
       </div>
-      <div style="display:flex;gap:8px;align-items:center;">
-        <button id="btn-theme" title="Thème clair/sombre" aria-label="Basculer le thème clair/sombre" style="background:none;border:none;cursor:pointer;font-size:16px;padding:4px 6px;color:var(--text2);">🌙</button>
-        <div style="display:flex;gap:8px;" id="topbar-actions"></div>
+      <div class="topbar-tools">
+        <button id="btn-theme" class="theme-btn" title="Thème clair/sombre" aria-label="Basculer le thème clair/sombre">🌙</button>
+        <div id="topbar-actions"></div>
       </div>
-    </div>
+    </header>
     <div id="content"></div>
+  </main>
+</div>
+
+<div id="progress-overlay">
+  <div class="progress-card">
+    <div class="progress-spinner"></div>
+    <div class="progress-text" id="progress-text">Analyse en cours…</div>
+    <div class="progress-bar-track"><div id="progress-bar-fill"></div></div>
+    <div class="progress-sub" id="progress-detail">Parsing du fichier, merci de patienter</div>
   </div>
 </div>
 
-<!-- Progress overlay -->
-<div id="progress-overlay">
-  <div class="progress-spinner"></div>
-  <div class="progress-text" id="progress-text">Analyse en cours…</div>
-  <div class="progress-bar-track"><div id="progress-bar-fill"></div></div>
-  <div class="progress-sub" id="progress-detail">Parsing du fichier, merci de patienter</div>
-</div>
-
-<!-- Matrix tooltip -->
 <div id="matrix-tooltip"></div>
-
-<!-- Hidden file input -->
 <input type="file" id="file-input" accept=".log,.txt,.csv,.gz,.zip,.xlsx,.xls">
 
-<script src="segmentation-plan.js?v=20260723a"></script>
-<script src="app.js?v=20260723a"></script>
+<script src="segmentation-plan.js?v=20260724b"></script>
+<script src="app.js?v=20260724b"></script>
 </body>
 </html>

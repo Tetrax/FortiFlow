@@ -277,6 +277,7 @@ function promptWorkspaceName(defaultName) {
 // ═══════════════════════════════════════════════════════════════
 
 function updateSidebar() {
+  document.body.classList.toggle('has-session', Boolean(state.session));
   if (!state.session) return;
   const s = state.stats;
 
@@ -291,7 +292,12 @@ function updateSidebar() {
   const analyseEl = el('badge-analyse');
   if (analyseEl) analyseEl.textContent = fmtNum(s?.uniqueFlows);
   const policesEl = el('badge-polices');
-  if (policesEl) policesEl.textContent = '…';
+  if (policesEl) policesEl.textContent = 'prêt';
+  const dashboardEl = el('badge-dashboard');
+  if (dashboardEl) dashboardEl.textContent = '✓';
+  const deployEl = el('badge-deploy');
+  if (deployEl) deployEl.textContent = '→';
+  document.querySelectorAll('.nav-item[data-view]').forEach(item => item.classList.add('available'));
 }
 
 function navigateTo(view) {
@@ -313,15 +319,18 @@ function navigateTo(view) {
 
   state.view = view;
 
-  document.querySelectorAll('.nav-item').forEach(n => {
-    n.classList.toggle('active', n.dataset.view === view);
+  document.querySelectorAll('.nav-item[data-view]').forEach(n => {
+    const active = n.dataset.view === view;
+    n.classList.toggle('active', active);
+    if (active) n.setAttribute('aria-current', 'step');
+    else n.removeAttribute('aria-current');
   });
 
   const titles = {
-    dashboard: ['Dashboard',              'Vue globale de l\'activité réseau'],
-    analyse:   ['Analyse',                'Exploration du trafic réseau'],
-    polices:   ['Policies',               'Règles firewall suggérées et optimisées'],
-    deploy:    ['Déploiement FortiGate',   'Générer la config CLI à injecter sur le firewall'],
+    dashboard: ['Démarrer', 'Importer les journaux et vérifier la qualité des données'],
+    analyse:   ['Explorer', 'Comprendre les flux réellement observés'],
+    polices:   ['Préparer', 'Transformer les observations en règles maîtrisées'],
+    deploy:    ['Déployer', 'Ajouter le contexte FortiGate et générer une configuration vérifiable'],
   };
 
   const [title, sub] = titles[view] || ['FortiFlow', ''];
@@ -344,29 +353,37 @@ function navigateTo(view) {
 
 function renderUpload() {
   el(_renderTarget || 'content').innerHTML = `
-    <div id="upload-zone">
-      <div style="text-align:center;margin-bottom:18px">
-        <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;
-          padding:9px 20px;border-radius:6px;border:1px solid var(--border2);
-          background:var(--bg2);color:var(--text2);font-size:13px;
-          transition:border-color .2s,color .2s"
-          onmouseover="this.style.borderColor='var(--brand)';this.style.color='var(--text)'"
-          onmouseout="this.style.borderColor='var(--border2)';this.style.color='var(--text2)'">
-          💾 Reprendre un workspace <em style="font-size:11px;opacity:.7">(.ffws)</em>
+    <div id="upload-zone" class="onboarding">
+      <section class="onboarding-copy">
+        <div class="eyebrow">Nouvelle analyse</div>
+        <h1>Des logs bruts à une segmentation FortiGate exploitable.</h1>
+        <p>FortiFlow transforme les journaux FortiGate ou FortiAnalyzer en une matrice vérifiable, puis en règles adaptées au niveau de précision attendu.</p>
+        <div class="onboarding-flow" aria-label="Parcours de travail">
+          <div><span>1</span><strong>Charger</strong><small>Logs de trafic</small></div><i></i>
+          <div><span>2</span><strong>Comprendre</strong><small>Flux et qualité</small></div><i></i>
+          <div><span>3</span><strong>Décider</strong><small>Niveau de segmentation</small></div><i></i>
+          <div><span>4</span><strong>Générer</strong><small>Configuration CLI</small></div>
+        </div>
+        <div class="onboarding-note">
+          <strong>Principe de sécurité</strong>
+          <span>Seuls les flux explicitement acceptés peuvent produire des règles. Les refus, échecs de connexion et données incomplètes restent visibles pour l’analyse.</span>
+        </div>
+      </section>
+      <section class="import-panel">
+        <div class="drop-area" id="drop-area">
+          <div class="drop-icon">⇧</div>
+          <div class="drop-title">Importer les journaux de trafic</div>
+          <div class="drop-sub">Glissez le fichier ici ou sélectionnez-le depuis votre poste.<br><em>LOG</em> <em>TXT</em> <em>CSV</em> <em>XLSX</em> <em>GZ</em> <em>ZIP</em></div>
+          <button class="upload-btn" id="btn-pick">Choisir un fichier</button>
+          <div class="import-meta">FortiGate syslog et exports FortiAnalyzer · jusqu’à 2 Go</div>
+        </div>
+        <label class="resume-workspace">
+          <span class="resume-icon">↺</span>
+          <span><strong>Reprendre une analyse</strong><small>Ouvrir un workspace FortiFlow .ffws</small></span>
+          <span class="resume-arrow">Choisir</span>
           <input type="file" id="btn-import-workspace-upload" accept=".ffws,.json" style="display:none">
         </label>
-      </div>
-      <div class="drop-area" id="drop-area">
-        <div class="drop-icon">📂</div>
-        <div class="drop-title">Déposez votre fichier de log</div>
-        <div class="drop-sub">
-          Formats supportés : <em>.log</em> · <em>.txt</em> · <em>.csv</em> · <em>.xlsx</em> · <em>.gz</em> · <em>.zip</em><br>
-          FortiGate syslog (key=value) et exports FortiAnalyzer (CSV / XLSX)<br>
-          Fichiers jusqu’à 2 Go — traitement streamé côté serveur
-        </div>
-        <br>
-        <button class="upload-btn" id="btn-pick">Choisir un fichier</button>
-      </div>
+      </section>
     </div>`;
 
   el('btn-pick').addEventListener('click', () => el('file-input').click());
@@ -401,74 +418,63 @@ async function dashboard() {
   const s  = state.stats;
   const m  = state.meta;
   const pct = s.totalSessions ? Math.round(s.acceptSessions / s.totalSessions * 100) : 0;
+  const skipped = m?.skipped || 0;
+  const parsed = m?.lineCount || 0;
+  const usablePct = parsed ? Math.max(0, Math.round((parsed - skipped) / parsed * 100)) : 0;
+  const skip = m?.skipReasons || {};
 
   el(_renderTarget || 'content').innerHTML = `
-    <div class="stat-grid">
-      <div class="stat-card">
-        <div class="stat-value">${fmtNum(s.totalSessions)}</div>
-        <div class="stat-label">Sessions totales</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value">${fmtNum(s.uniqueFlows)}</div>
-        <div class="stat-label">Flux uniques</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value blue">${fmtNum(s.uniqueSrcIPs)}</div>
-        <div class="stat-label">IPs source</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value blue">${fmtNum(s.uniqueDstIPs)}</div>
-        <div class="stat-label">IPs destination</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value">${fmtNum(s.srcSubnets)}</div>
-        <div class="stat-label">Subnets /24 source</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value orange">${fmtNum(s.privateSrcIPs)}</div>
-        <div class="stat-label">Hôtes internes</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value">${pct}%</div>
-        <div class="stat-label">Taux d'acceptation</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value red">${fmtNum(s.denySessions)}</div>
-        <div class="stat-label">Sessions refusées</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value blue">${fmtBytes(s.totalBytes)}</div>
-        <div class="stat-label">Volume total</div>
-      </div>
-    </div>
-
-    <div class="section-header" style="margin-top:8px;">
-      <div>
-        <div class="section-title">Fichier analysé</div>
-        <div class="section-sub">${m?.filename || ''} — ${fmtNum(m?.lineCount)} lignes lues · ${fmtNum(m?.uniqueFlows || 0)} flux uniques · ${fmtNum(m?.skipped || 0)} ignorées${m?.skipReasons ? ` (${fmtNum(m.skipReasons.nonTraffic || 0)} non-traffic, ${fmtNum(m.skipReasons.invalidFlow || 0)} invalides, ${fmtNum(m.skipReasons.ipv6 || 0)} IPv6 non pris en charge)` : ''}</div>
-      </div>
-      <div style="display:flex;gap:8px;">
-        <button class="export-btn primary" onclick="navigateTo('policies')">◎ Voir les policies</button>
-        <button class="upload-btn" style="font-size:12px;padding:7px 14px;" onclick="el('file-input').click()">+ Nouveau fichier</button>
-        <button class="btn-sm" onclick="exportSession()" title="Sauvegarder tout le workspace (logs + conf + policies) pour reprendre plus tard">💾 Sauvegarder workspace</button>
-      </div>
-    </div>
-
-    <div class="stat-grid" style="grid-template-columns:1fr 1fr;">
-      <div class="stat-card" style="cursor:pointer;" onclick="navigateTo('flows')">
-        <div style="font-size:12px;color:var(--text2);margin-bottom:8px;">Répartition des actions</div>
-        <div style="display:flex;gap:16px;align-items:center;">
-          <div><div class="stat-value" style="font-size:18px;">${fmtNum(s.acceptSessions)}</div><div class="stat-label" style="color:var(--accent)">ACCEPT</div></div>
-          <div><div class="stat-value" style="font-size:18px;color:var(--danger)">${fmtNum(s.denySessions)}</div><div class="stat-label" style="color:var(--danger)">DENY/DROP</div></div>
+    <div class="dashboard-v2">
+      <section class="workspace-hero">
+        <div>
+          <div class="eyebrow">Analyse active</div>
+          <h1>${escHtml(m?.filename || 'Workspace FortiFlow')}</h1>
+          <p>${fmtNum(parsed)} lignes lues · ${fmtNum(m?.uniqueFlows || s.uniqueFlows || 0)} flux uniques</p>
         </div>
-      </div>
-      <div class="stat-card" style="cursor:pointer;" onclick="navigateTo('groups')">
-        <div style="font-size:12px;color:var(--text2);margin-bottom:8px;">Destinations</div>
-        <div style="display:flex;gap:16px;align-items:center;">
-          <div><div class="stat-value" style="font-size:18px;">${fmtNum(s.privateDstIPs)}</div><div class="stat-label" style="color:var(--accent2)">LAN (réseaux internes)</div></div>
-          <div><div class="stat-value" style="font-size:18px;color:var(--accent3)">${fmtNum(s.uniqueDstIPs - s.privateDstIPs)}</div><div class="stat-label" style="color:var(--accent3)">WAN (public)</div></div>
+        <div class="workspace-actions">
+          <button class="btn-accent" onclick="navigateTo('matrix')">Explorer la matrice <span>→</span></button>
+          <button class="btn-sm" onclick="exportSession()">Sauvegarder</button>
+          <button class="btn-sm" onclick="el('file-input').click()">Nouveau fichier</button>
         </div>
-      </div>
+      </section>
+
+      <section class="kpi-grid">
+        <article class="kpi-card primary"><small>Sessions observées</small><strong>${fmtNum(s.totalSessions)}</strong><span>volume analysé</span></article>
+        <article class="kpi-card"><small>Flux uniques</small><strong>${fmtNum(s.uniqueFlows)}</strong><span>source / destination / service</span></article>
+        <article class="kpi-card success"><small>Flux acceptés</small><strong>${pct}%</strong><span>${fmtNum(s.acceptSessions)} sessions exploitables</span></article>
+        <article class="kpi-card"><small>Hôtes internes</small><strong>${fmtNum(s.privateSrcIPs)}</strong><span>${fmtNum(s.srcSubnets)} réseaux source /24</span></article>
+        <article class="kpi-card danger"><small>Refusés ou bloqués</small><strong>${fmtNum(s.denySessions)}</strong><span>jamais transformés en règle accept</span></article>
+      </section>
+
+      <section class="dashboard-grid">
+        <article class="quality-card">
+          <div class="card-heading">
+            <div><span class="status-dot ${usablePct >= 90 ? 'ok' : 'warn'}"></span><strong>Qualité des données</strong></div>
+            <b>${usablePct}% exploitable</b>
+          </div>
+          <div class="quality-meter"><span style="width:${usablePct}%"></span></div>
+          <div class="quality-stats">
+            <div><strong>${fmtNum(skipped)}</strong><span>lignes écartées</span></div>
+            <div><strong>${fmtNum(skip.nonTraffic || 0)}</strong><span>hors trafic</span></div>
+            <div><strong>${fmtNum(skip.invalidFlow || 0)}</strong><span>flux incomplets</span></div>
+            <div><strong>${fmtNum(skip.ipv6 || 0)}</strong><span>IPv6 non traité</span></div>
+          </div>
+          <p>Les éléments écartés restent informatifs mais ne sont jamais utilisés pour générer une policy.</p>
+        </article>
+
+        <article class="next-step-card">
+          <div class="eyebrow">Étape recommandée</div>
+          <h2>Valider ce que le réseau fait réellement.</h2>
+          <p>Commencez par la matrice pour identifier les zones, les destinations majeures et les services inattendus avant de construire les règles.</p>
+          <button class="btn-accent" onclick="navigateTo('matrix')">Ouvrir la matrice des flux</button>
+        </article>
+      </section>
+
+      <section class="workflow-cards">
+        <button onclick="navigateTo('flows')"><span>01</span><strong>Contrôler les flux</strong><small>Filtrer les IP, actions et services observés.</small><i>→</i></button>
+        <button onclick="navigateTo('policies')"><span>02</span><strong>Préparer les règles</strong><small>Comparer les regroupements et les optimisations.</small><i>→</i></button>
+        <button onclick="navigateTo('deploy')"><span>03</span><strong>Construire la configuration</strong><small>Ajouter le contexte FortiGate, choisir la précision et générer le CLI.</small><i>→</i></button>
+      </section>
     </div>`;
 }
 
@@ -3699,16 +3705,20 @@ function populateDrawer(idx) {
 async function analyse() {
   const sub = state.subView.analyse;
   const pills = [
-    { key: 'flows',  label: 'Flux',    icon: '≡' },
-    { key: 'matrix', label: 'Matrice', icon: '⊞' },
-    { key: 'groups', label: 'Groupes', icon: '⊕' },
-    { key: 'ports',  label: 'Ports',   icon: '◫' },
+    { key: 'flows',  label: 'Flux observés', icon: '≡' },
+    { key: 'matrix', label: 'Matrice des flux', icon: '⊞' },
+    { key: 'groups', label: 'Actifs & groupes', icon: '⊕' },
+    { key: 'ports',  label: 'Services & ports', icon: '◫' },
   ];
   const pillsHtml = pills.map(p =>
     `<button class="sub-pill ${p.key === sub ? 'active' : ''}" data-sub="${p.key}">${p.icon} ${p.label}</button>`
   ).join('');
 
   el(_renderTarget || 'content').innerHTML = `
+    <div class="view-guide">
+      <span class="view-guide-step">2</span>
+      <div><strong>Comprendre avant de segmenter</strong><small>Explorez les échanges sous plusieurs angles sans modifier les données ni générer de configuration.</small></div>
+    </div>
     <div class="sub-pill-bar">${pillsHtml}</div>
     <div id="sub-content"></div>`;
 
@@ -3735,15 +3745,20 @@ async function analyse() {
 async function polices() {
   const sub = state.subView.polices;
   const pills = [
-    { key: 'policies',       label: 'Policies',  icon: '◎' },
-    { key: 'consilpolicies', label: 'Conseils',   icon: '⚡' },
-    { key: 'denied',         label: 'Refusés',   icon: '⊘' },
+    { key: 'policies',       label: 'Règles observées', icon: '◎' },
+    { key: 'consilpolicies', label: 'Optimisations', icon: '⚡' },
+    { key: 'denied',         label: 'Refusés & scans', icon: '⊘' },
   ];
   const pillsHtml = pills.map(p =>
     `<button class="sub-pill ${p.key === sub ? 'active' : ''}" data-sub="${p.key}">${p.icon} ${p.label}</button>`
   ).join('');
 
   el(_renderTarget || 'content').innerHTML = `
+    <div class="view-guide">
+      <span class="view-guide-step">3</span>
+      <div><strong>Préparer la politique cible</strong><small>Distinguez les flux légitimes, les regroupements possibles et les événements à examiner avant le déploiement.</small></div>
+      <button class="btn-accent" onclick="navigateTo('deploy')">Passer au déploiement →</button>
+    </div>
     <div class="sub-pill-bar">${pillsHtml}</div>
     <div id="sub-content"></div>`;
 
@@ -3783,19 +3798,19 @@ async function deploy() {
       <!-- Wizard progress -->
       <div class="wizard-progress">
         <div class="wizard-step-indicator ${ws >= 1 ? 'active' : ''} ${ws > 1 ? 'done' : ''}" data-step="1">
-          <span class="wizard-num">1</span> Config
+          <span class="wizard-num">1</span> Configuration
         </div>
         <div class="wizard-connector ${ws > 1 ? 'done' : ''}"></div>
         <div class="wizard-step-indicator ${ws >= 2 ? 'active' : ''} ${ws > 2 ? 'done' : ''}" data-step="2">
-          <span class="wizard-num">2</span> Routes
+          <span class="wizard-num">2</span> Routage
         </div>
         <div class="wizard-connector ${ws > 2 ? 'done' : ''}"></div>
         <div class="wizard-step-indicator ${ws >= 3 ? 'active' : ''} ${ws > 3 ? 'done' : ''}" data-step="3">
-          <span class="wizard-num">3</span> Interfaces
+          <span class="wizard-num">3</span> Zones & interfaces
         </div>
         <div class="wizard-connector ${ws > 3 ? 'done' : ''}"></div>
         <div class="wizard-step-indicator ${ws >= 4 ? 'active' : ''}" data-step="4">
-          <span class="wizard-num">4</span> Policies
+          <span class="wizard-num">4</span> Règles
         </div>
       </div>
 
@@ -3803,7 +3818,7 @@ async function deploy() {
       <div class="deploy-step" id="deploy-step1" ${ws !== 1 ? 'style="display:none"' : ''}>
         <div class="deploy-step-header">
           <span class="deploy-step-num">1</span>
-          Importer la config FortiGate
+          Importer la configuration FortiGate
         </div>
         <div class="deploy-step-body">
           ${deployState.fortiConfig
@@ -3825,7 +3840,7 @@ async function deploy() {
       <div class="deploy-step" id="deploy-step2" ${ws !== 2 ? 'style="display:none"' : ''}>
         <div class="deploy-step-header">
           <span class="deploy-step-num">2</span>
-          Table de routage réelle
+          Compléter le routage dynamique
         </div>
         <div class="deploy-step-body">
           ${renderDynamicRoutesPanel()}
@@ -3840,7 +3855,7 @@ async function deploy() {
       <div class="deploy-step" id="deploy-step3" ${ws !== 3 ? 'style="display:none"' : ''}>
         <div class="deploy-step-header" id="deploy-iface-toggle" style="cursor:pointer">
           <span class="deploy-step-num">3</span>
-          Interfaces &amp; Zones
+          Vérifier les zones et interfaces
           <span id="deploy-iface-arrow" style="margin-left:auto;font-size:11px">▾</span>
         </div>
         <div class="deploy-step-body" id="deploy-iface-body">
@@ -3854,33 +3869,27 @@ async function deploy() {
 
       <!-- Step 4: policy table -->
       <div class="deploy-step" id="deploy-step4" ${ws !== 4 ? 'style="display:none"' : ''}>
-        <div class="deploy-step-header">
+        <div class="deploy-step-header deploy-rules-header">
           <span class="deploy-step-num">4</span>
-          Policies à générer
-          <div style="margin-left:auto;display:flex;gap:12px;align-items:center;font-size:12px;font-weight:400">
-            <label class="deploy-toggle-label">
-              NAT <input type="checkbox" id="opt-nat"> <span class="deploy-toggle-knob"></span>
-              <span style="color:var(--text2);font-weight:400;font-size:11px">(WAN uniquement)</span>
-            </label>
-            <select id="opt-action" class="deploy-select">
-              <option value="accept">accept</option>
-              <option value="deny">deny</option>
-            </select>
-            <select id="opt-log" class="deploy-select">
-              <option value="all">log all</option>
-              <option value="utm">log utm</option>
-              <option value="disable">log disable</option>
-            </select>
-            <label class="deploy-toggle-label" title="Préfixe des objets générés (adresses, groupes, services). Ex : ACME → ACME_10_1_6_0_24. Réanalyser pour appliquer.">
-              Préfixe <input type="text" id="opt-naming-prefix" class="deploy-select" style="width:64px" maxlength="24" placeholder="FF">
-            </label>
-            <select id="opt-target" class="deploy-select" title="Cible de la config générée">
-              <option value="fortigate">FortiGate CLI</option>
-              <option value="fmg-script">FortiManager (script Policy Package)</option>
-            </select>
-            <button class="btn-accent" id="btn-analyze">⚡ Analyser les policies</button>
+          <div class="deploy-step-title">
+            <strong>Construire les règles</strong>
+            <small>Choisissez le niveau de segmentation, vérifiez les écarts, puis générez la configuration.</small>
           </div>
+          <button class="btn-accent" id="btn-analyze">Analyser les flux →</button>
         </div>
+        <details class="deploy-options-panel">
+          <summary>
+            <span><strong>Options de génération</strong><small>NAT, journalisation, nommage et cible</small></span>
+            <span class="details-hint">Afficher</span>
+          </summary>
+          <div class="deploy-options-grid">
+            <label><span>Action</span><select id="opt-action" class="deploy-select"><option value="accept">Accepter</option><option value="deny">Refuser</option></select></label>
+            <label><span>Journalisation</span><select id="opt-log" class="deploy-select"><option value="all">Toutes les sessions</option><option value="utm">Événements UTM</option><option value="disable">Désactivée</option></select></label>
+            <label><span>Préfixe des objets</span><input type="text" id="opt-naming-prefix" class="deploy-select" maxlength="24" placeholder="FF"></label>
+            <label><span>Cible</span><select id="opt-target" class="deploy-select"><option value="fortigate">FortiGate CLI</option><option value="fmg-script">FortiManager — Policy Package</option></select></label>
+            <label class="option-check"><span>NAT sortant</span><span>NAT <input type="checkbox" id="opt-nat"> <small>uniquement pour les flux WAN</small></span></label>
+          </div>
+        </details>
         <div id="deploy-hps-warn" style="display:none;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);border-radius:6px;padding:5px 12px;font-size:12px;color:var(--danger,#ef4444);margin-bottom:4px"></div>
         <div class="deploy-toolbar" id="deploy-merge-bar" style="display:none">
           <span id="deploy-merge-info" style="font-size:11px;color:var(--text2)"></span>
@@ -3948,7 +3957,12 @@ async function deploy() {
         </div>
         <div id="deploy-risk-panel" style="display:none;padding:0 4px 12px"></div>
         <div class="deploy-step-body" id="deploy-policy-body">
-          <div class="empty-state" style="padding:24px">Cliquez sur <strong>Analyser les policies</strong> pour commencer</div>
+          <div class="deploy-empty">
+  <span>◎</span>
+  <strong>Les règles seront construites à partir des flux acceptés.</strong>
+  <small>L’analyse croise les journaux, la configuration, les routes et les interfaces. Aucun flux refusé ou incomplet ne sera converti en règle accept.</small>
+  <button class="btn-accent" onclick="el('btn-analyze')?.click()">Analyser les flux</button>
+</div>
         </div>
         <div class="deploy-step-footer" id="deploy-step4-footer" style="display:none">
           <div id="security-profiles-bar" style="display:none;margin-bottom:10px;padding:8px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);font-size:11px">
