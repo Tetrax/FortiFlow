@@ -6,7 +6,7 @@ const path             = require('path');
 const fs               = require('fs');
 const { WebSocketServer } = require('ws');
 
-const { consolidatePolicies, flowDecision }               = require('./lib/analyzer');
+const { buildAnalysis, consolidatePolicies, flowDecision } = require('./lib/analyzer');
 const { AnalysisPool }                                     = require('./lib/analysis-pool');
 const { createSession, getSession, setSessionData, setFortiConfig,
         setSessionError, deleteSession, getSessionCachePath,
