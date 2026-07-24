@@ -19,6 +19,11 @@ function emptyFlowError({ lineCount, skipReasons }) {
 async function run() {
   const { filePath, filename } = workerData;
 
+  parentPort.postMessage({
+    type: 'progress',
+    data: { phase: 'parsing', lines: 0, pct: 0, linesPerSec: 0, eta: null },
+  });
+
   const parsed = await parseFile(filePath, info => {
     parentPort.postMessage({ type: 'progress', data: { phase: 'parsing', ...info } });
   });
