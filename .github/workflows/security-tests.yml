@@ -29,6 +29,8 @@ jobs:
           node --check lib/analysis-pool.js
           node --check lib/analysis-worker.js
           node --check lib/analyzer.js
+          node --check lib/coverage.js
+          node --check lib/deploy-safety.js
           node --check lib/forticonfig.js
       - name: Run tests
         run: npm test

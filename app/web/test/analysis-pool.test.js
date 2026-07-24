@@ -12,8 +12,8 @@ test('le parsing lourd est isolé dans un worker sans modifier le résultat du m
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'fortiflow-worker-'));
   const filePath = path.join(dir, 'traffic.log');
   const log = [
-    'date=2026-07-24 time=10:00:00 type=traffic devname="FGT-A" vd="root" srcip=10.0.0.10 dstip=10.0.1.20 srcport=50000 dstport=443 proto=6 action=accept service=HTTPS srcintf="lan" dstintf="servers" sentbyte=100 rcvdbyte=200',
-    'date=2026-07-24 time=10:00:01 type=traffic devname="FGT-A" vd="root" srcip=10.0.0.11 dstip=10.0.1.53 srcport=50001 dstport=53 proto=17 action=accept service=DNS srcintf="lan" dstintf="servers" sentbyte=80 rcvdbyte=120',
+    'date=2026-07-24 time=10:00:00 type=traffic subtype=forward devname="FGT-A" vd="root" srcip=10.0.0.10 dstip=10.0.1.20 srcport=50000 dstport=443 proto=6 action=accept service=HTTPS srcintf="lan" dstintf="servers" policyid=10 sentbyte=100 rcvdbyte=200',
+    'date=2026-07-24 time=10:00:01 type=traffic subtype=forward devname="FGT-A" vd="root" srcip=10.0.0.11 dstip=10.0.1.53 srcport=50001 dstport=53 proto=17 action=accept service=DNS srcintf="lan" dstintf="servers" policyid=10 sentbyte=80 rcvdbyte=120',
   ].join('\n');
   await fs.writeFile(filePath, log, 'utf8');
 

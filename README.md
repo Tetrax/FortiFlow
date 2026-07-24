@@ -19,11 +19,25 @@ La génération suit un modèle **fail closed** :
 - les équipements et VDOM ne sont jamais fusionnés silencieusement ;
 - une destination WAN reste limitée aux IP observées ; `dstaddr "all"` nécessite un choix explicite ;
 - les couples protocole/port/service sont conservés sans troncature ;
+- un objet service existant n'est réutilisé que si ses protocoles et ports sont
+  exactement égaux aux tuples observés ; sinon un objet exact est proposé ;
+- aucun repli implicite vers `service ALL` ou `srcaddr all` n'est autorisé ;
+- les flux locaux, NATés, sans preuve de chemin forward ou dont le protocole est
+  seulement déduit restent visibles mais ne produisent pas de règles ;
 - une sélection de route ECMP ambiguë n'est pas résolue arbitrairement ;
 - les routes désactivées sont ignorées et l'ordre first-match des policies existantes est conservé ;
-- une configuration PBR ou VRF non par défaut bloque la génération tant que ce contexte n'est pas pris en charge ;
-- la présence d'IPv6 non analysé ou d'actions inconnues bloque la génération ;
+- une VRF non par défaut bloque la génération tant que ce contexte n'est pas sélectionnable ;
+- la présence d'IPv6 non analysé, d'actions inconnues, de lignes trafic invalides,
+  d'une archive partielle ou de plusieurs équipements/VDOM bloque la génération ;
 - le serveur exécute systématiquement le preflight avant toute génération CLI.
+
+Le preflight distingue deux résultats :
+
+- **exact** : source `/32`, destination `/32`, un service par règle et chaque
+  tuple hôte/hôte/service est prouvé par les logs ;
+- **généralisé** : un réseau ou plusieurs services sont volontairement regroupés.
+  La règle peut être valide, mais elle autorise par construction un périmètre plus
+  large que les seuls tuples observés et ne doit pas être présentée comme « exacte ».
 
 Les réseaux RFC1918 sont internes par défaut. Un préfixe public porté par une interface LAN de la configuration sélectionnée est également classé comme interne.
 
@@ -181,7 +195,12 @@ srcip=192.168.10.15 srcport=54321 dstip=192.168.20.10 dstport=443
 proto=6 action="accept" service="HTTPS" sentbyte=15234 rcvdbyte=89012
 ```
 
-Champs utilisés : `srcip`, `dstip`, `dstport`, `proto`, `service`, `action`, `sentbyte`, `rcvdbyte`, `vd`/`vdom`
+Champs de preuve recommandés : `type=traffic`, `subtype=forward`, `srcip`,
+`dstip`, `srcintf`, `dstintf`, `policyid`, `dstport`, `proto`, `service`,
+`action`, `sentbyte`, `rcvdbyte`, `devname`/`devid` et `vd`/`vdom`.
+
+Un export sans protocole explicite, sans contexte forward ou contenant une
+traduction NAT reste analysable, mais il n'est pas certifiable pour produire du CLI.
 
 ---
 

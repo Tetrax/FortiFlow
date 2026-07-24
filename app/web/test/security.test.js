@@ -6,9 +6,10 @@ const { Readable } = require('node:stream');
 
 const { parseStream, normalizeDecision } = require('../lib/parser');
 const { buildAnalysis, flowDecision, consolidatePolicies } = require('../lib/analyzer');
-const { parseFortiConfig, analyzePolicies, generateConfig, preflightValidation } = require('../lib/forticonfig');
+const { parseFortiConfig, analyzePolicies, generateConfig, preflightValidation, findAddress } = require('../lib/forticonfig');
 const { buildPoliciesByPlan } = require('../public/segmentation-plan.js');
 const { getCaptureDeploymentBlockers } = require('../lib/deploy-safety');
+const { buildHostPairCoverage } = require('../lib/coverage');
 
 function aggregate(overrides = {}) {
   return {
@@ -48,7 +49,7 @@ function wanPolicy(overrides = {}) {
     analysis: {
       srcAddr: { found: false, cidr: '10.0.0.0/24' },
       dstAddr: { found: false, cidr: '8.8.8.8/32' },
-      services: [],
+      services: [{ label: 'HTTPS', found: true, name: 'HTTPS' }],
     },
     ...overrides,
   };
@@ -194,6 +195,25 @@ config firewall policy
 end
 `);
   assert.deepEqual(config.existingPolicies.map(p => p.policyid), [100, 2]);
+});
+
+test('une policy existante avec horaire ou négation reste incertaine dans la couverture', () => {
+  const config = parseFortiConfig(`
+config firewall policy
+    edit 10
+        set name "LIMITED"
+        set srcintf "lan"
+        set dstintf "servers"
+        set srcaddr "all"
+        set dstaddr "all"
+        set service "ALL"
+        set action accept
+        set schedule "workhours"
+    next
+end
+`);
+  const { hostPairCoverage } = buildHostPairCoverage([aggregate()], config);
+  assert.equal(hostPairCoverage['10.0.0.10|10.0.1.20'].verdict, 'uncertain');
 });
 
 test('une policy WAN reste spécifique sauf choix explicite de all', () => {
@@ -351,6 +371,23 @@ test('les flux IPv6 non pris en charge sont comptés explicitement', async () =>
   assert.equal(result.skipReasons.invalidFlow, 0);
 });
 
+test('les flux locaux, NATés ou à protocole déduit restent visibles mais ne produisent aucune règle', async () => {
+  const logs = [
+    'date=2026-07-01 time=10:00:00 type=traffic subtype=local devname="FGT-A" vd="root" srcip=10.0.0.10 dstip=10.0.0.1 dstport=443 proto=6 action=accept service=HTTPS srcintf="lan" dstintf="root" policyid=1',
+    'date=2026-07-01 time=10:00:01 type=traffic subtype=forward devname="FGT-A" vd="root" srcip=10.0.0.10 dstip=8.8.8.8 dstport=53 proto=17 action=accept service=DNS srcintf="lan" dstintf="wan1" policyid=2 trandisp=snat transip=192.0.2.10',
+    'date=2026-07-01 time=10:00:02 type=traffic subtype=forward devname="FGT-A" vd="root" srcip=10.0.0.10 dstip=10.0.1.20 dstport=443 action=accept service=HTTPS srcintf="lan" dstintf="servers" policyid=3',
+  ].join('\n');
+  const parsed = await parseStream(Readable.from([logs]));
+  const analysis = buildAnalysis(parsed.flowMap);
+
+  assert.equal(analysis.stats.acceptSessions, 3);
+  assert.equal(analysis.stats.nonDeployableSessions, 3);
+  assert.equal(analysis.stats.evidenceIssueSessions.non_forward_traffic, 1);
+  assert.equal(analysis.stats.evidenceIssueSessions.nat_translation, 1);
+  assert.equal(analysis.stats.evidenceIssueSessions.protocol_inferred, 1);
+  assert.equal(analysis.policies.length, 0);
+});
+
 
 test('un service TCP+UDP doit couvrir chaque tuple observé', () => {
   const policy = {
@@ -396,6 +433,103 @@ test('un service TCP+UDP doit couvrir chaque tuple observé', () => {
 
   assert.equal(analyzePolicies([policy], config(both))[0].analysis.services[0].found, true);
   assert.equal(analyzePolicies([policy], config(tcpOnly))[0].analysis.services[0].found, false);
+});
+
+test('un objet service plus large que les tuples observés est remplacé par un objet exact', () => {
+  const policy = {
+    srcSubnet: '10.0.0.0/24',
+    flowSrcintf: 'lan',
+    dstTarget: '10.0.1.0/24',
+    dstType: 'private',
+    services: ['APP-WEB'],
+    ports: [443],
+    protos: ['TCP'],
+    serviceTuples: [{ proto: '6', port: '443', service: 'APP-WEB', sessions: 1 }],
+  };
+  const config = {
+    addresses: {},
+    customServices: {
+      'APP-WEB': {
+        proto: 'TCP/UDP/SCTP',
+        tcpPorts: [443, 8443],
+        udpPorts: [],
+        _tcpSet: new Set([443, 8443]),
+        _udpSet: new Set(),
+      },
+    },
+    interfaces: {
+      lan: { name: 'lan', cidr: '10.0.0.1/24' },
+      servers: { name: 'servers', cidr: '10.0.1.1/24' },
+    },
+    zones: {},
+    fullRoutes: [],
+    staticRoutes: [],
+    sdwanEnabled: false,
+    sdwanMembers: [],
+  };
+
+  const analyzed = analyzePolicies([policy], config)[0];
+  const service = analyzed.analysis.services[0];
+  assert.equal(service.found, false);
+  assert.equal(service.source, 'generated-exact');
+  assert.deepEqual(service.tcpPorts, [443]);
+  assert.deepEqual(service.udpPorts, []);
+
+  const cli = generateConfig([{
+    ...analyzed,
+    srcintf: 'lan',
+    dstintf: 'servers',
+  }], {
+    addresses: {},
+    addressGroups: {},
+    zones: {},
+  });
+  assert.match(cli, /set tcp-portrange 443/);
+  assert.doesNotMatch(cli, /8443/);
+});
+
+test('DNS UDP seul ne réutilise pas le service prédéfini TCP+UDP', () => {
+  const policy = {
+    srcSubnet: '10.0.0.0/24',
+    flowSrcintf: 'lan',
+    dstTarget: '10.0.1.0/24',
+    dstType: 'private',
+    services: ['DNS'],
+    ports: [53],
+    protos: ['UDP'],
+    serviceTuples: [{ proto: '17', port: '53', service: 'DNS', sessions: 1 }],
+  };
+  const config = {
+    addresses: {}, customServices: {},
+    interfaces: {
+      lan: { name: 'lan', cidr: '10.0.0.1/24' },
+      servers: { name: 'servers', cidr: '10.0.1.1/24' },
+    },
+    zones: {}, fullRoutes: [], staticRoutes: [],
+    sdwanEnabled: false, sdwanMembers: [],
+  };
+
+  const analyzed = analyzePolicies([policy], config)[0];
+  assert.equal(analyzed.analysis.services[0].found, false);
+  assert.deepEqual(analyzed.analysis.services[0].udpPorts, [53]);
+  const cli = generateConfig([{ ...analyzed, srcintf: 'lan', dstintf: 'servers' }], {
+    addresses: {}, addressGroups: {}, zones: {},
+  });
+  assert.match(cli, /set udp-portrange 53/);
+  assert.doesNotMatch(cli, /set tcp-portrange 53/);
+  assert.doesNotMatch(cli, /set service "DNS"/);
+});
+
+test('le générateur refuse tout service non résolu sans tuple exact et ne retombe jamais sur ALL', () => {
+  const invalid = {
+    ...wanPolicy(),
+    analysis: {
+      srcAddr: { found: false, cidr: '10.0.0.0/24' },
+      dstAddr: { found: false, cidr: '8.8.8.8/32' },
+      services: [{ label: 'SERVICE-INCONNU', found: false, suggestedName: 'SERVICE-INCONNU' }],
+    },
+  };
+  assert.throws(() => generateConfig([invalid]), /sans protocole\/port exact/);
 });
 
 
@@ -454,6 +588,7 @@ test('le preflight prouve une règle stricte avec les flux acceptés exacts', ()
   const flows = [aggregate()];
 
   assert.equal(preflightValidation([policy], config, flows).ok, true);
+  assert.equal(preflightValidation([policy], config, flows).certification.level, 'exact');
 
   const phantom = {
     ...policy,
@@ -463,6 +598,105 @@ test('le preflight prouve une règle stricte avec les flux acceptés exacts', ()
   const rejected = preflightValidation([phantom], config, flows);
   assert.equal(rejected.ok, false);
   assert.ok(rejected.issues.some(issue => /aucun flux accepté|non observé/.test(issue.msg)));
+});
+
+test('les profils réseau sont explicitement classés comme généralisation', () => {
+  const config = {
+    addresses: {}, addressGroups: {}, zones: {},
+    interfaces: { lan: {}, servers: {} },
+  };
+  const policy = {
+    srcintf: 'lan',
+    dstintf: 'servers',
+    srcSubnet: '10.0.0.0/24',
+    dstTarget: '10.0.1.0/24',
+    srcHosts: ['10.0.0.10'],
+    dstHosts: ['10.0.1.20'],
+    services: ['HTTPS'],
+    serviceTuples: [{ proto: '6', port: '443', service: 'HTTPS' }],
+    _segmentationPlan: { source: 'network', destination: 'network', services: 'grouped' },
+    action: 'accept',
+    log: 'all',
+    analysis: {
+      srcAddr: { found: false, name: 'SRC' },
+      dstAddr: { found: false, name: 'DST' },
+      srcIface: 'lan',
+      dstIface: 'servers',
+      services: [{ label: 'HTTPS', name: 'HTTPS', found: true }],
+    },
+  };
+  const result = preflightValidation([policy], config, [aggregate()]);
+  assert.equal(result.ok, true);
+  assert.equal(result.certification.level, 'generalized');
+  assert.ok(result.issues.some(issue => issue.code === 'GENERALIZED_SCOPE'));
+});
+
+test('les collisions d’objets générés sont refusées au lieu de produire une CLI incohérente', () => {
+  const first = wanPolicy({
+    srcAddrName: 'SRC-A',
+    dstTarget: '8.8.8.8',
+  });
+  const second = wanPolicy({
+    srcAddrName: 'SRC-B',
+    dstTarget: '1.1.1.1',
+  });
+  assert.throws(
+    () => generateConfig([first, second]),
+    /Collision d'adresses/,
+  );
+
+  const badCidr = wanPolicy({
+    srcSubnet: '999.0.0.0/24',
+    analysis: {
+      srcAddr: { found: false, cidr: '999.0.0.0/24' },
+      dstAddr: { found: false, cidr: '8.8.8.8/32' },
+      services: [{ label: 'HTTPS', found: true, name: 'HTTPS' }],
+    },
+  });
+  assert.throws(() => generateConfig([badCidr]), /IPv4 invalide/);
+});
+
+test('un objet plage plus large ne remplace jamais un hôte /32 exact', () => {
+  const config = parseFortiConfig(`
+config firewall address
+    edit "SERVER-RANGE"
+        set type iprange
+        set start-ip 10.0.1.10
+        set end-ip 10.0.1.99
+    next
+    edit "ONE-HOST-RANGE"
+        set type iprange
+        set start-ip 10.0.2.10
+        set end-ip 10.0.2.10
+    next
+end
+`);
+  const broad = findAddress('10.0.1.20/32', config.addresses);
+  assert.equal(broad.found, false);
+  assert.deepEqual(broad.broaderMatches.map(match => match.name), ['SERVER-RANGE']);
+  assert.equal(findAddress('10.0.2.10/32', config.addresses).found, true);
+});
+
+test('le preflight interdit srcaddr all et les services globaux sur une règle accept', () => {
+  const config = {
+    addresses: {}, addressGroups: {},
+    interfaces: { lan: {}, servers: {} },
+    zones: {},
+  };
+  const policy = {
+    srcintf: 'lan',
+    dstintf: 'servers',
+    action: 'accept',
+    analysis: {
+      srcAddr: { found: true, name: 'all' },
+      dstAddr: { found: true, name: 'DST' },
+      services: [{ found: true, name: 'ALL', label: 'ALL' }],
+    },
+  };
+  const result = preflightValidation([policy], config);
+  assert.equal(result.ok, false);
+  assert.ok(result.issues.some(issue => /srcaddr=all/.test(issue.msg)));
+  assert.ok(result.issues.some(issue => /service global interdit/.test(issue.msg)));
 });
 
 test('le preflight bloque les services techniques plus larges que le plan', () => {
@@ -551,28 +785,29 @@ test('la chaîne plan → ré-analyse → CLI conserve une règle par service', 
   const serviceLines = cli.split('\n').filter(line => line.trim().startsWith('set service '));
   assert.equal(serviceLines.length, 2);
   assert.ok(serviceLines.every(line => !line.includes('" "')));
-  assert.ok(serviceLines.some(line => line.includes('"HTTPS"')));
-  assert.ok(serviceLines.some(line => line.includes('"DNS"')));
+  assert.ok(serviceLines.every(line => /"FF_SVC_/.test(line)));
+  assert.match(cli, /set tcp-portrange 443/);
+  assert.match(cli, /set udp-portrange 53/);
 });
 
 
-test('les flux exclus restent signalés sans élargir ni bloquer une policy prouvée', () => {
+test('les données non interprétables bloquent le CLI tandis que les échecs connus restent informatifs', () => {
   const sessionData = {
     meta: { skipReasons: { ipv6: 3 } },
     stats: { unknownSessions: 7, failedSessions: 11 },
   };
-  assert.deepEqual(getCaptureDeploymentBlockers(sessionData), {
-    unsupportedIpv6: 3,
-    unknownActionSessions: 7,
-    failedConnectionSessions: 11,
-    hasExcludedTraffic: true,
-    blocked: false,
+  const unsafe = getCaptureDeploymentBlockers(sessionData);
+  assert.equal(unsafe.blocked, true);
+  assert.deepEqual(unsafe.blockedReasons, ['ipv6_unsupported', 'unknown_actions']);
+  assert.equal(unsafe.failedConnectionSessions, 11);
+
+  const failedOnly = getCaptureDeploymentBlockers({
+    stats: { failedSessions: 11 },
   });
-  assert.deepEqual(getCaptureDeploymentBlockers({}), {
-    unsupportedIpv6: 0,
-    unknownActionSessions: 0,
-    failedConnectionSessions: 0,
-    hasExcludedTraffic: false,
-    blocked: false,
-  });
+  assert.equal(failedOnly.hasExcludedTraffic, true);
+  assert.equal(failedOnly.blocked, false);
+
+  const clean = getCaptureDeploymentBlockers({});
+  assert.equal(clean.hasExcludedTraffic, false);
+  assert.equal(clean.blocked, false);
 });

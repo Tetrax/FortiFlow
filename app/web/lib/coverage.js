@@ -13,6 +13,7 @@
 // trou de segmentation → interdit.
 
 const { ip2int, int2ip, networkAddress, findPredefinedService, PREDEFINED } = require('./forticonfig');
+const { flowDecision } = require('./analyzer');
 
 // name → [{port, proto}]  (réciproque de PREDEFINED, indexé par port)
 const PREDEF_BY_NAME = (() => {
@@ -129,6 +130,8 @@ function resolveExistingPolicies(fortiConfig) {
         src, dst, svc,
         srcintf:  expandIntf(p.srcintf),
         dstintf:  expandIntf(p.dstintf),
+        unsupported: (p.unsupportedCoverageFeatures || []).length > 0,
+        unsupportedCoverageFeatures: p.unsupportedCoverageFeatures || [],
         // règle « large/permissive » : autorise tout en service, ou source/dest = all
         broad:    svc.allAll || src.hasAll || dst.hasAll,
       };
@@ -187,6 +190,13 @@ function classifyFlow(flow, resolved) {
     if (di === 'no') continue;
     const c = combine([s, d, v, si, di]);
     if (c === 'yes') {
+      if (rp.unsupported) {
+        return {
+          verdict: 'uncertain',
+          policyid: rp.policyid,
+          unsupportedCoverageFeatures: rp.unsupportedCoverageFeatures,
+        };
+      }
       return rp.action === 'accept'
         ? { verdict: 'allowed', policyid: rp.policyid, name: rp.name, broad: rp.broad }
         : { verdict: 'blocked', policyid: rp.policyid, name: rp.name };
@@ -218,7 +228,7 @@ function buildHostPairCoverage(flows, fortiConfig) {
   const out = {};
   if (!resolved.length) return { hostPairCoverage: out, hasConfig: false };
   for (const f of (flows || [])) {
-    if (f.action !== 'accept') continue;
+    if (flowDecision(f) !== 'allow') continue;
     if (!f.srcip || !f.dstip) continue;
     const key = f.srcip + '|' + f.dstip;
     let e = out[key];

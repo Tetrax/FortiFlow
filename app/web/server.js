@@ -531,7 +531,7 @@ app.get('/api/raw-policies', (req, res) => {
     return res.status(410).json({ error: 'Flows libérés après chargement de la config FortiGate — vue brute non disponible' });
   }
 
-  let flows = s.data.flows.filter(f => f.action === 'accept');
+  let flows = s.data.flows.filter(f => flowDecision(f) === 'allow' && f.deploymentEligible !== false);
   if (req.query.dst_type) {
     flows = flows.filter(f => f.dstType === req.query.dst_type);
   }
@@ -1382,7 +1382,7 @@ app.get('/api/denied-flows', (req, res) => {
   if (!s) return;
 
   if (!s.data?.flows) return res.status(410).json({ error: 'Flows libérés après chargement de la config FortiGate' });
-  const denyFlows = s.data.flows.filter(f => f.action === 'deny' || f.action === 'drop');
+  const denyFlows = s.data.flows.filter(f => flowDecision(f) === 'deny');
   // Group by srcSubnet|dstSubnet
   const groups = new Map();
   for (const f of denyFlows) {
@@ -1613,7 +1613,17 @@ app.post('/api/deploy/preflight', (req, res) => {
 
   try {
     const result = preflightValidation(selectedPolicies, s.fortiConfig, s.data?.flows || []);
-    res.json(result);
+    const deploymentBlockers = getCaptureDeploymentBlockers(s.data, s.fortiConfig);
+    if (deploymentBlockers.blocked) {
+      result.issues.unshift({
+        level: 'error',
+        code: 'CAPTURE_NOT_CERTIFIABLE',
+        msg: `Capture non certifiable : ${deploymentBlockers.blockedReasons.join(', ')}`,
+      });
+      result.errors += 1;
+      result.ok = false;
+    }
+    res.json({ ...result, deploymentBlockers });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1640,7 +1650,15 @@ app.post('/api/deploy/generate', (req, res) => {
 
   try {
     const o = opts || {};
-    const deploymentBlockers = getCaptureDeploymentBlockers(s.data);
+    const deploymentBlockers = getCaptureDeploymentBlockers(s.data, s.fortiConfig);
+    let finalPreflight = null;
+
+    if (!o.analysisOnly && deploymentBlockers.blocked) {
+      return res.status(422).json({
+        error: 'Génération refusée : la capture contient des données non certifiables',
+        deploymentBlockers,
+      });
+    }
 
     // Apply user WAN toggles — build a patched config without mutating the session
     let configToUse = s.fortiConfig;
@@ -1735,11 +1753,11 @@ app.post('/api/deploy/generate', (req, res) => {
     // La route de génération applique toujours le preflight côté serveur pour
     // une CLI finale. Le mode analysisOnly ne produit aucune configuration.
     if (!o.analysisOnly) {
-      const preflight = preflightValidation(analyzed, configToUse, s.data?.flows || []);
-      if (!preflight.ok) {
+      finalPreflight = preflightValidation(analyzed, configToUse, s.data?.flows || []);
+      if (!finalPreflight.ok) {
         return res.status(422).json({
           error: 'Génération refusée par le contrôle preflight',
-          preflight,
+          preflight: finalPreflight,
         });
       }
     }
@@ -1756,7 +1774,18 @@ app.post('/api/deploy/generate', (req, res) => {
       namingPrefix:      o.namingPrefix || 'FF',   // #5: préfixe de nommage configurable
       target:            o.target === 'fmg-script' ? 'fmg-script' : 'fortigate',  // #9
     };
-    const cli = o.analysisOnly ? '' : generateConfig(analyzed, genOpts);
+    let cli = o.analysisOnly ? '' : generateConfig(analyzed, genOpts);
+    if (!o.analysisOnly && finalPreflight?.certification) {
+      const cert = finalPreflight.certification;
+      const label = cert.level === 'exact'
+        ? 'EXACT — tuples hôte/hôte/service prouvés'
+        : 'GENERALISE — périmètre réseau ou services regroupés choisi';
+      cli = [
+        `# FortiFlow certification: ${label}`,
+        `# Exactes: ${cert.exactPolicies} | Généralisées: ${cert.generalizedPolicies} | Non classées: ${cert.unclassifiedPolicies}`,
+        cli,
+      ].join('\n');
+    }
 
     // Validation against existing policies
     const warnings = validateAgainstExisting(analyzed, s.fortiConfig.existingPolicies || []);
@@ -1803,6 +1832,7 @@ app.post('/api/deploy/generate', (req, res) => {
       }
       for (const f of s.data.flows) {
         if (flowDecision(f) !== 'allow') continue;
+        if (f.deploymentEligible === false) continue;
         if (!f.srcip || !f.dstip) continue;
         const dstOk = relevantDsts.has(f.dstip) || relevantPublicDsts.has(f.dstip);
         if (!relevantSrcs.has(f.srcip) || !dstOk) continue;
@@ -1828,7 +1858,7 @@ app.post('/api/deploy/generate', (req, res) => {
       const existingPoliciesCli = formatExistingPolicies(s.fortiConfig?.existingPolicies || []);
       // #3: couverture conservatrice du trafic vs policies existantes (par paire src→dst)
       const { hostPairCoverage, hasConfig } = buildHostPairCoverage(s.data?.flows || [], s.fortiConfig || {});
-      res.json({ cli, analyzed, addrGroups: s.fortiConfig.addressGroups || {}, warnings, resolvedHosts, existingPoliciesCli, hostPairServices, hostPairCoverage, coverageAvailable: hasConfig, deploymentBlockers });
+      res.json({ cli, analyzed, addrGroups: s.fortiConfig.addressGroups || {}, warnings, resolvedHosts, existingPoliciesCli, hostPairServices, hostPairCoverage, coverageAvailable: hasConfig, deploymentBlockers, preflight: finalPreflight, certification: finalPreflight?.certification || null });
     }
   } catch (err) {
     res.status(500).json({ error: err.message });

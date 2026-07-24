@@ -103,6 +103,15 @@ const HEADER_MAP = {
   sessionid: 'sessionid', session_id: 'sessionid', 'session id': 'sessionid',
   duration: 'duration', sentpkt: 'sentpkt', sent_pkts: 'sentpkt', 'packets sent': 'sentpkt',
   rcvdpkt: 'rcvdpkt', rcvd_pkts: 'rcvdpkt', 'packets received': 'rcvdpkt',
+
+  // Contexte de preuve : évite de transformer un trafic local, NATé ou non
+  // qualifié en règle firewall forward.
+  subtype: 'subtype', sub_type: 'subtype', 'log subtype': 'subtype',
+  policytype: 'policytype', policy_type: 'policytype', 'policy type': 'policytype',
+  trandisp: 'trandisp', translation: 'trandisp', 'translation disposition': 'trandisp',
+  transip: 'transip', translated_ip: 'transip', 'translated ip': 'transip',
+  transport: 'transport', translated_port: 'transport', 'translated port': 'transport',
+  msg: 'msg', message: 'msg',
 };
 
 // Services UDP par défaut (quand le champ proto est absent)
@@ -283,15 +292,18 @@ function flowDay(fields, ts) {
 function extractFlow(fields) {
   const service = (fields.service || '').toUpperCase().trim();
   let proto = (fields.proto || '').trim();
+  let protoSource = proto ? 'explicit' : 'missing';
 
   // Normaliser les chaînes protocole → chiffres
   if (/^tcp$/i.test(proto))  proto = '6';
   if (/^udp$/i.test(proto))  proto = '17';
   if (/^icmp$/i.test(proto)) proto = '1';
 
-  // Proto absent : déduire depuis le service
+  // Compatibilité d'analyse : un protocole absent peut être estimé pour
+  // l'affichage, mais cette estimation n'est jamais une preuve de déploiement.
   if (!proto && service) {
     proto = UDP_SERVICES.has(service) ? '17' : '6';
+    protoSource = 'inferred-service';
   }
 
   const srcip = (fields.srcip || '').trim();
@@ -302,14 +314,46 @@ function extractFlow(fields) {
   const day      = flowDay(fields, ts);
   const action   = (fields.action || '').toLowerCase().trim();
   const decision = normalizeDecision(action, { ...fields, proto, service });
+  const subtype  = String(fields.subtype || '').toLowerCase().trim();
+  const policytype = String(fields.policytype || '').toLowerCase().trim();
+  const trandisp = String(fields.trandisp || '').toLowerCase().trim();
+  const dstport = String(fields.dstport || '').trim();
+  const evidenceIssues = [];
+
+  if (decision === 'allow') {
+    if (protoSource !== 'explicit') evidenceIssues.push('protocol_inferred');
+
+    const protoNumber = parseInt(proto, 10);
+    if (![1, 6, 17].includes(protoNumber)) {
+      evidenceIssues.push('unsupported_protocol');
+    } else if ((protoNumber === 6 || protoNumber === 17)
+      && (!/^\d+$/.test(dstport) || Number(dstport) < 1 || Number(dstport) > 65535)) {
+      evidenceIssues.push('invalid_destination_port');
+    }
+
+    if ((subtype && subtype !== 'forward') || /local/.test(policytype)) {
+      evidenceIssues.push('non_forward_traffic');
+    }
+
+    const hasForwardProof = subtype === 'forward'
+      || (String(fields.srcintf || '').trim()
+        && String(fields.dstintf || '').trim()
+        && String(fields.policyid || '').trim());
+    if (!hasForwardProof) evidenceIssues.push('forward_context_missing');
+
+    if (trandisp && !['noop', 'none', '0'].includes(trandisp)) {
+      evidenceIssues.push('nat_translation');
+    }
+  }
 
   return {
     srcip:    isValidIPv4(srcip) ? srcip : '',
     dstip:    isValidIPv4(dstip) ? dstip : '',
     unsupportedReason,
     srcport:  fields.srcport  || '',
-    dstport:  fields.dstport  || '',
+    dstport,
     proto,
+    protoSource,
     action,
     decision,
     service,
@@ -321,6 +365,13 @@ function extractFlow(fields) {
     devid:      (fields.devid || '').trim(),
     vdom:       (fields.vd || '').trim(),
     sessionid:  (fields.sessionid || '').trim(),
+    subtype,
+    policytype,
+    trandisp,
+    transip:    String(fields.transip || '').trim(),
+    transport:  String(fields.transport || '').trim(),
+    evidenceIssues,
+    deploymentEligible: evidenceIssues.length === 0,
     date:     fields.date     || '',
     time:     fields.time     || '',
     ts,                       // epoch ms ou null (#1)
@@ -339,7 +390,7 @@ function aggregateFlow(flowMap, flow) {
   if (!flow.srcip || !flow.dstip) return false;
   // Le scope équipement/VDOM fait partie de l'identité du flux : deux VDOM peuvent
   // légitimement utiliser les mêmes réseaux RFC1918 sans représenter le même contexte.
-  const key = `${flow.devid || flow.devname}|${flow.vdom}|${flow.srcip}|${flow.dstip}|${flow.dstport}|${flow.proto}|${flow.action}|${flow.service}|${flow.srcintf}|${flow.dstintf}|${flow.policyid}`;
+  const key = `${flow.devid || flow.devname}|${flow.vdom}|${flow.srcip}|${flow.dstip}|${flow.dstport}|${flow.proto}|${flow.action}|${flow.service}|${flow.srcintf}|${flow.dstintf}|${flow.policyid}|${flow.subtype}|${flow.policytype}|${flow.trandisp}|${flow.evidenceIssues.join(',')}`;
   if (!flowMap.has(key)) {
     flowMap.set(key, {
       srcip: flow.srcip, dstip: flow.dstip,
@@ -347,6 +398,11 @@ function aggregateFlow(flowMap, flow) {
       proto: flow.proto, action: flow.action, decision: flow.decision, service: flow.service,
       srcintf: flow.srcintf, dstintf: flow.dstintf, policyid: flow.policyid, policyname: flow.policyname,
       devname: flow.devname, devid: flow.devid, vdom: flow.vdom,
+      protoSource: flow.protoSource,
+      subtype: flow.subtype, policytype: flow.policytype, trandisp: flow.trandisp,
+      transip: flow.transip, transport: flow.transport,
+      evidenceIssues: flow.evidenceIssues,
+      deploymentEligible: flow.deploymentEligible,
       count: 0, sentBytes: 0, rcvdBytes: 0, sentPackets: 0, rcvdPackets: 0, duration: 0,
       firstTs: null, lastTs: null, days: [],   // #1: stats temporelles (days = tableau, JSON-safe)
     });
@@ -373,7 +429,7 @@ async function parseStream(inputStream, onProgress) {
   const flowMap = new Map();
   let lineCount = 0;
   let skipped   = 0;
-  const skipReasons = { nonTraffic: 0, invalidFlow: 0, ipv6: 0 };
+  const skipReasons = { nonTraffic: 0, invalidFlow: 0, ipv6: 0, archiveEntryError: 0 };
   let format    = null;
   let sep       = null;
   let csvHeaders = null;
@@ -455,7 +511,7 @@ async function parseXLSX(filePath, onProgress) {
   const flowMap = new Map();
   let lineCount = 0;
   let skipped   = 0;
-  const skipReasons = { nonTraffic: 0, invalidFlow: 0, ipv6: 0 };
+  const skipReasons = { nonTraffic: 0, invalidFlow: 0, ipv6: 0, archiveEntryError: 0 };
   const startTs = Date.now();
 
   for (let r = 1; r < rows.length; r++) {
@@ -533,7 +589,7 @@ async function parseFile(filePath, onProgress) {
     const mergedFlowMap = new Map();
     let totalLines = 0;
     let totalSkipped = 0;
-    const totalSkipReasons = { nonTraffic: 0, invalidFlow: 0, ipv6: 0 };
+    const totalSkipReasons = { nonTraffic: 0, invalidFlow: 0, ipv6: 0, archiveEntryError: 0 };
 
     for (const entry of entries) {
       try {
@@ -546,6 +602,7 @@ async function parseFile(filePath, onProgress) {
           totalSkipReasons.nonTraffic  += skipReasons.nonTraffic  || 0;
           totalSkipReasons.invalidFlow += skipReasons.invalidFlow || 0;
           totalSkipReasons.ipv6        += skipReasons.ipv6        || 0;
+          totalSkipReasons.archiveEntryError += skipReasons.archiveEntryError || 0;
         }
         // Merge into combined flowMap
         for (const [key, flow] of flowMap) {
@@ -567,8 +624,10 @@ async function parseFile(filePath, onProgress) {
           }
         }
       } catch (err) {
-        // Skip corrupted/unreadable entries, continue with remaining files
+        // Continuer permet d'afficher les autres entrées, mais l'analyse restera
+        // non certifiable : une archive partielle ne doit jamais générer du CLI.
         totalSkipped++;
+        totalSkipReasons.archiveEntryError++;
       }
     }
 

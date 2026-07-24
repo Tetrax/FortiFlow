@@ -7773,13 +7773,23 @@ function _granularityBar() {
   const unknownCount = Number(blockers.unknownActionSessions || 0);
   const failedCount = Number(blockers.failedConnectionSessions || 0);
   const ipv6Count = Number(blockers.unsupportedIpv6 || 0);
-  const blockerTotal = unknownCount + failedCount + ipv6Count;
+  const invalidCount = Number(blockers.invalidFlowRecords || 0);
+  const archiveErrors = Number(blockers.archiveEntryErrors || 0);
+  const nonDeployableCount = Number(blockers.nonDeployableSessions || 0);
+  const blockerTotal = unknownCount + failedCount + ipv6Count + invalidCount + archiveErrors + nonDeployableCount;
   const excludedDetails = [
     failedCount > 0 ? `${fmtNum(failedCount)} tentative${failedCount > 1 ? 's' : ''} de connexion échouée${failedCount > 1 ? 's' : ''}` : '',
     unknownCount > 0 ? `${fmtNum(unknownCount)} session${unknownCount > 1 ? 's' : ''} avec action réellement inconnue` : '',
     ipv6Count > 0 ? `${fmtNum(ipv6Count)} flux IPv6 non pris en charge` : '',
+    invalidCount > 0 ? `${fmtNum(invalidCount)} ligne${invalidCount > 1 ? 's' : ''} de trafic invalide${invalidCount > 1 ? 's' : ''}` : '',
+    archiveErrors > 0 ? `${fmtNum(archiveErrors)} entrée${archiveErrors > 1 ? 's' : ''} d’archive illisible${archiveErrors > 1 ? 's' : ''}` : '',
+    nonDeployableCount > 0 ? `${fmtNum(nonDeployableCount)} session${nonDeployableCount > 1 ? 's' : ''} sans preuve de chemin/protocole exploitable` : '',
+    blockers.multipleScopes ? `${fmtNum(blockers.scopeCount || 0)} contextes équipement/VDOM mélangés` : '',
+    blockers.vdomEvidenceMissing ? 'VDOM de la configuration absent des logs' : '',
   ].filter(Boolean).join(' · ');
-  const safetyTitle = unknownCount > 0
+  const safetyTitle = blockers.blocked
+    ? 'Capture non certifiable pour le déploiement'
+    : unknownCount > 0
     ? 'Trafic non classifié exclu des règles'
     : failedCount > 0
       ? 'Tentatives échouées écartées des règles'
@@ -7787,8 +7797,10 @@ function _granularityBar() {
   const safetyNotice = blockers.hasExcludedTraffic ? `
     <div class="seg-safety-warning" role="status">
       <strong>${safetyTitle}</strong>
-      <span>${fmtNum(blockerTotal)} événement${blockerTotal > 1 ? 's' : ''} non retenu${blockerTotal > 1 ? 's' : ''} : ${excludedDetails}.
-        Ces événements restent visibles dans l’analyse, mais seuls les flux explicitement acceptés peuvent produire des règles.
+      <span>${blockerTotal > 0 ? `${fmtNum(blockerTotal)} événement${blockerTotal > 1 ? 's' : ''} non retenu${blockerTotal > 1 ? 's' : ''} : ` : ''}${excludedDetails}.
+        ${blockers.blocked
+          ? 'Le CLI final est bloqué tant que le périmètre ou les données sources ne permettent pas une preuve fiable.'
+          : 'Ces événements restent visibles dans l’analyse, mais seuls les flux explicitement acceptés peuvent produire des règles.'}
       </span>
     </div>` : '';
   const optionGroup = (dimension, options) => `
@@ -8121,6 +8133,11 @@ function syncNoRcvdInfoBtn() {
 
 async function generateDeployConf() {
   if (!deployState.analyzed) return;
+  if (deployState.deploymentBlockers?.blocked) {
+    const reasons = (deployState.deploymentBlockers.blockedReasons || []).join(', ');
+    alert(`Génération refusée : la capture n’est pas certifiable.\n${reasons || 'Des données sources restent ambiguës ou incomplètes.'}`);
+    return;
+  }
 
   // Vérification services non qualifiés dans la sélection
   const _selectedForCheck = deployState.analyzed.filter((_, i) => deployState.selected.has(i));

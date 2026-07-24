@@ -113,7 +113,11 @@ function maskToPrefix(mask) {
 }
 
 function ip2int(ip) {
-  return ip.split('.').reduce((a, o) => (a * 256) + parseInt(o, 10), 0) >>> 0;
+  const parts = String(ip || '').split('.');
+  if (parts.length !== 4 || parts.some(part => !/^\d{1,3}$/.test(part) || Number(part) > 255)) {
+    throw new Error(`Adresse IPv4 invalide : ${ip}`);
+  }
+  return parts.reduce((a, o) => (a * 256) + Number(o), 0) >>> 0;
 }
 
 function int2ip(n) {
@@ -448,6 +452,17 @@ function parseFortiConfig(text, selectedVdom = null) {
                                  || (val || '').split(/\s+/).filter(Boolean).map(v => v.replace(/^"|"$/g, ''));
   for (const editId of (rawPolicies.__order || Object.keys(rawPolicies))) {
     const props = rawPolicies[editId];
+    const unsupportedCoverageFeatures = [];
+    if (props.schedule && props.schedule.replace(/^"|"$/g, '').toLowerCase() !== 'always') {
+      unsupportedCoverageFeatures.push('schedule');
+    }
+    for (const feature of [
+      'srcaddr-negate', 'dstaddr-negate', 'service-negate',
+      'internet-service', 'internet-service-src', 'identity-based',
+    ]) {
+      if (String(props[feature] || '').toLowerCase() === 'enable') unsupportedCoverageFeatures.push(feature);
+    }
+    if (props.groups || props.users) unsupportedCoverageFeatures.push('identity');
     existingPolicies.push({
       policyid:  parseInt(editId, 10) || editId,
       name:      (props.name || '').replace(/^"|"$/g, ''),
@@ -460,6 +475,7 @@ function parseFortiConfig(text, selectedVdom = null) {
       nat:       props.nat === 'enable',
       status:    (props.status || 'enable').replace(/^"|"$/g, ''),
       comments:  (props.comments || '').replace(/^"|"$/g, ''),
+      unsupportedCoverageFeatures,
     });
   }
 
@@ -824,7 +840,7 @@ function detectWanCandidates(interfaces, zones, sdwanMembers) {
 function findAddress(cidr, addresses) {
   if (!cidr) return { found: false };
   const matches = [];
-  const rangeMatches = [];
+  const broaderMatches = [];
   for (const [name, addr] of Object.entries(addresses)) {
     // Exact CIDR match (highest priority)
     if (addr.cidr === cidr) { matches.push({ name, cidr: addr.cidr, source: 'config' }); continue; }
@@ -836,16 +852,19 @@ function findAddress(cidr, addresses) {
         try {
           const targetInt = ip2int(ip);
           if (targetInt >= addr.startInt && targetInt <= addr.endInt) {
-            rangeMatches.push({ name, cidr: addr.cidr, source: 'config-range' });
+            if (addr.startInt === targetInt && addr.endInt === targetInt) {
+              matches.push({ name, cidr: `${ip}/32`, source: 'config-range-exact' });
+            } else {
+              broaderMatches.push({ name, cidr: addr.cidr, source: 'config-range-broader' });
+            }
           }
         } catch {}
       }
     }
   }
   // Exact matches take priority over range matches
-  const allMatches = matches.length > 0 ? matches : rangeMatches;
-  if (allMatches.length === 0) return { found: false };
-  return { found: true, name: allMatches[0].name, source: allMatches[0].source, allMatches };
+  if (matches.length === 0) return { found: false, broaderMatches };
+  return { found: true, name: matches[0].name, source: matches[0].source, allMatches: matches, broaderMatches };
 }
 
 // Recursive group expansion with cycle detection
@@ -937,13 +956,11 @@ function findIcmpService(label, customServices) {
     if (svc.proto !== 'ICMP' && svc.proto !== 'ICMP6') continue;
     if (svc.icmptype === null) continue; // ALL_ICMP — skip for specific match
     if (svc.icmptype !== type) continue;
-    if (svc.icmpcode !== null && svc.icmpcode !== code) continue;
+    if (svc.icmpcode === null || svc.icmpcode !== code) continue;
     return { name, source: 'custom', portHint: `ICMP type ${type} code ${code}` };
   }
-  // No specific match → try ALL_ICMP fallback
-  for (const [name, svc] of Object.entries(customServices)) {
-    if (svc.proto === 'ICMP' && svc.icmptype === null) return { name, source: 'custom', portHint: `ICMP type ${type} code ${code}` };
-  }
+  // Ne jamais rabattre un type/code précis vers ALL_ICMP : cela élargirait
+  // silencieusement le périmètre du service.
   return null;
 }
 
@@ -1033,6 +1050,72 @@ function findService(port, protoName, customServices, opts) {
   // Prefer most specific match (fewest ports)
   matches.sort((a, b) => a.portCount - b.portCount);
   return { found: true, name: matches[0].name, source: matches[0].source, allMatches: matches };
+}
+
+function transportProtoName(proto) {
+  if (/^(6|tcp)$/i.test(String(proto || ''))) return 'TCP';
+  if (/^(17|udp)$/i.test(String(proto || ''))) return 'UDP';
+  return '';
+}
+
+function transportTupleSet(tuples) {
+  const result = new Set();
+  for (const tuple of (tuples || [])) {
+    const proto = transportProtoName(tuple?.proto);
+    const port = Number(tuple?.port ?? tuple?.dstport);
+    if (!proto || !Number.isInteger(port) || port < 1 || port > 65535) continue;
+    result.add(`${proto}/${port}`);
+  }
+  return result;
+}
+
+function configuredServiceTupleSet(name, source, customServices) {
+  const result = new Set();
+  if (!name) return result;
+  if (source === 'predefined') {
+    for (const [port, entry] of Object.entries(PREDEFINED)) {
+      if (entry.name !== name) continue;
+      if (entry.proto === 'tcp' || entry.proto === 'both') result.add(`TCP/${Number(port)}`);
+      if (entry.proto === 'udp' || entry.proto === 'both') result.add(`UDP/${Number(port)}`);
+    }
+    return result;
+  }
+  const svc = customServices[name];
+  if (!svc) return result;
+  for (const port of (svc.tcpPorts || [])) result.add(`TCP/${Number(port)}`);
+  for (const port of (svc.udpPorts || [])) result.add(`UDP/${Number(port)}`);
+  return result;
+}
+
+function setsEqual(a, b) {
+  return a.size === b.size && [...a].every(value => b.has(value));
+}
+
+function exactServiceDefinition(label, tuples) {
+  const observed = transportTupleSet(tuples);
+  if (!tuples?.length || observed.size !== tuples.length) return null;
+  const tcpPorts = [];
+  const udpPorts = [];
+  for (const item of observed) {
+    const [proto, portText] = item.split('/');
+    const port = Number(portText);
+    (proto === 'UDP' ? udpPorts : tcpPorts).push(port);
+  }
+  tcpPorts.sort((a, b) => a - b);
+  udpPorts.sort((a, b) => a - b);
+
+  const signature = [...observed].sort().join('|');
+  let hash = 2166136261;
+  for (let i = 0; i < signature.length; i++) {
+    hash ^= signature.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  const safeLabel = String(label || 'SERVICE').toUpperCase().replace(/[^A-Z0-9_-]+/g, '_').slice(0, 40) || 'SERVICE';
+  return {
+    tcpPorts,
+    udpPorts,
+    suggestedName: `FF_SVC_${safeLabel}_${(hash >>> 0).toString(16).toUpperCase().padStart(8, '0')}`,
+  };
 }
 
 // ─── Policy analysis ──────────────────────────────────────────────────────────
@@ -1152,19 +1235,39 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
           portHint = `${observedProtoLabel}: ${observedPorts[0]} (observé)`;
         }
 
-        const found = knownPredef || !!customMatch || !!icmpMatch || !!fuzzyMatch || !!portFallback;
         const resolvedName = icmpMatch ? icmpMatch.name
           : fuzzyMatch ? fuzzyMatch.name
           : portFallback ? portFallback.name
           : (knownPredef || customMatch ? svc : null);
+        const resolvedSource = icmpMatch ? icmpMatch.source
+          : fuzzyMatch ? fuzzyMatch.source
+          : portFallback ? portFallback.source
+          : (knownPredef ? 'predefined' : customMatch ? 'custom' : null);
+        const candidateFound = knownPredef || !!customMatch || !!icmpMatch || !!fuzzyMatch || !!portFallback;
+        const observedTransport = transportTupleSet(relevantTuples);
+        const configuredTransport = configuredServiceTupleSet(resolvedName, resolvedSource, customServices);
+        // Réutiliser un objet uniquement si son périmètre protocole/port est
+        // exactement égal aux tuples observés. Un simple sous-ensemble ouvrirait
+        // silencieusement des ports supplémentaires.
+        const exactExisting = !!icmpMatch || (
+          candidateFound
+          && relevantTuples.length > 0
+          && observedTransport.size === relevantTuples.length
+          && setsEqual(observedTransport, configuredTransport)
+        );
+        const exactDefinition = exactExisting ? null : exactServiceDefinition(svc, relevantTuples);
         serviceItems.push({
           label: svc,
-          found,
-          name:  resolvedName,
-          source: icmpMatch ? icmpMatch.source : fuzzyMatch ? fuzzyMatch.source : portFallback ? portFallback.source : (knownPredef ? 'predefined' : customMatch ? 'custom' : null),
-          suggestedName: resolvedName || svc,
+          found: exactExisting,
+          name:  exactExisting ? resolvedName : null,
+          source: exactExisting ? resolvedSource : (exactDefinition ? 'generated-exact' : null),
+          suggestedName: exactExisting ? resolvedName : (exactDefinition?.suggestedName || svc),
           isNamed: true,
           portHint,
+          exact: exactExisting || !!exactDefinition,
+          constructible: exactExisting || !!exactDefinition,
+          tcpPorts: exactDefinition?.tcpPorts || undefined,
+          udpPorts: exactDefinition?.udpPorts || undefined,
         });
       }
     }
@@ -1186,15 +1289,24 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
       const uniquePairs = [...new Map(rawPairs.map(pair => [`${pair.proto}|${pair.port}`, pair])).values()];
       for (const { port, proto } of uniquePairs) {
         const match = findService(port, proto, customServices);
+        const label = `${port}/${proto}`;
+        const exactDefinition = exactServiceDefinition(label, [{ port, proto }]);
+        const candidateSet = configuredServiceTupleSet(match.name, match.source, customServices);
+        const observedSet = transportTupleSet([{ port, proto }]);
+        const exactExisting = match.found && setsEqual(candidateSet, observedSet);
         serviceItems.push({
-          label: `${port}/${proto}`,
+          label,
           port,
           proto,
           portHint: `${proto}: ${port}`,
-          found: match.found,
-          name:  match.found ? match.name : null,
-          source: match.source || null,
-          suggestedName: `FF_SVC_${port}_${proto}`,
+          found: exactExisting,
+          name:  exactExisting ? match.name : null,
+          source: exactExisting ? match.source : 'generated-exact',
+          suggestedName: exactExisting ? match.name : (exactDefinition?.suggestedName || `FF_SVC_${port}_${proto}`),
+          exact: true,
+          constructible: !!exactDefinition || exactExisting,
+          tcpPorts: exactExisting ? undefined : exactDefinition?.tcpPorts,
+          udpPorts: exactExisting ? undefined : exactDefinition?.udpPorts,
         });
       }
     }
@@ -1408,12 +1520,54 @@ function generateConfig(selectedPolicies, opts = {}) {
   }
 
   const newAddresses  = new Map();  // cidr → name
+  const newAddressNames = new Map(); // name → cidr (détection de collision)
   const newAddrGroups = new Map();  // grpName → [memberNames]
   const newServices   = new Map();  // "port/proto" → {name, port, proto}
   const policyBlocks  = [];
 
+  const registerGeneratedAddress = (cidr, name) => {
+    const match = String(cidr || '').match(/^(\d{1,3}(?:\.\d{1,3}){3})\/(\d{1,2})$/);
+    if (!match) throw new Error(`CIDR généré invalide : "${cidr || ''}"`);
+    const prefix = Number(match[2]);
+    if (prefix < 0 || prefix > 32) throw new Error(`Préfixe CIDR invalide : "${cidr}"`);
+    const normalized = `${networkAddress(match[1], prefix)}/${prefix}`;
+    const objectName = String(name || '').trim();
+    if (!objectName) throw new Error(`Objet adresse sans nom pour ${normalized}`);
+
+    const existingName = newAddresses.get(normalized);
+    if (existingName && existingName !== objectName) {
+      throw new Error(`Collision d'adresses : ${normalized} demandé sous "${existingName}" et "${objectName}"`);
+    }
+    const existingCidr = newAddressNames.get(objectName);
+    if (existingCidr && existingCidr !== normalized) {
+      throw new Error(`Collision de nom d'adresse : "${objectName}" désigne ${existingCidr} et ${normalized}`);
+    }
+    newAddresses.set(normalized, objectName);
+    newAddressNames.set(objectName, normalized);
+  };
+
+  const registerGeneratedService = (name, definition) => {
+    const objectName = String(name || '').trim();
+    if (!objectName) throw new Error('Objet service sans nom');
+    const normalized = {
+      ...definition,
+      name: objectName,
+      tcpPorts: [...new Set((definition.tcpPorts || []).map(Number))].sort((a, b) => a - b),
+      udpPorts: [...new Set((definition.udpPorts || []).map(Number))].sort((a, b) => a - b),
+    };
+    const signature = JSON.stringify(normalized);
+    const existing = newServices.get(objectName);
+    if (existing && JSON.stringify(existing) !== signature) {
+      throw new Error(`Collision de nom de service : "${objectName}" porte plusieurs définitions`);
+    }
+    newServices.set(objectName, normalized);
+  };
+
   for (const p of selectedPolicies) {
     const { analysis } = p;
+    if (!analysis || !Array.isArray(analysis.services)) {
+      throw new Error(`Policy "${p.policyName || p.name || p.id || '?'}" sans analyse de services — génération refusée`);
+    }
 
     // Source address(es) — peut être multiple si policy-grouped merge
     let srcAddrName, srcAddrNames, srcAddrGrpName;
@@ -1421,7 +1575,7 @@ function generateConfig(selectedPolicies, opts = {}) {
       // B: masque custom choisi par l'ingénieur (mode subnet uniquement) → objet adresse avec ce CIDR exact
       const cidr = p._srcCidrOverride;
       const name = p._srcAddrName || suggestAddrName(cidr, NP);
-      newAddresses.set(cidr, name);
+      registerGeneratedAddress(cidr, name);
       srcAddrName = name;
     } else if (p._multiSrcSubnets?.length > 0) {
       // ── Multi-src subnets : per-subnet /24 vs /32 (like _multiDstSubnets) ──
@@ -1434,13 +1588,13 @@ function generateConfig(selectedPolicies, opts = {}) {
           } else {
             const name = s.addrName || suggestAddrName(s.subnet, NP);
             allSrcNames.push(name);
-            newAddresses.set(s.subnet, name);
+            registerGeneratedAddress(s.subnet, name);
           }
         } else {
           // /32 mode: list individual hosts
           for (const h of (s.hosts || [])) {
             const { name, isNew } = resolveHost32(h, p._srcHostNames);
-            if (isNew) newAddresses.set(`${h}/32`, name);
+            if (isNew) registerGeneratedAddress(`${h}/32`, name);
             allSrcNames.push(name);
           }
         }
@@ -1453,7 +1607,7 @@ function generateConfig(selectedPolicies, opts = {}) {
     } else if (p._isSvcMerge && p._mergedSrcSubnets && p._mergedSrcSubnets.length > 1) {
       // Fusion par service : créer un groupe d'adresses pour les sources fusionnées
       const subnetNames = p._mergedSrcSubnets.map(s => suggestAddrName(s, NP));
-      p._mergedSrcSubnets.forEach((cidr, i) => newAddresses.set(cidr, subnetNames[i]));
+      p._mergedSrcSubnets.forEach((cidr, i) => registerGeneratedAddress(cidr, subnetNames[i]));
       srcAddrNames = subnetNames;
       srcAddrGrpName = registerAddrGroup(newAddrGroups,
         p._srcAddrName || `${NP}_SVC_GRP_${suggestAddrName(p._mergedSrcSubnets[0], NP)}`, subnetNames);
@@ -1461,7 +1615,7 @@ function generateConfig(selectedPolicies, opts = {}) {
       // Mode /32 : utiliser les hôtes réels plutôt que le subnet /24
       const hostNames = p.srcHosts.map(h => {
         const { name, isNew } = resolveHost32(h, p._srcHostNames);
-        if (isNew) newAddresses.set(`${h}/32`, name);
+        if (isNew) registerGeneratedAddress(`${h}/32`, name);
         return name;
       });
       if (hostNames.length === 1) {
@@ -1481,7 +1635,7 @@ function generateConfig(selectedPolicies, opts = {}) {
       const subnets = p.srcSubnets || [p.srcSubnet];
       subnets.forEach((cidr, i) => {
         const name = p.srcAddrNames[i] || suggestAddrName(cidr, NP);
-        newAddresses.set(cidr, name);
+        registerGeneratedAddress(cidr, name);
       });
       // Créer un groupe d'adresses
       srcAddrGrpName = registerAddrGroup(newAddrGroups,
@@ -1493,7 +1647,7 @@ function generateConfig(selectedPolicies, opts = {}) {
       srcAddrName = analysis.srcAddr.name;
     } else {
       srcAddrName = p.srcAddrName || suggestAddrName(analysis.srcAddr.cidr, NP);
-      newAddresses.set(analysis.srcAddr.cidr, srcAddrName);
+      registerGeneratedAddress(analysis.srcAddr.cidr, srcAddrName);
     }
 
     // Destination address
@@ -1502,7 +1656,7 @@ function generateConfig(selectedPolicies, opts = {}) {
     if (p._dstCidrOverride && !p._use32Dst && !(p._isWan || p.dstType === 'public')) {
       const cidr = p._dstCidrOverride;
       const name = p._dstAddrName || suggestAddrName(cidr, NP);
-      newAddresses.set(cidr, name);
+      registerGeneratedAddress(cidr, name);
       dstAddrName = name;
     // ── WAN policy : "all" uniquement sur choix explicite ──
     } else if ((p._isWan || p.dstType === 'public') && p._dstUseAll === true) {
@@ -1519,21 +1673,21 @@ function generateConfig(selectedPolicies, opts = {}) {
         }
         const hostNames = hosts.map(h => {
           const { name, isNew } = resolveHost32(h, p._dstHostNames);
-          if (isNew) newAddresses.set(`${h}/32`, name);
+          if (isNew) registerGeneratedAddress(`${h}/32`, name);
           return name;
         });
         dstAddrName = hostNames.length === 1 ? hostNames[0] : hostNames;
       } else if (p._use32Dst && p.dstHosts?.length > 0) {
         const hostNames = p.dstHosts.map(h => {
           const { name, isNew } = resolveHost32(h, p._dstHostNames);
-          if (isNew) newAddresses.set(`${h}/32`, name);
+          if (isNew) registerGeneratedAddress(`${h}/32`, name);
           return name;
         });
         dstAddrName = hostNames.length === 1 ? hostNames[0] : hostNames;
       } else if (p.dstHosts?.length > 0) {
         const hostNames = p.dstHosts.map(h => {
           const { name, isNew } = resolveHost32(h, p._dstHostNames);
-          if (isNew) newAddresses.set(`${h}/32`, name);
+          if (isNew) registerGeneratedAddress(`${h}/32`, name);
           return name;
         });
         dstAddrName = hostNames.length === 1 ? hostNames[0] : hostNames;
@@ -1541,7 +1695,7 @@ function generateConfig(selectedPolicies, opts = {}) {
         const ip = p.dstTarget;
         const cidr = ip.includes('/') ? ip : `${ip}/32`;
         const name = p._dstAddrName || p.dstAddrName || suggestAddrName(cidr, NP);
-        newAddresses.set(cidr, name);
+        registerGeneratedAddress(cidr, name);
         dstAddrName = name;
       } else {
         throw new Error(`Policy WAN "${p.policyName || p.name || p.id || '?'}" sans destination spécifique — génération refusée`);
@@ -1560,13 +1714,13 @@ function generateConfig(selectedPolicies, opts = {}) {
           } else {
             const name = s.addrName || suggestAddrName(s.subnet, NP);
             dstNames.push(name);
-            newAddresses.set(s.subnet, name);
+            registerGeneratedAddress(s.subnet, name);
           }
         } else {
           // /32 mode: list individual hosts
           for (const h of (s.hosts || [])) {
             const { name, isNew } = resolveHost32(h, p._dstHostNames);
-            if (isNew) newAddresses.set(`${h}/32`, name);
+            if (isNew) registerGeneratedAddress(`${h}/32`, name);
             dstNames.push(name);
           }
         }
@@ -1593,7 +1747,7 @@ function generateConfig(selectedPolicies, opts = {}) {
       // Mode /32 : utiliser les hôtes réels — set dstaddr "h1" "h2" directement, sans groupe
       const hostNames = p.dstHosts.map(h => {
         const { name, isNew } = resolveHost32(h, p._dstHostNames);
-        if (isNew) newAddresses.set(`${h}/32`, name);
+        if (isNew) registerGeneratedAddress(`${h}/32`, name);
         return name;
       });
       // On stocke comme tableau pour que le serialiseur génère plusieurs valeurs
@@ -1602,16 +1756,22 @@ function generateConfig(selectedPolicies, opts = {}) {
       dstAddrName = analysis.dstAddr.name;
     } else {
       dstAddrName = p.dstAddrName || suggestAddrName(analysis.dstAddr.cidr, NP);
-      if (dstAddrName !== 'all') newAddresses.set(analysis.dstAddr.cidr, dstAddrName);
+      if (dstAddrName !== 'all') registerGeneratedAddress(analysis.dstAddr.cidr, dstAddrName);
     }
 
     // Services
     const serviceNames = [];
     for (const svc of analysis.services) {
       if (svc.found) {
+        if (!svc.name) {
+          throw new Error(`Service résolu sans nom dans la policy "${p.policyName || p.name || p.id || '?'}"`);
+        }
         serviceNames.push(svc.name);
       } else {
         const customName = p.serviceNames?.[svc.label] || svc.suggestedName;
+        if (!customName) {
+          throw new Error(`Service "${svc.label || '?'}" sans nom ni définition exacte — génération refusée`);
+        }
         serviceNames.push(customName);
         // Si port/proto absents mais label au format TCP/5010 ou UDP/53, les extraire
         let resolvedPort  = svc.port;
@@ -1621,18 +1781,27 @@ function generateConfig(selectedPolicies, opts = {}) {
           if (labelMatch) { resolvedProto = labelMatch[1].toUpperCase(); resolvedPort = parseInt(labelMatch[2], 10); }
         }
 
-        if (svc.ports?.length) {
-          newServices.set(customName, { name: customName, ports: svc.ports, proto: svc.proto });
-        } else if (svc.portRange) {
-          newServices.set(customName, { name: customName, portRange: svc.portRange, proto: svc.proto });
-        } else if (resolvedPort) {
-          newServices.set(`${resolvedPort}/${resolvedProto}`, {
-            name: customName, port: resolvedPort, proto: resolvedProto,
+        if (svc.tcpPorts?.length || svc.udpPorts?.length) {
+          registerGeneratedService(customName, {
+            tcpPorts: svc.tcpPorts || [],
+            udpPorts: svc.udpPorts || [],
           });
+        } else if (svc.ports?.length) {
+          registerGeneratedService(customName, { ports: svc.ports, proto: svc.proto });
+        } else if (svc.portRange) {
+          registerGeneratedService(customName, { portRange: svc.portRange, proto: svc.proto });
+        } else if (resolvedPort) {
+          registerGeneratedService(customName, {
+            port: resolvedPort, proto: resolvedProto,
+          });
+        } else {
+          throw new Error(`Service "${svc.label || customName}" sans protocole/port exact — génération refusée`);
         }
       }
     }
-    if (serviceNames.length === 0) serviceNames.push('ALL');
+    if (serviceNames.length === 0) {
+      throw new Error(`Policy "${p.policyName || p.name || p.id || '?'}" sans service — génération de ALL refusée`);
+    }
 
     // Check if services match an existing service group
     const svcGrpMatch = opts.serviceGroups ? findServiceGroup(serviceNames, opts.serviceGroups) : null;
@@ -1750,14 +1919,19 @@ function generateConfig(selectedPolicies, opts = {}) {
     L.push('# ══════════════════════════════════════════════════');
     L.push('config firewall service custom');
     for (const [, svc] of newServices) {
-      const proto = String(svc.proto).toUpperCase();
+      const proto = String(svc.proto || '').toUpperCase();
       const isUdp = proto === 'UDP' || proto === '17';
       const isTcp = !isUdp;
-      const portrangeVal = svc.portRange || (svc.ports?.length ? consolidatePortRanges(svc.ports) : String(svc.port));
+      const portrangeVal = svc.portRange || (svc.ports?.length ? consolidatePortRanges(svc.ports) : String(svc.port || ''));
+      const tcpRange = svc.tcpPorts?.length ? consolidatePortRanges(svc.tcpPorts) : (isTcp ? portrangeVal : '');
+      const udpRange = svc.udpPorts?.length ? consolidatePortRanges(svc.udpPorts) : (isUdp ? portrangeVal : '');
+      if (!tcpRange && !udpRange) {
+        throw new Error(`Service "${svc.name}" sans plage TCP/UDP valide — génération refusée`);
+      }
       L.push(`    edit "${safeCli(svc.name)}"`);
       L.push(`        set protocol TCP/UDP/SCTP`);
-      if (isTcp) L.push(`        set tcp-portrange ${portrangeVal}`);
-      if (isUdp) L.push(`        set udp-portrange ${portrangeVal}`);
+      if (tcpRange) L.push(`        set tcp-portrange ${tcpRange}`);
+      if (udpRange) L.push(`        set udp-portrange ${udpRange}`);
       L.push(`    next`);
     }
     L.push('end');
@@ -1805,11 +1979,12 @@ function generateConfig(selectedPolicies, opts = {}) {
         if (sp.profileGroup) {
           L.push('        set profile-type group');
           L.push(`        set profile-group "${safeCli(sp.profileGroup)}"`);
+        } else {
+          if (sp.antivirus) L.push(`        set av-profile "${safeCli(sp.antivirus)}"`);
+          if (sp.webfilter) L.push(`        set webfilter-profile "${safeCli(sp.webfilter)}"`);
+          if (sp.ips) L.push(`        set ips-sensor "${safeCli(sp.ips)}"`);
+          if (sp.sslSsh) L.push(`        set ssl-ssh-profile "${safeCli(sp.sslSsh)}"`);
         }
-        if (sp.antivirus)     L.push(`        set av-profile "${safeCli(sp.antivirus)}"`);
-        if (sp.webfilter)     L.push(`        set webfilter-profile "${safeCli(sp.webfilter)}"`);
-        if (sp.ips)           L.push(`        set ips-sensor "${safeCli(sp.ips)}"`);
-        if (sp.sslSsh)        L.push(`        set ssl-ssh-profile "${safeCli(sp.sslSsh)}"`);
       }
       if (pol.tags && pol.tags.length > 0) {
         L.push(`        set comments "${safeCli(pol.tags.join(', '))}"`);
@@ -1900,6 +2075,9 @@ function preflightValidation(selectedPolicies, config, observedFlows = null) {
 
   const namesUsed = new Map(); // name → [policy indices]
   const selectedScopes = new Set();
+  let exactScopePolicies = 0;
+  let generalizedPolicies = 0;
+  let unclassifiedPolicies = 0;
 
   if (config.hasNonDefaultVrf) {
     issues.push({
@@ -1969,6 +2147,42 @@ function preflightValidation(selectedPolicies, config, observedFlows = null) {
     if (!(a.services || []).length) {
       issues.push({ level: 'error', msg: `${label}: aucun service déterminé — génération de ALL refusée` });
     }
+    const srcNameValues = [
+      p._srcAddrName,
+      p.srcAddrName,
+      a.srcAddr?.name,
+      ...(p.srcAddrNames || []),
+    ].filter(Boolean).map(value => String(value).toUpperCase());
+    if (action === 'accept' && srcNameValues.includes('ALL')) {
+      issues.push({ level: 'error', msg: `${label}: srcaddr=all interdit pour une règle accept générée` });
+    }
+    const broadServiceNames = (a.services || [])
+      .map(service => String(service.name || service.label || '').toUpperCase())
+      .filter(name => ['ALL', 'ALL_TCP', 'ALL_UDP', 'ALL_ICMP', 'ALL_ICMP6'].includes(name));
+    if (action === 'accept' && broadServiceNames.length) {
+      issues.push({ level: 'error', msg: `${label}: service global interdit (${broadServiceNames.join(', ')})` });
+    }
+    for (const service of (a.services || [])) {
+      if (service.found) continue;
+      const validPorts = values => Array.isArray(values)
+        && values.length > 0
+        && values.every(value => Number.isInteger(Number(value)) && Number(value) >= 1 && Number(value) <= 65535);
+      const hasExactTransport = validPorts(service.tcpPorts)
+        || validPorts(service.udpPorts)
+        || (validPorts(service.ports) && ['TCP', 'UDP', '6', '17'].includes(String(service.proto || '').toUpperCase()))
+        || (Number.isInteger(Number(service.port))
+          && Number(service.port) >= 1
+          && Number(service.port) <= 65535
+          && ['TCP', 'UDP', '6', '17'].includes(String(service.proto || '').toUpperCase()))
+        || (/^\d+(?:-\d+)?(?:\s+\d+(?:-\d+)?)*$/.test(String(service.portRange || ''))
+          && ['TCP', 'UDP', '6', '17'].includes(String(service.proto || '').toUpperCase()));
+      if (!hasExactTransport) {
+        issues.push({
+          level: 'error',
+          msg: `${label}: service "${service.label || service.name || '?'}" non résolu et sans définition protocole/port exacte`,
+        });
+      }
+    }
 
     const plan = p._segmentationPlan;
     if (plan) {
@@ -2005,6 +2219,11 @@ function preflightValidation(selectedPolicies, config, observedFlows = null) {
       }
 
       const effectiveDestinationMode = isWan ? 'host' : plan.destination;
+      const exactScope = plan.source === 'host'
+        && effectiveDestinationMode === 'host'
+        && plan.services === 'separate';
+      if (exactScope) exactScopePolicies++;
+      else generalizedPolicies++;
       const srcEvidenceHosts = segmentationEvidenceHosts(p, 'src');
       const dstEvidenceHosts = segmentationEvidenceHosts(p, 'dst');
       if (plan.source === 'host' && (!p._use32Src || !srcEvidenceHosts.length)) {
@@ -2057,6 +2276,8 @@ function preflightValidation(selectedPolicies, config, observedFlows = null) {
           }
         }
       }
+    } else {
+      unclassifiedPolicies++;
     }
 
     // Name collisions with existing objects
@@ -2091,10 +2312,33 @@ function preflightValidation(selectedPolicies, config, observedFlows = null) {
     }
   }
 
+  if (generalizedPolicies > 0) {
+    issues.push({
+      level: 'warn',
+      code: 'GENERALIZED_SCOPE',
+      msg: `${generalizedPolicies} policy(s) utilisent un périmètre réseau ou des services regroupés : elles sont validées comme généralisation choisie, pas comme correspondance exacte aux seuls tuples observés`,
+    });
+  }
+  if (unclassifiedPolicies > 0) {
+    issues.push({
+      level: 'warn',
+      code: 'UNCLASSIFIED_SCOPE',
+      msg: `${unclassifiedPolicies} policy(s) ne portent aucun plan de segmentation certifiable`,
+    });
+  }
+
   // Summary counts
   const errors   = issues.filter(i => i.level === 'error').length;
   const warnings = issues.filter(i => i.level === 'warn').length;
-  return { issues, errors, warnings, ok: errors === 0 };
+  const certification = {
+    level: errors > 0 ? 'rejected'
+      : (generalizedPolicies > 0 || unclassifiedPolicies > 0) ? 'generalized'
+        : 'exact',
+    exactPolicies: exactScopePolicies,
+    generalizedPolicies,
+    unclassifiedPolicies,
+  };
+  return { issues, errors, warnings, ok: errors === 0, certification };
 }
 
 function formatExistingPolicies(policies) {

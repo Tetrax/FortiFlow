@@ -175,9 +175,10 @@ function buildAllSubnetGroupsAndPorts(flows, topN = 25, knownSubnets = []) {
     const decision = flowDecision(f);
     const isDeny   = decision === 'deny';
     const isAccept = decision === 'allow';
+    const isDeployable = f.deploymentEligible !== false;
 
     addToGroup(all, f);
-    if (isAccept) {
+    if (isAccept && isDeployable) {
       addToGroup(allowed, f);
       // Isoler les suggestions par équipement/VDOM et par interface observée.
       const srcSubnetKey = isInternal(f.srcip) ? subnetOf(f.srcip) : null;
@@ -242,7 +243,9 @@ function buildAnalysis(flowInput, knownSubnets = []) {
   let denySessions    = 0;
   let failedSessions  = 0;
   let unknownSessions = 0;
+  let nonDeployableSessions = 0;
   let totalBytes      = 0;
+  const evidenceIssueSessions = {};
   const scopes = new Map();
   // #1: fenêtre d'observation globale
   let captureStartTs = null;
@@ -257,6 +260,12 @@ function buildAnalysis(flowInput, knownSubnets = []) {
     const decision = flowDecision(f);
     if (decision === 'allow') {
       acceptSessions += f.count;
+      if (f.deploymentEligible === false) {
+        nonDeployableSessions += f.count;
+        for (const issue of (f.evidenceIssues || [])) {
+          evidenceIssueSessions[issue] = (evidenceIssueSessions[issue] || 0) + f.count;
+        }
+      }
     } else if (decision === 'deny') {
       denySessions += f.count;
     } else if (decision === 'failed') {
@@ -372,6 +381,8 @@ function buildAnalysis(flowInput, knownSubnets = []) {
       denySessions,
       failedSessions,
       unknownSessions,
+      nonDeployableSessions,
+      evidenceIssueSessions,
       deniedPolicyGroups,
       totalBytes,
       // #1: fenêtre d'observation globale (null si logs sans timestamp)
