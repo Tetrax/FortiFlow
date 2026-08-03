@@ -10,39 +10,37 @@ services:
       - "127.0.0.1:13737:3737"
     environment:
       - PORT=3737
-      # Taille maximale d’un export FAZ brut (Mo)
-      - MAX_UPLOAD_SIZE_MB=2048
-      # Garde-fous des formats compressés et chargés en mémoire
-      - MAX_DECOMPRESSED_SIZE_MB=4096
-      - MAX_ARCHIVE_ENTRIES=100
-      - MAX_XLSX_SIZE_MB=100
-      - MAX_WORKSPACE_UNCOMPRESSED_MB=1024
-      # Nombre maximal d’identifiants de session conservés pour neutraliser
-      # les doublons start/close FortiOS.
-      - MAX_SESSION_DEDUPE_KEYS=2000000
-      # Les analyses lourdes s'exécutent hors du thread HTTP. Un worker par défaut
-      # évite de saturer la mémoire avec plusieurs exports FAZ volumineux.
-      - MAX_ANALYSIS_WORKERS=1
-      - MAX_ANALYSIS_QUEUE=3
-      # Optionnel : plafond mémoire par worker (Mo), 0 = limite Node par défaut.
-      - ANALYSIS_WORKER_MEMORY_MB=0
-      # HTTPS optionnel — décommenter si certificats disponibles :
-      # - SSL_KEY=/certs/privkey.pem
-      # - SSL_CERT=/certs/fullchain.pem
+      - DOMAIN=${DOMAIN:-devval.com}
+      # Taille maximale d'un export FAZ brut (Mo)
+      - MAX_UPLOAD_SIZE_MB=${MAX_UPLOAD_SIZE_MB:-2048}
+      - MAX_DECOMPRESSED_SIZE_MB=${MAX_DECOMPRESSED_SIZE_MB:-4096}
+      - MAX_ARCHIVE_ENTRIES=${MAX_ARCHIVE_ENTRIES:-100}
+      - MAX_XLSX_SIZE_MB=${MAX_XLSX_SIZE_MB:-100}
+      - MAX_WORKSPACE_UNCOMPRESSED_MB=${MAX_WORKSPACE_UNCOMPRESSED_MB:-1024}
+      - MAX_SESSION_DEDUPE_KEYS=${MAX_SESSION_DEDUPE_KEYS:-2000000}
+      - MAX_ANALYSIS_WORKERS=${MAX_ANALYSIS_WORKERS:-1}
+      - MAX_ANALYSIS_QUEUE=${MAX_ANALYSIS_QUEUE:-3}
+      - ANALYSIS_WORKER_MEMORY_MB=${ANALYSIS_WORKER_MEMORY_MB:-0}
+      # HTTPS — définir dans .env ou variables d'environnement :
+      #   SSL_KEY=/certs/privkey.pem
+      #   SSL_CERT=/certs/fullchain.pem
+      - SSL_KEY=${SSL_KEY:-}
+      - SSL_CERT=${SSL_CERT:-}
     security_opt:
       - no-new-privileges:true
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=128m
     healthcheck:
-      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3737/',r=>{process.exit(r.statusCode===200?0:1)})"]
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3737/',r=>{process.exit(r.statusCode===200?0:1)}).on('error',()=>{require('https').get('https://localhost:3737/',r=>process.exit(r.statusCode===200?0:1),{rejectUnauthorized:false}).on('error',()=>process.exit(1))})"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 10s
     volumes:
-      # Persistance des sessions et des workspaces entre redémarrages
       - ./data/sessions-cache:/sessions-cache
       - ./data/workspaces:/app/workspaces
       - ./data/uploads:/app/uploads
-      # HTTPS — monter le répertoire des certificats en lecture seule :
-      # - /etc/ssl/fortiflow:/certs:ro
+      # HTTPS — certificats montés en lecture seule.
+      # VPS (Let's Encrypt)  : /etc/ssl/fortiflow:/certs:ro
+      # Interne (wildcard CA) : /etc/ssl/fortiflow:/certs:ro
+      - ${CUSTOM_SSL_DIR:-/etc/ssl/fortiflow}:/certs:ro

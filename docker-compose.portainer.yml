@@ -1,0 +1,51 @@
+# Portainer Stack — FortiFlow (déploiement sans build)
+# Utiliser ce fichier dans Portainer → Stacks → Add stack
+# L'image doit exister localement (docker build) ou être pullée depuis GHCR.
+
+services:
+  fortiflow:
+    # Option A : image locale (buildée au préalable)
+    image: fortiflow-fortiflow:latest
+    # Option B : image depuis GitHub Container Registry (décommenter et commenter ci-dessus)
+    # image: ghcr.io/tetrax/fortiflow:latest
+    container_name: fortiflow
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:13737:3737"
+    environment:
+      - PORT=3737
+      - DOMAIN=devval.com
+      - MAX_UPLOAD_SIZE_MB=2048
+      - MAX_DECOMPRESSED_SIZE_MB=4096
+      - MAX_ARCHIVE_ENTRIES=100
+      - MAX_XLSX_SIZE_MB=100
+      - MAX_WORKSPACE_UNCOMPRESSED_MB=1024
+      - MAX_SESSION_DEDUPE_KEYS=2000000
+      - MAX_ANALYSIS_WORKERS=1
+      - MAX_ANALYSIS_QUEUE=3
+      - ANALYSIS_WORKER_MEMORY_MB=0
+      # HTTPS — chemin vers les certificats dans le conteneur
+      - SSL_KEY=/certs/privkey.pem
+      - SSL_CERT=/certs/fullchain.pem
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3737/',r=>{process.exit(r.statusCode===200?0:1)}).on('error',()=>{require('https').get('https://localhost:3737/',r=>process.exit(r.statusCode===200?0:1),{rejectUnauthorized:false}).on('error',()=>process.exit(1))})"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    volumes:
+      # Persistance des données
+      - fortiflow_sessions:/sessions-cache
+      - fortiflow_workspaces:/app/workspaces
+      - fortiflow_uploads:/app/uploads
+      # HTTPS — certificats montés depuis l'hôte (lecture seule)
+      - /etc/ssl/fortiflow:/certs:ro
+
+volumes:
+  fortiflow_sessions:
+  fortiflow_workspaces:
+  fortiflow_uploads:
