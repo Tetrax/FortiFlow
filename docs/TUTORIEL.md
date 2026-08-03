@@ -86,30 +86,19 @@ app/web/
 
 ---
 
-## 4. Déploiement VPS (docker compose)
+## 4. Maintenance VPS
 
-### 4.1 Prérequis
+FortiFlow est déjà déployé sur le VPS. Les commandes ci-dessous suffisent pour la maintenance courante.
 
-- Docker et Docker Compose (ou `docker compose` plugin)
-- Git
-- Accès SSH au VPS
-
-### 4.2 Installation initiale
+### 4.1 Mise à jour
 
 ```bash
-cd ~/workspace
-git clone git@github.com:Tetrax/FortiFlow.git
-cd FortiFlow
-
-# Configurer l'environnement
-cp .env.example .env
-# Adapter DOMAIN si nécessaire
-
-# Démarrer
+cd ~/workspace/FortiFlow
+git pull
 docker compose up --build -d
 ```
 
-### 4.3 Vérification
+### 4.2 Vérification
 
 ```bash
 docker compose ps
@@ -117,15 +106,6 @@ docker compose ps
 
 docker compose logs -f
 # Doit afficher : FortiFlow → http://localhost:3737 ...
-```
-
-### 4.4 Mise à jour
-
-```bash
-cd ~/workspace/FortiFlow
-git pull
-docker compose up --build -d
-docker compose ps   # Vérifier "(healthy)"
 ```
 
 ---
