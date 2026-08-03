@@ -68,14 +68,7 @@ function protoName(proto) {
   return PROTO_MAP[String(proto)] || (proto ? `PROTO${proto}` : '');
 }
 
-const ALLOW_ACTIONS = new Set([
-  'accept', 'allow', 'allowed', 'pass', 'start', 'close', 'timeout',
-  'client-rst', 'server-rst', 'ip-conn',
-]);
-const DENY_ACTIONS = new Set([
-  'deny', 'denied', 'drop', 'dropped', 'block', 'blocked',
-  'reject', 'rejected', 'violation',
-]);
+const { ALLOW_ACTIONS, DENY_ACTIONS } = require('./constants');
 
 // Compatibilité avec les imports déjà présents en mémoire : les nouveaux parsers
 // fournissent decision, les anciens flux sont normalisés ici avec le même mode fail-closed.

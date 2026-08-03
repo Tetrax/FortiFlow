@@ -29,6 +29,16 @@ services:
       # HTTPS optionnel — décommenter si certificats disponibles :
       # - SSL_KEY=/certs/privkey.pem
       # - SSL_CERT=/certs/fullchain.pem
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3737/',r=>{process.exit(r.statusCode===200?0:1)})"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     volumes:
       # Persistance des sessions et des workspaces entre redémarrages
       - ./data/sessions-cache:/sessions-cache

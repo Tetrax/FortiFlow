@@ -15,13 +15,10 @@ function getCaptureDeploymentBlockers(sessionData, fortiConfig = null) {
   const captureCoverageRatio = data.stats?.captureCoverageRatio == null
     ? null
     : Number(data.stats.captureCoverageRatio);
-  const allowActions = new Set([
-    'accept', 'allow', 'allowed', 'pass', 'start', 'close', 'timeout',
-    'client-rst', 'server-rst', 'ip-conn',
-  ]);
+  const { ALLOW_ACTIONS } = require('./constants');
   const legacyUnprovenSessions = (data.flows || []).reduce((total, flow) => {
     const allowed = String(flow?.decision || '').toLowerCase() === 'allow'
-      || allowActions.has(String(flow?.action || '').toLowerCase());
+      || ALLOW_ACTIONS.has(String(flow?.action || '').toLowerCase());
     return allowed && flow?.deploymentEligible !== true ? total + Number(flow?.count || 1) : total;
   }, 0);
   const nonDeployableSessions = Math.max(

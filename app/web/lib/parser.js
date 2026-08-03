@@ -161,16 +161,10 @@ const UDP_SERVICES = new Set([
   'RIP', 'MDNS', 'LLMNR', 'BOOTP', 'RADIUS', 'ISAKMP', 'IKE',
 ]);
 
+const { ALLOW_ACTIONS, DENY_ACTIONS, TERMINAL_SESSION_ACTIONS: TERMINAL_ACTIONS } = require('./constants');
+
 // Ne jamais considérer une action inconnue comme autorisée. Les logs de fin de session
 // FortiOS utilisent notamment close/timeout/client-rst/server-rst pour des sessions acceptées.
-const ALLOW_ACTIONS = new Set([
-  'accept', 'allow', 'allowed', 'pass', 'start', 'close', 'timeout',
-  'client-rst', 'server-rst', 'ip-conn',
-]);
-const DENY_ACTIONS = new Set([
-  'deny', 'denied', 'drop', 'dropped', 'block', 'blocked',
-  'reject', 'rejected', 'violation',
-]);
 
 function normalizeDecision(action, context = {}) {
   const value = String(action || '').toLowerCase().trim();
@@ -458,7 +452,7 @@ function flowSessionKey(flow) {
   ].join('|');
 }
 
-const TERMINAL_SESSION_ACTIONS = new Set(['close', 'timeout', 'client-rst', 'server-rst']);
+// TERMINAL_SESSION_ACTIONS imported from ./constants as TERMINAL_ACTIONS
 
 function sessionMetrics(flow) {
   return {
@@ -520,7 +514,7 @@ function aggregateFlow(flowMap, flow, dedupeState = null) {
       previous.metrics.sentpkt  = Math.max(previous.metrics.sentpkt, flow.sentpkt);
       previous.metrics.rcvdpkt  = Math.max(previous.metrics.rcvdpkt, flow.rcvdpkt);
       previous.metrics.duration = Math.max(previous.metrics.duration, flow.duration);
-      previous.terminal ||= TERMINAL_SESSION_ACTIONS.has(flow.action);
+      previous.terminal ||= TERMINAL_ACTIONS.has(flow.action);
       if (flow.ts != null) {
         if (e.firstTs == null || flow.ts < e.firstTs) e.firstTs = flow.ts;
         if (e.lastTs  == null || flow.ts > e.lastTs)  e.lastTs  = flow.ts;
@@ -534,7 +528,7 @@ function aggregateFlow(flowMap, flow, dedupeState = null) {
     } else {
       dedupeState.sessions.set(sessionKey, {
         metrics: sessionMetrics(flow),
-        terminal: TERMINAL_SESSION_ACTIONS.has(flow.action),
+        terminal: TERMINAL_ACTIONS.has(flow.action),
       });
     }
   }

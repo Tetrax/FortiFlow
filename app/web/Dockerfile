@@ -1,4 +1,4 @@
-FROM node:20-alpine
+FROM node:22-alpine
 
 # su-exec pour drop de privilèges dans l'entrypoint
 RUN apk add --no-cache su-exec

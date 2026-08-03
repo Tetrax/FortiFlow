@@ -2070,10 +2070,65 @@ if (fs.existsSync(SSL_KEY) && fs.existsSync(SSL_CERT)) {
   server.listen(PORT, () => {
     console.log(`\n  FortiFlow  →  https://${DOMAIN}:${PORT}\n`);
   });
+  setupGracefulShutdown(server);
 } else {
   // Fallback HTTP si les certificats ne sont pas encore présents
   const server = app.listen(PORT, () => {
     console.log(`\n  FortiFlow  →  http://localhost:${PORT}  (HTTP — certificats SSL introuvables)\n`);
   });
   attachWss(server);
+  setupGracefulShutdown(server);
+}
+
+// ─── Rate limiter (session endpoints only) ─────────────────────────────────
+
+// Simple token-bucket rate limiter — no external dependency.
+// Protects session creation and admin endpoints in local deployments.
+function createRateLimiter(maxRequests = 20, windowMs = 60000) {
+  const buckets = new Map();
+  // Cleanup stale buckets every 5 minutes
+  setInterval(() => {
+    const cutoff = Date.now() - windowMs;
+    for (const [key, bucket] of buckets) {
+      if (bucket.lastRefill < cutoff) buckets.delete(key);
+    }
+  }, 5 * 60 * 1000).unref();
+  return (req, res, next) => {
+    const key = req.ip || req.socket.remoteAddress || 'unknown';
+    const now = Date.now();
+    let bucket = buckets.get(key);
+    if (!bucket || now - bucket.lastRefill > windowMs) {
+      bucket = { tokens: maxRequests, lastRefill: now };
+      buckets.set(key, bucket);
+    }
+    if (bucket.tokens <= 0) {
+      return res.status(429).json({ error: 'Trop de requêtes. Réessayez dans une minute.' });
+    }
+    bucket.tokens--;
+    next();
+  };
+}
+
+const sessionLimiter = createRateLimiter(20, 60000);
+app.use('/api/upload', sessionLimiter);
+app.use('/api/admin',   sessionLimiter);
+
+// ─── Graceful shutdown ─────────────────────────────────────────────────────
+
+function setupGracefulShutdown(server) {
+  const shutdown = async (signal) => {
+    console.log(`\n  ${signal} reçu — arrêt gracieux…`);
+    server.close(async () => {
+      console.log('  Serveur HTTP arrêté.');
+      await analysisPool.close();
+      process.exit(0);
+    });
+    // Force exit après 10s
+    setTimeout(() => {
+      console.error('  Arrêt forcé après timeout.');
+      process.exit(1);
+    }, 10000).unref();
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT',  () => shutdown('SIGINT'));
 }

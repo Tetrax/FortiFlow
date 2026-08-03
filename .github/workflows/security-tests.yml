@@ -25,12 +25,57 @@ jobs:
         run: |
           node --check server.js
           node --check public/app.js
+          node --check public/segmentation-plan.js
           node --check lib/parser.js
           node --check lib/analysis-pool.js
           node --check lib/analysis-worker.js
           node --check lib/analyzer.js
+          node --check lib/constants.js
           node --check lib/coverage.js
           node --check lib/deploy-safety.js
           node --check lib/forticonfig.js
+          node --check lib/ports.js
+          node --check lib/store.js
       - name: Run tests
         run: npm test
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Build Docker image
+        run: docker compose build
+      - name: Start container
+        run: docker compose up -d
+      - name: Wait for health
+        run: |
+          for i in $(seq 1 30); do
+            if docker compose exec -T fortiflow node -e "require('http').get('http://localhost:3737/', r => process.exit(r.statusCode === 200 ? 0 : 1))"; then
+              echo "Healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs
+          exit 1
+      - name: Run tests in container
+        run: docker compose exec -T fortiflow npm test
+      - name: Cleanup
+        if: always()
+        run: docker compose down -v
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Build image for scanning
+        run: docker compose build
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.29.0
+        with:
+          image-ref: fortiflow_fortiflow:latest
+          format: table
+          exit-code: 1
+          severity: CRITICAL,HIGH
