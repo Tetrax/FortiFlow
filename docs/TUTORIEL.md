@@ -86,7 +86,7 @@ app/web/
 
 ---
 
-## 4. Maintenance VPS
+## 4. MaJ Docker
 
 FortiFlow est déjà déployé sur le VPS. Les commandes ci-dessous suffisent pour la maintenance courante.
 
@@ -283,6 +283,8 @@ Points clés de la configuration :
 - `client_max_body_size 2048m` pour les exports FAZ volumineux
 - Timeouts élevés (3600s) pour les analyses longues
 - Renvoi vers `127.0.0.1:13737` (port interne FortiFlow)
+
+> **Sans reverse proxy :** Si aucun reverse proxy (Nginx, Apache, Traefik) n'est présent sur le serveur, vous pouvez exposer directement le port 443 dans `docker-compose.yml`. Remplacez `127.0.0.1:13737:3737` par `443:3737` dans la section `ports`. FortiFlow détecte automatiquement les certificats dans `/etc/ssl/fortiflow/` et servira le HTTPS directement, sans intermédiaire. Assurez-vous que le port 443 est ouvert dans le firewall et qu'aucun autre service ne l'utilise.
 
 ---
 
