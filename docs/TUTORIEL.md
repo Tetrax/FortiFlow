@@ -156,19 +156,52 @@ scp ~/fortiflow.tar user@POSTE:/tmp/
 3. Méthode : **Upload** → sélectionner `docker-compose.portainer.yml`
 4. **Deploy the stack**
 
-### 5.6 Mise à jour (après modifications du code)
+### 5.6 Mise à jour
+
+Deux méthodes sont disponibles pour mettre à jour FortiFlow sans refaire l'installation complète de la stack.
+
+#### Option A — Rebuild local + transfert (sans internet sur le serveur interne)
+
+Utiliser cette méthode quand le serveur interne n'a pas accès à internet ou à GHCR.
 
 ```bash
-# Rebuilder l'image
+# Étape 1 : Reconstruire l'image localement
 cd ~/workspace/FortiFlow/app/web
 docker build -t fortiflow-fortiflow:latest .
-docker save fortiflow-fortiflow:latest -o ~/fortiflow.tar
-scp ~/fortiflow.tar user@SERVEUR_INTERNE:/tmp/
 
-# Sur le serveur interne
-docker load -i /tmp/fortiflow.tar
-# Dans Portainer : Stop → Start la stack fortiflow
+# Étape 2 : Exporter et vérifier l'image
+docker save fortiflow-fortiflow:latest -o ~/fortiflow.tar
+ls -lh ~/fortiflow.tar
+sha256sum ~/fortiflow.tar > ~/fortiflow.tar.sha256
+
+# Étape 3 : Transférer vers le serveur interne
+scp ~/fortiflow.tar user@SERVEUR_INTERNE:/tmp/
 ```
+
+Sur le serveur interne :
+
+```bash
+# Étape 4 : Charger la nouvelle image
+docker load -i /tmp/fortiflow.tar
+
+# Étape 5 : Redéployer dans Portainer
+# → Ouvrir Portainer → Stacks → fortiflow → Stop → Start
+# L'image fortiflow-fortiflow:latest sera automatiquement utilisée
+```
+
+#### Option B — GHCR (si le serveur interne a accès à internet)
+
+Quand le serveur interne dispose d'un accès à internet, l'image est publiée automatiquement sur GitHub Container Registry par le pipeline CI/CD. Il suffit de tirer la nouvelle image et de redéployer.
+
+```bash
+# Sur le serveur interne
+docker pull ghcr.io/tetrax/fortiflow:latest
+docker tag ghcr.io/tetrax/fortiflow:latest fortiflow-fortiflow:latest
+
+# Puis dans Portainer : Stop → Start la stack fortiflow
+```
+
+> **Note :** Le tag `:latest` sur GHCR est mis à jour automatiquement à chaque push sur la branche `main` (voir section 11).
 
 ---
 
