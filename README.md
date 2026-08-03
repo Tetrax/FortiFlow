@@ -224,7 +224,7 @@ python fortiflow.py sample_traffic.log --mode policy --subnet 24 --verbose
 | Docker Compose plugin | v2.0+ | v5.1.0 |
 | Node.js *(hors Docker)* | 18 LTS+ | 22.x |
 
-> L'image embarque Node.js 20 LTS — aucune installation Node requise si tu passes par Docker.
+> L'image embarque Node.js 22 LTS — aucune installation Node requise si tu passes par Docker.
 
 ### Lancer en local (test rapide)
 

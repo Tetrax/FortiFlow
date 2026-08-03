@@ -1,6 +1,6 @@
 # FortiFlow — Guide complet : Revue, Déploiement & HTTPS
 
-> **Version :** août 2026 · **Commit :** `d9f2be8` · **Tests :** 49/49 ✅
+> **Version :** août 2026 · **Commit :** `893abb8` · **Tests :** 49/49 ✅
 
 Ce document couvre l'ensemble du cycle de vie de FortiFlow : analyse du code, déploiement Docker (VPS et Portainer), configuration HTTPS et maintenance.
 
