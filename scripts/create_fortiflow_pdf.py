@@ -30,12 +30,19 @@ NAVY = colors.HexColor("#0F2747")
 BLUE = colors.HexColor("#1976D2")
 LIGHT_BLUE = colors.HexColor("#EAF3FF")
 LIGHT_GREEN = colors.HexColor("#EAF8F1")
-ORANGE = colors.HexColor("#FFF3E0")
+ORANGE_BG = colors.HexColor("#FFF3E0")
 GRAY = colors.HexColor("#52606D")
 BORDER = colors.HexColor("#D9E2EC")
 DARK_TEXT = colors.HexColor("#263238")
 CODE_BG = colors.HexColor("#F4F7FA")
 CODE_TEXT = colors.HexColor("#13293D")
+AMBER = colors.HexColor("#E6960C")
+TEAL = colors.HexColor("#00897B")
+AMBER_BG = colors.HexColor("#FFF8E7")
+TEAL_BG = colors.HexColor("#E6F7F5")
+PURPLE = colors.HexColor("#7C4DFF")
+PURPLE_BG = colors.HexColor("#F3EEFF")
+GHCR_BLUE = colors.HexColor("#2496ED")
 
 # ── Styles ───────────────────────────────────────────────────────────
 styles = getSampleStyleSheet()
@@ -84,6 +91,21 @@ styles.add(ParagraphStyle(
     name="Small", parent=styles["BodyText"],
     fontName="DejaVu", fontSize=8, leading=11, textColor=GRAY,
 ))
+styles.add(ParagraphStyle(
+    name="H4x", parent=styles["Heading3"],
+    fontName="DejaVu-Bold", fontSize=10, leading=14,
+    textColor=NAVY, spaceBefore=8, spaceAfter=4,
+))
+styles.add(ParagraphStyle(
+    name="OptionLabel", parent=styles["BodyText"],
+    fontName="DejaVu-Bold", fontSize=10, leading=14,
+    textColor=colors.white,
+))
+styles.add(ParagraphStyle(
+    name="GHCRBadge", parent=styles["BodyText"],
+    fontName="DejaVuMono", fontSize=8, leading=11,
+    textColor=colors.white,
+))
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -119,6 +141,50 @@ def callout(title, body, background=LIGHT_BLUE):
         ("RIGHTPADDING", (0, 0), (-1, -1), 10),
         ("TOPPADDING", (0, 0), (-1, -1), 8),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    return table
+
+
+def option_box(option_id, label, body, accent_color):
+    """Callout stylisé pour les options de mise à jour (Option A / Option B).
+
+    Affiche un badge coloré avec l'identifiant de l'option (ex: 'Option A'),
+    un titre descriptif, et le corps du texte.
+    """
+    data = [
+        [p(f"<b>{option_id}</b>  {label}", "OptionLabel")],
+        [p(f"{body}", "Bodyx")],
+    ]
+    table = Table(data, colWidths=[17.2 * cm])
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), accent_color),
+        ("BACKGROUND", (0, 1), (-1, -1), AMBER_BG if "A" in option_id else TEAL_BG),
+        ("BOX", (0, 0), (-1, -1), 0.8, accent_color),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.4, accent_color),
+        ("LEFTPADDING", (0, 0), (-1, -1), 12),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+    ]))
+    return table
+
+
+def repo_callout(title, body, icon="", accent=PURPLE):
+    """Callout pour les sections Portainer Repository / GHCR."""
+    header = f"<b>{icon}  {title}</b>" if icon else f"<b>{title}</b>"
+    data = [
+        [p(header, "H4x")],
+        [p(body, "Bodyx")],
+    ]
+    table = Table(data, colWidths=[17.2 * cm])
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), PURPLE_BG),
+        ("BOX", (0, 0), (-1, -1), 0.8, accent),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.4, accent),
+        ("LEFTPADDING", (0, 0), (-1, -1), 12),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
     ]))
     return table
 
@@ -206,6 +272,12 @@ def parse_markdown(text):
             i += 1
             continue
 
+        # H4
+        if line.startswith("#### "):
+            elements.append({"type": "h4", "text": line[5:].strip()})
+            i += 1
+            continue
+
         # HR
         if line.strip() == "---":
             elements.append({"type": "hr"})
@@ -269,7 +341,7 @@ def parse_markdown(text):
 
         # Paragraphe
         para_lines = []
-        while i < len(lines) and lines[i].strip() and not lines[i].strip().startswith("#") and "|" not in lines[i] and not lines[i].strip().startswith("```") and not lines[i].strip().startswith("- ") and not re.match(r'^\d+\.\s', lines[i].strip()) and not lines[i].strip().startswith("> ") and lines[i].strip() != "---":
+        while i < len(lines) and lines[i].strip() and not lines[i].strip().startswith("#") and not lines[i].strip().startswith("```") and not lines[i].strip().startswith("- ") and not re.match(r'^\d+\.\s', lines[i].strip()) and not lines[i].strip().startswith("> ") and lines[i].strip() != "---":
             para_lines.append(lines[i].strip())
             i += 1
         if para_lines:
@@ -364,48 +436,139 @@ elements = parse_markdown(md_text)
 # Garder une trace pour ne pas répéter le titre/sous-titre déjà en couverture
 skip_first_h1 = True
 
-for elem in elements:
+i = 0
+while i < len(elements):
+    elem = elements[i]
     t = elem["type"]
 
     if t == "h1":
         if skip_first_h1:
             skip_first_h1 = False
+            i += 1
             continue
         story.append(p(md_to_html(elem["text"]), "H1x"))
+        i += 1
 
     elif t == "h2":
-        story.append(p(md_to_html(elem["text"]), "H2x"))
+        text = md_to_html(elem["text"])
+        # Détection Portainer → callout Repository
+        if "portainer" in text.lower():
+            story.append(Spacer(1, 0.2 * cm))
+            story.append(repo_callout(
+                title="Repository",
+                body=f"<b>{text}</b> — déploiement via registre d'images Docker",
+                icon="",
+                accent=PURPLE,
+            ))
+            story.append(Spacer(1, 0.1 * cm))
+        # Détection Mise à jour → callout upgrade_path
+        elif "mise à jour" in text.lower() or "mise a jour" in text.lower():
+            story.append(Spacer(1, 0.2 * cm))
+            story.append(repo_callout(
+                title="Upgrade Path",
+                body=f"<b>{text}</b> — procédure de montée de version",
+                icon="",
+                accent=TEAL,
+            ))
+            story.append(Spacer(1, 0.1 * cm))
+        else:
+            story.append(p(text, "H2x"))
+        i += 1
 
     elif t == "h3":
         story.append(p(f"<b>{md_to_html(elem['text'])}</b>", "Bodyx"))
+        i += 1
+
+    elif t == "h4":
+        text = elem["text"]
+        html_text = md_to_html(text)
+        # Détection Option A / Option B → callout avec badge coloré
+        is_option_a = text.strip().lower().startswith("option a")
+        is_option_b = text.strip().lower().startswith("option b")
+        if is_option_a or is_option_b:
+            accent = AMBER if is_option_a else TEAL
+            # Extraire le label sans le préfixe "Option X —"
+            import re as _re
+            label = _re.sub(r'^Option\s+[AB]\s*[—\-–]\s*', '', text.strip(), flags=_re.IGNORECASE)
+            # Collecter le paragraphe suivant comme corps
+            body_text = ""
+            if i + 1 < len(elements) and elements[i + 1]["type"] == "p":
+                body_text = elements[i + 1]["text"]
+                i += 1  # consomme le paragraphe
+            story.append(Spacer(1, 0.2 * cm))
+            story.append(option_box(
+                option_id="Option A" if is_option_a else "Option B",
+                label=label,
+                body=md_to_html(body_text) if body_text else "",
+                accent_color=accent,
+            ))
+            story.append(Spacer(1, 0.1 * cm))
+        else:
+            story.append(p(f"<b>{html_text}</b>", "H4x"))
+        i += 1
 
     elif t == "p":
-        story.append(p(md_to_html(elem["text"]), "Bodyx"))
+        raw_html = md_to_html(elem["text"])
+        # Détection GHCR → ajout d'un badge visuel
+        if "ghcr.io" in elem["text"].lower() or "github container registry" in elem["text"].lower():
+            story.append(Spacer(1, 0.1 * cm))
+            ghcr_badge = Table(
+                [[p(raw_html, "Bodyx")]],
+                colWidths=[17.2 * cm],
+            )
+            ghcr_badge.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#E8F4FD")),
+                ("BOX", (0, 0), (-1, -1), 0.6, GHCR_BLUE),
+                ("LEFTPADDING", (0, 0), (-1, -1), 10),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ]))
+            story.append(ghcr_badge)
+            story.append(Spacer(1, 0.1 * cm))
+        else:
+            story.append(p(raw_html, "Bodyx"))
+        i += 1
 
     elif t == "code":
-        story.append(code_block(elem["text"]))
+        code_text = elem["text"]
+        story.append(code_block(code_text))
         story.append(Spacer(1, 0.2 * cm))
+        # Si le bloc contient ghcr.io, ajouter un petit badge d'info
+        if "ghcr.io" in code_text.lower():
+            story.append(p(
+                '<font face="DejaVuMono" size="7" color="#2496ED">'
+                '  GHCR — GitHub Container Registry</font>',
+                "Small"
+            ))
+            story.append(Spacer(1, 0.1 * cm))
+        i += 1
 
     elif t == "table":
         story.append(Spacer(1, 0.15 * cm))
         story.append(make_table(elem["headers"], elem["rows"]))
         story.append(Spacer(1, 0.3 * cm))
+        i += 1
 
     elif t == "hr":
         story.append(Spacer(1, 0.3 * cm))
+        i += 1
 
     elif t == "blockquote":
         # Traiter comme un callout
         body = md_to_html(elem["text"])
         # Détecter si c'est une note spéciale
         if "sécurité" in body.lower() or "fail" in body.lower():
-            bg = ORANGE
+            bg = ORANGE_BG
+        elif "ghcr.io" in elem["text"].lower() or "github container registry" in elem["text"].lower():
+            bg = colors.HexColor("#E8F4FD")  # GHCR blue
         elif "version" in body.lower() or "août" in body.lower():
             bg = LIGHT_BLUE
         else:
             bg = LIGHT_BLUE
         story.append(callout("Note", body, bg))
         story.append(Spacer(1, 0.1 * cm))
+        i += 1
 
     elif t == "bullets":
         first = True
@@ -415,11 +578,16 @@ for elem in elements:
             story.append(bullet(md_to_html(item)))
             first = False
         story.append(Spacer(1, 0.15 * cm))
+        i += 1
 
     elif t == "numbered":
         for idx, item in enumerate(elem["items"], 1):
             story.append(numbered_bullet(idx, md_to_html(item)))
         story.append(Spacer(1, 0.15 * cm))
+        i += 1
+
+    else:
+        i += 1
 
 
 # ── Génération du PDF ────────────────────────────────────────────────

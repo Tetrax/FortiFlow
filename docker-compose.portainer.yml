@@ -1,13 +1,10 @@
-# Portainer Stack — FortiFlow (déploiement sans build)
-# Utiliser ce fichier dans Portainer → Stacks → Add stack
-# L'image doit exister localement (docker build) ou être pullée depuis GHCR.
+# Portainer Stack — FortiFlow (Repository method)
+# Portainer télécharge automatiquement l'image depuis GHCR.
+# Fichier référencé dans Portainer → Stacks → Add stack → Repository
 
 services:
   fortiflow:
-    # Option A : image locale (buildée au préalable)
-    image: fortiflow-fortiflow:latest
-    # Option B : image depuis GitHub Container Registry (décommenter et commenter ci-dessus)
-    # image: ghcr.io/tetrax/fortiflow:latest
+    image: ghcr.io/tetrax/fortiflow:latest
     container_name: fortiflow
     restart: unless-stopped
     ports:
@@ -24,7 +21,7 @@ services:
       - MAX_ANALYSIS_WORKERS=1
       - MAX_ANALYSIS_QUEUE=3
       - ANALYSIS_WORKER_MEMORY_MB=0
-      # HTTPS — chemin vers les certificats dans le conteneur
+      # HTTPS — chemins vers certificats dans le conteneur
       - SSL_KEY=/certs/privkey.pem
       - SSL_CERT=/certs/fullchain.pem
     security_opt:
