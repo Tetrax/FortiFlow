@@ -4,7 +4,7 @@ Version 2.0 — 3 août 2026 — Revue et corrigé par Da Vinci (QA)
 
 CI : VERTE (4/4) | Déploiement : Portainer | Image : ghcr.io/tetrax/fortiflow:latest
 
-Ce guide explique **pas à pas** comment déployer l'application sur la VM de production. L'application sera accessible en HTTPS sur le réseau interne à l'adresse **https://fortiflow.monentreprise.lan.**
+Ce guide explique pas à pas comment déployer l'application sur la VM de production. L'application sera accessible en HTTPS sur le réseau interne à l'adresse **https://fortiflow.monentreprise.lan.**
 
 | ■ Machine | ■ Où ? | ■ Qui ? | ■ Accès |
 |---|---|---|---|
@@ -15,32 +15,87 @@ Ce guide explique **pas à pas** comment déployer l'application sur la VM de pr
 
 ---
 
-## Déroulé des opérations
+## 1. Préparer les éléments nécessaires
 
-1. **Présentation du projet**
-2. **ÉTAPE 1 — Connexion à la VM de production**
-3. **ÉTAPE 2 — Création des répertoires persistants**
-4. **ÉTAPE 3 — Vérification du port 13737**
-5. **ÉTAPE 4 — Déploiement du stack dans Portainer**
-6. **ÉTAPE 5 — Vérification du bon fonctionnement**
-7. **ÉTAPE 6 — Mise en place du HTTPS avec certificat interne**
-8. **Mise à jour future**
-9. **Dépannage**
-10. **Checklist finale**
+### Machine cible
+
+La VM de production doit disposer de :
+
+- Docker (≥ 24.0) installé et fonctionnel ;
+- Portainer Community Edition accessible sur le port 9443 ;
+- une adresse IP LAN fixe ;
+- un accès SSH root pour les commandes d'installation ;
+- des règles firewall limitant le port 13737 aux réseaux internes autorisés.
+
+### Droits d'accès
+
+- Accès à la console Portainer avec un compte administrateur ;
+- Accès SSH root sur la VM de production ;
+- Connexion au réseau interne de l'entreprise.
+
+### Image Docker
+
+L'image Docker est déjà buildée par la CI. **Aucune construction manuelle n'est nécessaire.**
+
+- Registre : `ghcr.io`
+- Image : `ghcr.io/tetrax/fortiflow:latest`
+
+> ■ L'image est publique. **Rien à builder.** Le déploiement se fait intégralement via Portainer en mode Repository.
 
 ---
 
-## 1. Présentation du projet
+## 2. Présentation du projet
 
 **FortiFlow** est un outil d'analyse de logs trafic **FortiGate / FortiAnalyzer** pour les prestations de segmentation réseau. Il importe les logs trafic, conserve leur contexte FortiGate/VDOM, construit les matrices de flux, rapproche les observations de la configuration et du routage, puis prépare une CLI FortiGate destinée à être revue par un ingénieur.
 
+### Architecture
+
 Un seul conteneur Docker : **fortiflow** (Node.js + Express, port interne 3737).
 
-> ■■ L'image Docker est déjà buildée par la CI. Rien à builder. Image : **ghcr.io/tetrax/fortiflow:latest.**
+```
+┌─────────────────────────────────────┐
+│           VM de production          │
+│  ┌───────────────────────────────┐  │
+│  │       Portainer (9443)        │  │
+│  │  ┌─────────────────────────┐  │  │
+│  │  │   Stack fortiflow       │  │  │
+│  │  │  ┌───────────────────┐  │  │  │
+│  │  │  │  fortiflow:latest │  │  │  │
+│  │  │  │  (port 3737)      │  │  │  │
+│  │  │  └───────────────────┘  │  │  │
+│  │  └─────────────────────────┘  │  │
+│  │          ▲                     │  │
+│  │          │ Nginx (443)         │  │
+│  └──────────┼─────────────────────┘  │
+│             │ port 13737             │
+└─────────────┼────────────────────────┘
+              │
+     Réseau interne (LAN)
+              │
+     https://fortiflow.monentreprise.lan
+```
+
+### Variables d'environnement principales
+
+| Variable | Valeur par défaut | Description |
+|---|---|---|
+| PORT | 3737 | Port interne du conteneur |
+| DOMAIN | devval.com | Domaine de l'application |
+| MAX_UPLOAD_SIZE_MB | 2048 | Taille max d'upload (Mo) |
+| MAX_DECOMPRESSED_SIZE_MB | 4096 | Taille max après décompression (Mo) |
+| MAX_ARCHIVE_ENTRIES | 100 | Nombre max d'entrées dans une archive |
+| MAX_XLSX_SIZE_MB | 100 | Taille max XLSX (Mo) |
+| MAX_WORKSPACE_UNCOMPRESSED_MB | 1024 | Taille max workspace (Mo) |
+| MAX_SESSION_DEDUPE_KEYS | 2000000 | Max clés de déduplication par session |
+| MAX_ANALYSIS_WORKERS | 1 | Workers d'analyse parallèles |
+| MAX_ANALYSIS_QUEUE | 3 | File d'attente d'analyse |
+| ANALYSIS_WORKER_MEMORY_MB | 0 | Mémoire par worker (0 = auto) |
+
+> ■ Les variables `SSL_KEY` et `SSL_CERT` sont optionnelles. Elles ne sont nécessaires que pour l'Option B (TLS géré par l'application, voir section 11).
 
 ---
 
-## Revue de code synthétique
+## 3. Revue de code synthétique
 
 Revue réalisée le 3 août 2026 par l'équipe Da Vinci (Socrate, Archimède, Ada). 49 tests passent, 0 échec.
 
@@ -58,93 +113,110 @@ Revue réalisée le 3 août 2026 par l'équipe Da Vinci (Socrate, Archimède, Ad
 
 ---
 
-## 2. ÉTAPE 1 — Connexion à la VM de production
+## 4. Connexion à la VM de production
 
-### 2.1 Ce que tu vas faire
+### 4.1 Ouvrir une session SSH
 
-Te connecter en **root** sur la VM de l'entreprise où tourne Portainer.
+Se connecter en **root** sur la VM de l'entreprise où tourne Portainer.
 
-### 2.2 Commande
-
-```
+```bash
 # Depuis ton poste :
 ssh root@ADRESSE_IP_DE_LA_VM
+```
 
-# Vérifier Portainer :
+### 4.2 Vérifier Portainer
+
+```bash
 docker ps | grep portainer
 # → Doit afficher une ligne
+```
 
-# Vérifier Docker :
+### 4.3 Vérifier Docker
+
+```bash
 docker version
 # → Doit être ≥ 24.0
 ```
 
 ---
 
-## 3. ÉTAPE 2 — Création des répertoires persistants
+## 5. Création des répertoires persistants
 
-### 3.1 Pourquoi ?
+### 5.1 Pourquoi ?
 
 Les conteneurs sont éphémères. Les données doivent survivre aux mises à jour → on crée des répertoires montés.
 
-### 3.2 Commandes
+### 5.2 Création et permissions
 
-```
+```bash
 mkdir -p /srv/fortiflow/data /srv/fortiflow/certificates
 chown -R 1000:1000 /srv/fortiflow
+```
+
+### 5.3 Vérification
+
+```bash
 ls -la /srv/fortiflow/
 # Doit afficher data/ certificates/ avec 1000:1000
 ```
 
-> ■ Si Docker utilise un UID différent : **id docker** pour trouver le bon.
+> ■ Si Docker utilise un UID différent : exécuter `id docker` pour trouver le bon.
 
 ---
 
-## 4. ÉTAPE 3 — Vérification du port 13737
+## 6. Vérification du port 13737
 
-### 4.1 Pourquoi ?
+### 6.1 Pourquoi ?
 
 L'application utilise le port **13737** en externe (mappé vers 3737 dans le conteneur). On vérifie qu'il est libre.
 
-### 4.2 Commande
+### 6.2 Vérification
 
-```
+```bash
 ss -tlnp | grep 13737
 # RIEN affiché → OK. Sinon → choisir un autre port.
 ```
 
+> ■ Si le port est occupé, modifier le mapping dans le fichier `docker-compose.portainer.yml` avant de créer le stack.
+
 ---
 
-## 5. ÉTAPE 4 — Déploiement du stack dans Portainer
+## 7. Déployer le stack dans Portainer
 
-### 5.1 Ce que tu vas faire
+### 7.1 Méthode de déploiement
 
-Créer un **stack** Portainer en mode Repository. Il télécharge automatiquement l'image depuis ghcr.io et démarre le conteneur.
+Le déploiement utilise le mode **Repository** de Portainer. L'image est automatiquement téléchargée depuis `ghcr.io/tetrax/fortiflow:latest`.
 
-### 5.2 Ouvrir Portainer
+Ne pas utiliser le mode Upload ni importer d'archive `.tar`.
+
+### 7.2 Ouvrir Portainer
 
 ```
 https://ADRESSE_IP_DE_LA_VM:9443
-# Se connecter
+# Se connecter avec un compte administrateur
 ```
 
-### 5.3 Créer le stack
+### 7.3 Créer le stack
 
-```
-1. Menu gauche → "Stacks"
-2. "+ Add stack"
-3. Name : fortiflow
-4. Build method : Repository
-5. Repository URL : https://github.com/Tetrax/FortiFlow
-6. Repository reference : refs/heads/main
-7. Compose path : docker-compose.portainer.yml
-```
+1. Menu gauche → **Stacks**
+2. Cliquer sur **+ Add stack**
+3. Saisir le nom :
+   ```
+   fortiflow
+   ```
+4. Build method : **Repository**
+5. Saisir les informations du dépôt :
+   ```
+   Repository URL       : https://github.com/Tetrax/FortiFlow
+   Repository reference : refs/heads/main
+   Compose path         : docker-compose.portainer.yml
+   ```
 
-Le fichier docker-compose.portainer.yml référence l'image **ghcr.io/tetrax/fortiflow:latest** — Portainer la télécharge automatiquement.
+Le fichier `docker-compose.portainer.yml` référence directement l'image **ghcr.io/tetrax/fortiflow:latest** — Portainer la télécharge automatiquement lors du déploiement.
 
-### 5.4 Variables d'environnement
+### 7.4 Variables d'environnement
 
-Section Environment variables → + Add environment variable pour chaque ligne :
+Dans la section **Environment variables**, cliquer sur **+ Add environment variable** pour chaque ligne :
 
 ```
 Nom                                  Valeur
@@ -160,71 +232,118 @@ MAX_SESSION_DEDUPE_KEYS              2000000
 MAX_ANALYSIS_WORKERS                 1
 MAX_ANALYSIS_QUEUE                   3
 ANALYSIS_WORKER_MEMORY_MB            0
-SSL_KEY                              /certs/privkey.pem
-SSL_CERT                             /certs/fullchain.pem
 ```
 
-> ■ Les variables SSL_KEY et SSL_CERT sont déjà dans le compose. Ne pas les dupliquer dans Portainer sauf si tu les surcharges.
+> ■ Ne pas ajouter `SSL_KEY` ni `SSL_CERT` à ce stade. Ces variables seront ajoutées uniquement si l'Option B (TLS géré par l'application, section 11) est retenue.
 
-### 5.5 Déployer
+### 7.5 Déployer
 
-Cliquer **Deploy the stack**. Portainer : 1) Pull ghcr.io 2) Crée fortiflow 3) Démarre (~15s).
+Cliquer **Deploy the stack**. Portainer :
+1. Télécharge l'image depuis `ghcr.io/tetrax/fortiflow:latest`
+2. Crée le conteneur `fortiflow`
+3. Démarre le conteneur
+
+Le déploiement prend environ 15 secondes.
 
 ---
 
-## 6. ÉTAPE 5 — Vérification
+## 8. Vérifier le fonctionnement initial en HTTP
 
-### 6.1 Depuis Portainer
+### 8.1 Vérification dans Portainer
 
-**Containers** → le conteneur doit être **running (healthy)** :
+Ouvrir **Containers** → le conteneur doit être **running (healthy)** :
 
 ```
 fortiflow          running (healthy)
 ```
 
-### 6.2 Depuis le terminal SSH root
+### 8.2 Vérification depuis le terminal SSH
 
-```
+```bash
 docker ps --filter "name=fortiflow"
+```
+
+Identifier le conteneur et vérifier son statut :
+
+```bash
+CONTAINER="$(docker ps --filter name=fortiflow --format '{{.Names}}')"
+printf 'Conteneur : %s\n' "$CONTAINER"
+```
+
+Contrôler les logs :
+
+```bash
+docker logs --tail 50 "$CONTAINER"
+```
+
+Tester l'application :
+
+```bash
 curl -s http://localhost:13737/ | head -10
 # → Doit afficher du HTML avec "FortiFlow"
-docker logs fortiflow --tail 30
 ```
 
-### 6.3 Depuis un navigateur (réseau interne)
+Vérifier le healthcheck :
+
+```bash
+docker inspect --format '{{.State.Health.Status}}' "$CONTAINER"
+# → healthy
+```
+
+### 8.3 Vérification depuis un navigateur (réseau interne)
 
 ```
 http://ADRESSE_IP_DE_LA_VM:13737
 # → Dashboard FortiFlow
 ```
 
+À ce stade, le port 13737 doit être accessible uniquement depuis les VLAN ou sous-réseaux internes autorisés. Il ne doit jamais être publié sur Internet.
+
 ---
 
-## 7. ÉTAPE 6 — HTTPS avec certificat interne
+## 9. Préparer le certificat TLS
 
-### 7.1 Contexte
+### 9.1 Contexte
 
 L'URL finale sera : **https://fortiflow.monentreprise.lan**
 
-Certificat fourni par la **PKI interne** de l'entreprise (AD CS, EJBCA, etc.). **Pas de Let's Encrypt.**
+Le certificat est fourni par la **PKI interne** de l'entreprise (AD CS, EJBCA, etc.). **Pas de Let's Encrypt.**
 
-### 7.2 Obtenir le certificat
+### 9.2 SAN requis
+
+Le certificat doit contenir dans ses SAN DNS :
+
+```
+fortiflow.monentreprise.lan
+```
+
+Un wildcard peut être utilisé :
+
+```
+*.monentreprise.lan
+```
+
+Ce wildcard couvre par exemple `fortiflow.monentreprise.lan`, mais ne couvre pas `monentreprise.lan` seul.
+
+### 9.3 Obtenir le certificat
 
 Demander à l'équipe IT les deux fichiers pour **fortiflow.monentreprise.lan** (ou wildcard `*.monentreprise.lan`) :
 
 1. Certificat public : `fortiflow.lan.crt`
 2. Clé privée : `fortiflow.lan.key`
 
-Transférer vers la VM :
+> ■ Ne jamais ajouter ces fichiers, les clés privées ou leurs mots de passe dans Git.
 
-```
+### 9.4 Transférer les fichiers vers la VM
+
+```bash
 scp fortiflow.lan.crt root@VM_IP:/srv/fortiflow/certificates/
 scp fortiflow.lan.key root@VM_IP:/srv/fortiflow/certificates/
 ```
 
-### 7.3 Placer les certificats
+### 9.5 Placer les certificats
 
-```
+```bash
 cd /srv/fortiflow/certificates
 ls -la  # Doit afficher fortiflow.lan.crt et fortiflow.lan.key
 chmod 600 fortiflow.lan.key
@@ -232,15 +351,25 @@ chmod 644 fortiflow.lan.crt
 chown -R 1000:1000 /srv/fortiflow/certificates
 ```
 
-### 7.4 Configurer Nginx
+---
 
+## 10. Option A — HTTPS avec Nginx (recommandé)
+
+### 10.1 Installer Nginx si nécessaire
+
+```bash
+apt update && apt install -y nginx
 ```
+
+### 10.2 Créer la configuration Nginx
+
+```bash
 nano /etc/nginx/sites-available/fortiflow
 ```
 
-Coller ce contenu :
+Coller le contenu suivant :
 
-```
+```nginx
 server {
     listen 443 ssl http2;
     server_name fortiflow.monentreprise.lan;
@@ -267,14 +396,14 @@ server {
 }
 ```
 
-### 7.5 Activer
+### 10.3 Activer le site
 
-```
+```bash
 ln -s /etc/nginx/sites-available/fortiflow /etc/nginx/sites-enabled/
 nginx -t && systemctl reload nginx
 ```
 
-### 7.6 DNS interne
+### 10.4 DNS interne
 
 Demander à l'équipe IT un enregistrement DNS interne :
 
@@ -282,81 +411,159 @@ Demander à l'équipe IT un enregistrement DNS interne :
 fortiflow.monentreprise.lan → IP_VM
 ```
 
-> ■ **En attendant : ajouter IP_VM fortiflow.monentreprise.lan dans /etc/hosts de ton poste.**
+> ■ **En attendant** : ajouter `IP_VM fortiflow.monentreprise.lan` dans `/etc/hosts` du poste de test.
 
-### 7.7 Vérification HTTPS
+---
 
+## 11. Option B — HTTPS sans Nginx (TLS géré par l'application)
+
+### 11.1 Contexte
+
+Avec cette option, l'application gère elle-même le TLS. Le serveur Node.js écoute directement en HTTPS sur le port 13737.
+
+> ■■ **Avec TLS direct, l'application écoute en HTTPS sur le port 13737 (plus HTTP). Le test curl doit devenir : `curl -k https://localhost:13737`.**
+
+### 11.2 Placer les certificats pour l'application
+
+Les certificats doivent être au format PEM :
+
+```bash
+mkdir -p /etc/ssl/fortiflow/
+cp /srv/fortiflow/certificates/fortiflow.lan.crt /etc/ssl/fortiflow/fullchain.pem
+cp /srv/fortiflow/certificates/fortiflow.lan.key /etc/ssl/fortiflow/privkey.pem
+chmod 644 /etc/ssl/fortiflow/fullchain.pem
+chmod 600 /etc/ssl/fortiflow/privkey.pem
+chown -R 1000:1000 /etc/ssl/fortiflow/
 ```
-https://fortiflow.monentreprise.lan
-# → Dashboard en HTTPS, cadenas vert (PKI entreprise reconnue)
-```
 
-### 7.8 Alternative sans Nginx (TLS géré par l'application)
+### 11.3 Ajouter les variables SSL dans Portainer
 
-Ajouter ces variables dans le stack Portainer :
+Dans le stack Portainer, section **Environment variables**, ajouter :
 
 ```
 SSL_KEY=/certs/privkey.pem
 SSL_CERT=/certs/fullchain.pem
 ```
 
-Puis **Stacks → Pull and redeploy.**
+### 11.4 Redéployer
 
-> ■■ **Avec TLS direct, l'application écoute en HTTPS sur le port 13737 (plus HTTP). Le test curl doit devenir : curl -k https://localhost:13737.**
+Dans Portainer : **Stacks → fortiflow → Pull and redeploy → Update**.
 
-Les certificats doivent être dans `/etc/ssl/fortiflow/` sur l'hôte — le conteneur les monte en `/certs/` (lecture seule). Le serveur détecte automatiquement leur présence et bascule en HTTPS.
+Le conteneur monte `/etc/ssl/fortiflow/` en `/certs/` (lecture seule). Le serveur détecte automatiquement la présence des certificats et bascule en HTTPS.
+
+> ■ Les variables `SSL_KEY` et `SSL_CERT` sont déjà référencées dans le compose. Ne pas les dupliquer dans Portainer sauf si tu les surcharges.
 
 ---
 
-## 8. Mise à jour future
+## 12. Vérifier le fonctionnement en HTTPS
 
-### 8.1 Portainer (recommandé)
+### 12.1 Vérification dans Portainer
+
+Ouvrir **Containers** → le conteneur `fortiflow` doit être **running (healthy)**.
+
+### 12.2 Vérification depuis le terminal SSH
+
+```bash
+# Option A (Nginx) :
+curl -k https://localhost/
+# → Dashboard FortiFlow
+
+# Option B (TLS direct) :
+curl -k https://localhost:13737/
+# → Dashboard FortiFlow
+```
+
+### 12.3 Vérification depuis un navigateur
 
 ```
-Stacks → fortiflow → Pull and redeploy → Update
+https://fortiflow.monentreprise.lan
+# → Dashboard en HTTPS, cadenas vert (PKI entreprise reconnue)
 ```
 
-Portainer pull **ghcr.io/tetrax/fortiflow:latest** et redémarre (~5 sec d'interruption).
+L'absence d'alerte nécessite :
+- un SAN DNS correct ;
+- une chaîne de certificats correcte ;
+- une CA interne installée dans le magasin de confiance du poste.
 
-### 8.2 SSH (plan B)
+### 12.4 Vérifier que HTTP n'est plus exposé
 
+```bash
+# Option A : le port 13737 ne doit plus être accessible directement
+curl --max-time 3 http://IP_LAN_VM:13737/ && echo 'ERREUR' || echo 'OK'
+
+# Option B : idem
+curl --max-time 3 http://IP_LAN_VM:13737/ && echo 'ERREUR' || echo 'OK'
 ```
+
+Une fois HTTPS validé, ne plus exposer HTTP sur le réseau.
+
+---
+
+## 13. Mise à jour future
+
+### 13.1 Portainer (recommandé)
+
+Dans Portainer :
+1. Ouvrir **Stacks**
+2. Sélectionner `fortiflow`
+3. Cliquer sur **Pull and redeploy**
+4. **Update**
+
+Portainer télécharge `ghcr.io/tetrax/fortiflow:latest` et redémarre le conteneur. L'interruption de service est d'environ 5 secondes.
+
+Ne pas supprimer les volumes pendant la mise à jour.
+
+### 13.2 SSH (plan B)
+
+```bash
 cd /srv/fortiflow
 docker compose -f docker-compose.portainer.yml pull
 docker compose -f docker-compose.portainer.yml up -d
 ```
 
-Le compose référence maintenant ghcr.io directement → **docker compose pull** fonctionne.
+Le compose référence directement `ghcr.io` → `docker compose pull` fonctionne.
 
 ---
 
-## 9. Dépannage
+## 14. Dépannage
 
 | ■ Problème | ■ Vérification / Action |
 |---|---|
-| Stack ne se déploie pas | Vérifier toutes les variables : PORT, DOMAIN, MAX_UPLOAD_SIZE_MB, etc. |
+| Stack ne se déploie pas | Vérifier toutes les variables d'environnement : PORT, DOMAIN, MAX_UPLOAD_SIZE_MB, etc. |
 | Conteneur en erreur | `chown -R 1000:1000 /srv/fortiflow` puis `docker logs fortiflow` |
 | Statut healthy absent | Vérifier que le healthcheck est présent dans le compose |
-| HTTPS ne fonctionne pas | Vérifier les chemins dans Nginx, `nginx -t`, vérifier le DNS interne |
+| HTTPS ne fonctionne pas (Option A) | Vérifier les chemins dans Nginx, `nginx -t`, vérifier le DNS interne |
+| HTTPS ne fonctionne pas (Option B) | Vérifier que SSL_KEY et SSL_CERT pointent sur les bons fichiers dans /certs/ |
 | Certificat non reconnu | Vérifier que le poste fait confiance à la CA racine de l'entreprise |
 | Dashboard page blanche | `docker logs fortiflow --tail 50`, vérifier les variables d'environnement |
 | Erreur `ANALYSIS_CANCELLED` | Analyse interrompue — relancer l'upload |
 | Erreur `DECOMPRESSED_SIZE_LIMIT` | Archive trop volumineuse — augmenter `MAX_DECOMPRESSED_SIZE_MB` |
 | Portainer : `no such image` | Utiliser la méthode Repository (pas d'import manuel) |
 | Permission denied sur /certs | `chmod 644` sur les .pem dans `/etc/ssl/fortiflow/` |
+| Le navigateur affiche une alerte | Vérifier la résolution DNS, le FQDN dans l'URL, le SAN du certificat, la chaîne envoyée |
 
 ---
 
-## 10. Checklist finale
+## 15. Checklist finale
 
-- `/srv/fortiflow/` créé avec permissions/ownership `1000:1000`
-- Port `13737` libre
-- Stack Portainer déployé, conteneur healthy
-- `curl http://localhost:13737` fonctionne
-- Certificats dans `/srv/fortiflow/certificates/` (ou `/etc/ssl/fortiflow/`)
-- Nginx configuré pour HTTPS sur `fortiflow.monentreprise.lan`
-- DNS interne créé
-- `https://fortiflow.monentreprise.lan` accessible, cadenas vert
+Le déploiement est terminé lorsque tous les points suivants sont validés :
+
+- [ ] `/srv/fortiflow/data` et `/srv/fortiflow/certificates` créés avec permissions `1000:1000`
+- [ ] Port `13737` libre sur la VM
+- [ ] Stack Portainer `fortiflow` déployé en mode Repository
+- [ ] Image `ghcr.io/tetrax/fortiflow:latest` téléchargée automatiquement
+- [ ] Conteneur `fortiflow` est **healthy**
+- [ ] `curl http://localhost:13737/` répond depuis la VM
+- [ ] Dashboard accessible depuis le réseau interne en HTTP (étape 8)
+- [ ] Certificat TLS obtenu auprès de l'équipe IT (SAN : `fortiflow.monentreprise.lan`)
+- [ ] Certificats placés dans `/srv/fortiflow/certificates/` avec permissions correctes
+- [ ] Option A : Nginx configuré et actif sur le port 443
+- [ ] Option B : variables `SSL_KEY` et `SSL_CERT` configurées, certificats dans `/etc/ssl/fortiflow/`
+- [ ] DNS interne créé : `fortiflow.monentreprise.lan → IP_VM`
+- [ ] `https://fortiflow.monentreprise.lan` accessible, cadenas vert
+- [ ] HTTP n'est plus exposé
+- [ ] Le firewall limite l'accès aux réseaux internes autorisés
+- [ ] Aucun secret ou clé privée n'est stocké dans Git ou dans l'image
 
 ■ **Déploiement terminé. Application accessible en HTTPS sur le réseau interne.** ■
 
