@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
-"""Génère le PDF du tutoriel FortiFlow à partir de TUTORIEL.md."""
+"""Génère un guide opérationnel PDF depuis le Markdown du dépôt."""
+
+from __future__ import annotations
 
 import re
+from html import escape as html_escape
+from pathlib import Path
+
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4
@@ -10,208 +15,374 @@ from reportlab.lib.units import cm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-    KeepTogether, PageBreak,
+    BaseDocTemplate,
+    Frame,
+    PageBreak,
+    PageTemplate,
+    Paragraph,
+    Spacer,
+    Table,
+    TableStyle,
+    XPreformatted,
 )
 
-# ── Chemins ──────────────────────────────────────────────────────────
-MD_PATH = "/opt/data/FortiFlow/docs/TUTORIEL.md"
-OUT = "/opt/data/FortiFlow/docs/fortiflow-tutoriel.pdf"
-FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+ROOT = Path(__file__).resolve().parents[1]
+if Path(__file__).stem == "create_fortiflow_pdf":
+    PROJECT = "FortiFlow"
+    MD_PATH = ROOT / "docs" / "TUTORIEL.md"
+    OUT_PATH = ROOT / "docs" / "fortiflow-tutoriel.pdf"
+    SUMMARY = (
+        "Déployer un conteneur FortiFlow avec Portainer Repository, "
+        "valider son état de santé et publier le service en HTTPS."
+    )
+else:
+    PROJECT = "Upgrade Path"
+    MD_PATH = ROOT / "docs" / "upgrade-path-tutoriel.md"
+    OUT_PATH = ROOT / "docs" / "pdf" / "upgrade-path-tutoriel.pdf"
+    SUMMARY = (
+        "Déployer les services web et scheduler avec Portainer Repository, "
+        "valider leur fonctionnement et publier le service en HTTPS."
+    )
+
+FONT_REGULAR = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 FONT_MONO = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
-
-pdfmetrics.registerFont(TTFont("DejaVu", FONT))
+pdfmetrics.registerFont(TTFont("DejaVu", FONT_REGULAR))
 pdfmetrics.registerFont(TTFont("DejaVu-Bold", FONT_BOLD))
 pdfmetrics.registerFont(TTFont("DejaVuMono", FONT_MONO))
 
-# ── Couleurs ─────────────────────────────────────────────────────────
+PAGE_W, PAGE_H = A4
+MARGIN_X = 1.45 * cm
+MARGIN_TOP = 1.4 * cm
+MARGIN_BOTTOM = 1.75 * cm
+CONTENT_W = PAGE_W - 2 * MARGIN_X
+
 NAVY = colors.HexColor("#0F2747")
 BLUE = colors.HexColor("#1976D2")
+TEAL = colors.HexColor("#00897B")
+GRAY = colors.HexColor("#52606D")
+DARK_TEXT = colors.HexColor("#263238")
+BORDER = colors.HexColor("#D9E2EC")
 LIGHT_BLUE = colors.HexColor("#EAF3FF")
 LIGHT_GREEN = colors.HexColor("#EAF8F1")
 ORANGE_BG = colors.HexColor("#FFF3E0")
-GRAY = colors.HexColor("#52606D")
-BORDER = colors.HexColor("#D9E2EC")
-DARK_TEXT = colors.HexColor("#263238")
 CODE_BG = colors.HexColor("#F4F7FA")
 CODE_TEXT = colors.HexColor("#13293D")
-AMBER = colors.HexColor("#E6960C")
-TEAL = colors.HexColor("#00897B")
-AMBER_BG = colors.HexColor("#FFF8E7")
-TEAL_BG = colors.HexColor("#E6F7F5")
-PURPLE = colors.HexColor("#7C4DFF")
-PURPLE_BG = colors.HexColor("#F3EEFF")
-GHCR_BLUE = colors.HexColor("#2496ED")
+ROW_ALT = colors.HexColor("#FAFBFC")
 
-# ── Styles ───────────────────────────────────────────────────────────
 styles = getSampleStyleSheet()
+styles.add(
+    ParagraphStyle(
+        name="CoverTitle",
+        parent=styles["Title"],
+        fontName="DejaVu-Bold",
+        fontSize=24,
+        leading=30,
+        textColor=NAVY,
+        alignment=TA_CENTER,
+        spaceAfter=10,
+    )
+)
+styles.add(
+    ParagraphStyle(
+        name="CoverSubtitle",
+        parent=styles["Normal"],
+        fontName="DejaVu",
+        fontSize=10.5,
+        leading=15,
+        textColor=GRAY,
+        alignment=TA_CENTER,
+        spaceAfter=18,
+    )
+)
+styles.add(
+    ParagraphStyle(
+        name="TOCTitle",
+        parent=styles["Heading1"],
+        fontName="DejaVu-Bold",
+        fontSize=17,
+        leading=22,
+        textColor=NAVY,
+        spaceAfter=14,
+    )
+)
+styles.add(
+    ParagraphStyle(
+        name="TOCEntry",
+        parent=styles["BodyText"],
+        fontName="DejaVu",
+        fontSize=10.2,
+        leading=20,
+        textColor=DARK_TEXT,
+        leftIndent=8,
+    )
+)
+styles.add(
+    ParagraphStyle(
+        name="H1",
+        parent=styles["Heading1"],
+        fontName="DejaVu-Bold",
+        fontSize=16,
+        leading=21,
+        textColor=NAVY,
+        spaceBefore=16,
+        spaceAfter=8,
+        keepWithNext=True,
+    )
+)
+styles.add(
+    ParagraphStyle(
+        name="H2",
+        parent=styles["Heading2"],
+        fontName="DejaVu-Bold",
+        fontSize=11.5,
+        leading=15,
+        textColor=BLUE,
+        spaceBefore=10,
+        spaceAfter=5,
+        keepWithNext=True,
+    )
+)
+styles.add(
+    ParagraphStyle(
+        name="Body",
+        parent=styles["BodyText"],
+        fontName="DejaVu",
+        fontSize=9.2,
+        leading=13.5,
+        textColor=DARK_TEXT,
+        spaceAfter=6,
+    )
+)
+styles.add(
+    ParagraphStyle(
+        name="Bulletx",
+        parent=styles["BodyText"],
+        fontName="DejaVu",
+        fontSize=9.1,
+        leading=13,
+        textColor=DARK_TEXT,
+        leftIndent=13,
+        firstLineIndent=-10,
+        spaceAfter=3,
+    )
+)
+styles.add(
+    ParagraphStyle(
+        name="Codex",
+        parent=styles["Code"],
+        fontName="DejaVuMono",
+        fontSize=7.2,
+        leading=10.2,
+        textColor=CODE_TEXT,
+    )
+)
+styles.add(
+    ParagraphStyle(
+        name="TableHead",
+        parent=styles["BodyText"],
+        fontName="DejaVu-Bold",
+        fontSize=8.4,
+        leading=11,
+        textColor=colors.white,
+    )
+)
+styles.add(
+    ParagraphStyle(
+        name="TableBody",
+        parent=styles["BodyText"],
+        fontName="DejaVu",
+        fontSize=8.2,
+        leading=11,
+        textColor=DARK_TEXT,
+    )
+)
 
-styles.add(ParagraphStyle(
-    name="CoverTitle", parent=styles["Title"],
-    fontName="DejaVu-Bold", fontSize=22, leading=29,
-    textColor=NAVY, alignment=TA_CENTER, spaceAfter=10,
-))
-styles.add(ParagraphStyle(
-    name="Subtitle", parent=styles["Normal"],
-    fontName="DejaVu", fontSize=10, leading=15,
-    textColor=GRAY, alignment=TA_CENTER, spaceAfter=16,
-))
-styles.add(ParagraphStyle(
-    name="H1x", parent=styles["Heading1"],
-    fontName="DejaVu-Bold", fontSize=16, leading=21,
-    textColor=NAVY, spaceBefore=18, spaceAfter=8,
-))
-styles.add(ParagraphStyle(
-    name="H2x", parent=styles["Heading2"],
-    fontName="DejaVu-Bold", fontSize=12, leading=16,
-    textColor=BLUE, spaceBefore=12, spaceAfter=5,
-))
-styles.add(ParagraphStyle(
-    name="Bodyx", parent=styles["BodyText"],
-    fontName="DejaVu", fontSize=9.4, leading=14,
-    textColor=DARK_TEXT, spaceAfter=6,
-))
-styles.add(ParagraphStyle(
-    name="Codex", parent=styles["Code"],
-    fontName="DejaVuMono", fontSize=7.8, leading=11,
-    textColor=CODE_TEXT,
-))
-styles.add(ParagraphStyle(
-    name="TableHead", parent=styles["BodyText"],
-    fontName="DejaVu-Bold", fontSize=9, leading=12,
-    textColor=colors.white,
-))
-styles.add(ParagraphStyle(
-    name="Bulletx", parent=styles["BodyText"],
-    fontName="DejaVu", fontSize=9.2, leading=13,
-    leftIndent=13, firstLineIndent=-10, spaceAfter=3,
-))
-styles.add(ParagraphStyle(
-    name="Small", parent=styles["BodyText"],
-    fontName="DejaVu", fontSize=8, leading=11, textColor=GRAY,
-))
-styles.add(ParagraphStyle(
-    name="H4x", parent=styles["Heading3"],
-    fontName="DejaVu-Bold", fontSize=10, leading=14,
-    textColor=NAVY, spaceBefore=8, spaceAfter=4,
-))
-styles.add(ParagraphStyle(
-    name="OptionLabel", parent=styles["BodyText"],
-    fontName="DejaVu-Bold", fontSize=10, leading=14,
-    textColor=colors.white,
-))
-styles.add(ParagraphStyle(
-    name="GHCRBadge", parent=styles["BodyText"],
-    fontName="DejaVuMono", fontSize=8, leading=11,
-    textColor=colors.white,
-))
 
-# ── Helpers ──────────────────────────────────────────────────────────
+def sanitize(text: str) -> str:
+    replacements = {
+        "\u00a0": " ",
+        "\u2011": "-",
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u2026": "...",
+        "\u2192": "->",
+        "\u2265": ">=",
+    }
+    for source, target in replacements.items():
+        text = text.replace(source, target)
+    return text
 
-def p(text, style="Bodyx"):
+
+def inline(text: str) -> str:
+    text = html_escape(sanitize(text), quote=False)
+    text = re.sub(
+        r"`([^`]+)`",
+        r'<font face="DejaVuMono" size="8" color="#13293D">\1</font>',
+        text,
+    )
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"\*(.+?)\*", r"<i>\1</i>", text)
+    return text
+
+
+def para(text: str, style: str = "Body") -> Paragraph:
     return Paragraph(text, styles[style])
 
 
-def code_block(text):
-    """Bloc de code avec fond gris et bordure."""
-    text = sanitize_unicode(text)
-    # Échapper HTML
-    escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    # Remplacer les sauts de ligne par <br/>
-    escaped = escaped.replace("\n", "<br/>")
-    table = Table([[Paragraph(escaped, styles["Codex"])]], colWidths=[17.2 * cm])
-    table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), CODE_BG),
-        ("BOX", (0, 0), (-1, -1), 0.5, BORDER),
-        ("LEFTPADDING", (0, 0), (-1, -1), 9),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 9),
-        ("TOPPADDING", (0, 0), (-1, -1), 7),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
-    ]))
+def parse_markdown(text: str) -> list[dict]:
+    lines = text.splitlines()
+    elements: list[dict] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        stripped = line.strip()
+        if line.startswith("# "):
+            elements.append({"type": "title", "text": line[2:].strip()})
+            index += 1
+            continue
+        if line.startswith("## "):
+            elements.append({"type": "h1", "text": line[3:].strip()})
+            index += 1
+            continue
+        if line.startswith("### "):
+            elements.append({"type": "h2", "text": line[4:].strip()})
+            index += 1
+            continue
+        if stripped.startswith("```"):
+            code_lines: list[str] = []
+            index += 1
+            while index < len(lines) and not lines[index].strip().startswith("```"):
+                code_lines.append(lines[index])
+                index += 1
+            index += 1
+            elements.append({"type": "code", "text": "\n".join(code_lines)})
+            continue
+        if (
+            "|" in line
+            and index + 1 < len(lines)
+            and re.match(r"^\|?[\s\-:|]+\|?$", lines[index + 1].strip())
+        ):
+            headers = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            index += 2
+            rows: list[list[str]] = []
+            while index < len(lines) and "|" in lines[index]:
+                rows.append(
+                    [cell.strip() for cell in lines[index].strip().strip("|").split("|")]
+                )
+                index += 1
+            elements.append(
+                {"type": "table", "headers": headers, "rows": rows}
+            )
+            continue
+        if stripped.startswith("> "):
+            quote_lines: list[str] = []
+            while index < len(lines) and lines[index].strip().startswith("> "):
+                quote_lines.append(lines[index].strip()[2:])
+                index += 1
+            elements.append({"type": "quote", "text": " ".join(quote_lines)})
+            continue
+        if stripped.startswith("- "):
+            items: list[str] = []
+            while index < len(lines) and lines[index].strip().startswith("- "):
+                items.append(lines[index].strip()[2:])
+                index += 1
+            elements.append({"type": "bullets", "items": items})
+            continue
+        if re.match(r"^\d+\.\s", stripped):
+            items = []
+            while index < len(lines) and re.match(r"^\d+\.\s", lines[index].strip()):
+                items.append(re.sub(r"^\d+\.\s+", "", lines[index].strip()))
+                index += 1
+            elements.append({"type": "numbered", "items": items})
+            continue
+        if stripped == "---":
+            elements.append({"type": "rule"})
+            index += 1
+            continue
+        if not stripped:
+            index += 1
+            continue
+
+        paragraph_lines = [stripped]
+        index += 1
+        while index < len(lines) and lines[index].strip():
+            candidate = lines[index].strip()
+            if (
+                candidate.startswith("#")
+                or candidate.startswith("```")
+                or candidate.startswith("> ")
+                or candidate.startswith("- ")
+                or re.match(r"^\d+\.\s", candidate)
+                or candidate == "---"
+                or (
+                    "|" in lines[index]
+                    and index + 1 < len(lines)
+                    and re.match(r"^\|?[\s\-:|]+\|?$", lines[index + 1].strip())
+                )
+            ):
+                break
+            paragraph_lines.append(candidate)
+            index += 1
+        elements.append({"type": "paragraph", "text": " ".join(paragraph_lines)})
+    return elements
+
+
+def code_block(text: str) -> Table:
+    block = XPreformatted(html_escape(sanitize(text)), styles["Codex"])
+    table = Table([[block]], colWidths=[CONTENT_W])
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, -1), CODE_BG),
+                ("BOX", (0, 0), (-1, -1), 0.5, BORDER),
+                ("LEFTPADDING", (0, 0), (-1, -1), 9),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 9),
+                ("TOPPADDING", (0, 0), (-1, -1), 7),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+            ]
+        )
+    )
     return table
 
 
-def callout(title, body, background=LIGHT_BLUE):
-    table = Table([[p(f"<b>{title}</b><br/>{body}", "Bodyx")]], colWidths=[17.2 * cm])
-    table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), background),
-        ("BOX", (0, 0), (-1, -1), 0.7, BORDER),
-        ("LEFTPADDING", (0, 0), (-1, -1), 10),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
-        ("TOPPADDING", (0, 0), (-1, -1), 8),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-    ]))
+def callout(title: str, body: str, background=LIGHT_BLUE) -> Table:
+    table = Table(
+        [[para(f"<b>{title}</b><br/>{body}")]],
+        colWidths=[CONTENT_W],
+    )
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, -1), background),
+                ("BOX", (0, 0), (-1, -1), 0.7, BORDER),
+                ("LEFTPADDING", (0, 0), (-1, -1), 10),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+                ("TOPPADDING", (0, 0), (-1, -1), 8),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ]
+        )
+    )
     return table
 
 
-def option_box(option_id, label, body, accent_color):
-    """Callout stylisé pour les options de mise à jour (Option A / Option B).
-
-    Affiche un badge coloré avec l'identifiant de l'option (ex: 'Option A'),
-    un titre descriptif, et le corps du texte.
-    """
-    data = [
-        [p(f"<b>{option_id}</b>  {label}", "OptionLabel")],
-        [p(f"{body}", "Bodyx")],
-    ]
-    table = Table(data, colWidths=[17.2 * cm])
-    table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), accent_color),
-        ("BACKGROUND", (0, 1), (-1, -1), AMBER_BG if "A" in option_id else TEAL_BG),
-        ("BOX", (0, 0), (-1, -1), 0.8, accent_color),
-        ("LINEBELOW", (0, 0), (-1, 0), 0.4, accent_color),
-        ("LEFTPADDING", (0, 0), (-1, -1), 12),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 12),
-        ("TOPPADDING", (0, 0), (-1, -1), 7),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
-    ]))
-    return table
-
-
-def repo_callout(title, body, icon="", accent=PURPLE):
-    """Callout pour les sections Portainer Repository / GHCR."""
-    header = f"<b>{icon}  {title}</b>" if icon else f"<b>{title}</b>"
-    data = [
-        [p(header, "H4x")],
-        [p(body, "Bodyx")],
-    ]
-    table = Table(data, colWidths=[17.2 * cm])
-    table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), PURPLE_BG),
-        ("BOX", (0, 0), (-1, -1), 0.8, accent),
-        ("LINEBELOW", (0, 0), (-1, 0), 0.4, accent),
-        ("LEFTPADDING", (0, 0), (-1, -1), 12),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 12),
-        ("TOPPADDING", (0, 0), (-1, -1), 7),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
-    ]))
-    return table
-
-
-def bullet(text):
-    return p("•  " + text, "Bulletx")
-
-
-def numbered_bullet(num, text):
-    return p(f"{num}.  {text}", "Bulletx")
-
-
-def make_table(headers, rows):
-    """Crée un tableau avec en-tête bleu marine."""
-    head_row = [p(h, "TableHead") for h in headers]
-    data_rows = [[p(cell, "Bodyx") for cell in row] for row in rows]
-    data = [head_row] + data_rows
-
-    # Largeur dynamique
-    ncols = len(headers)
-    col_width = 17.2 * cm / ncols
-
-    t = Table(data, colWidths=[col_width] * ncols, repeatRows=1)
-    tbl_style = [
+def markdown_table(headers: list[str], rows: list[list[str]]) -> Table:
+    column_count = len(headers)
+    if column_count == 2:
+        widths = [CONTENT_W * 0.34, CONTENT_W * 0.66]
+    else:
+        widths = [CONTENT_W / column_count] * column_count
+    data = [[para(inline(cell), "TableHead") for cell in headers]]
+    for row in rows:
+        padded = (row + [""] * column_count)[:column_count]
+        data.append([para(inline(cell), "TableBody") for cell in padded])
+    table = Table(data, colWidths=widths, repeatRows=1)
+    commands = [
         ("BACKGROUND", (0, 0), (-1, 0), NAVY),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTNAME", (0, 0), (-1, 0), "DejaVu-Bold"),
         ("GRID", (0, 0), (-1, -1), 0.4, BORDER),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("LEFTPADDING", (0, 0), (-1, -1), 7),
@@ -219,378 +390,151 @@ def make_table(headers, rows):
         ("TOPPADDING", (0, 0), (-1, -1), 6),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
     ]
-    # Rayures alternées pour les lignes de données
-    for i in range(1, len(data)):
-        if i % 2 == 0:
-            tbl_style.append(("BACKGROUND", (0, i), (-1, i), colors.HexColor("#FAFBFC")))
-        else:
-            tbl_style.append(("BACKGROUND", (0, i), (-1, i), colors.white))
-    t.setStyle(TableStyle(tbl_style))
-    return t
+    for row_index in range(1, len(data)):
+        commands.append(
+            (
+                "BACKGROUND",
+                (0, row_index),
+                (-1, row_index),
+                ROW_ALT if row_index % 2 == 0 else colors.white,
+            )
+        )
+    table.setStyle(TableStyle(commands))
+    return table
 
 
-def footer(canvas, doc):
+def footer(canvas, document) -> None:
     canvas.saveState()
     canvas.setStrokeColor(BORDER)
-    canvas.line(1.4 * cm, 1.25 * cm, 19.6 * cm, 1.25 * cm)
+    canvas.line(
+        MARGIN_X,
+        MARGIN_BOTTOM - 0.43 * cm,
+        PAGE_W - MARGIN_X,
+        MARGIN_BOTTOM - 0.43 * cm,
+    )
     canvas.setFont("DejaVu", 7.5)
     canvas.setFillColor(GRAY)
-    canvas.drawString(1.4 * cm, 0.8 * cm, "FortiFlow — Guide complet")
-    canvas.drawRightString(19.6 * cm, 0.8 * cm, f"Page {doc.page}")
+    canvas.drawString(
+        MARGIN_X,
+        MARGIN_BOTTOM - 0.88 * cm,
+        f"{PROJECT} - Guide opérationnel",
+    )
+    canvas.drawRightString(
+        PAGE_W - MARGIN_X,
+        MARGIN_BOTTOM - 0.88 * cm,
+        f"Page {document.page}",
+    )
     canvas.restoreState()
 
 
-# ── Parser Markdown ──────────────────────────────────────────────────
+def build_story(elements: list[dict]) -> list:
+    chapters = [element for element in elements if element["type"] == "h1"]
+    story: list = [Spacer(1, 2.0 * cm)]
+    story.append(para(PROJECT, "CoverTitle"))
+    story.append(
+        para(
+            "GUIDE OPÉRATIONNEL<br/>Portainer Repository • GHCR • HTTPS",
+            "CoverSubtitle",
+        )
+    )
+    story.append(Spacer(1, 0.25 * cm))
+    story.append(callout("OBJECTIF", inline(SUMMARY), LIGHT_GREEN))
+    story.append(Spacer(1, 0.65 * cm))
+    story.append(
+        callout(
+            "MÉTHODE",
+            "Dépôt GitHub public, image GHCR et redéploiement depuis Portainer. "
+            "Aucun transfert d'archive manuel.",
+            LIGHT_BLUE,
+        )
+    )
+    story.append(PageBreak())
 
-def parse_markdown(text):
-    """
-    Parse le contenu markdown en une liste d'éléments structurés:
-    {'type': 'h1'|'h2'|'p'|'code'|'table'|'hr'|'blockquote'|'bullets', ...}
-    """
-    lines = text.split("\n")
-    elements = []
-    i = 0
+    story.append(para("SOMMAIRE", "TOCTitle"))
+    story.append(Spacer(1, 0.1 * cm))
+    for chapter in chapters:
+        story.append(para(inline(chapter["text"]), "TOCEntry"))
+    story.append(PageBreak())
 
-    while i < len(lines):
-        line = lines[i]
-
-        # H1
-        if line.startswith("# ") and not line.startswith("## "):
-            elements.append({"type": "h1", "text": line[2:].strip()})
-            i += 1
+    body_started = False
+    for element in elements:
+        kind = element["type"]
+        if kind == "h1":
+            body_started = True
+            story.append(para(inline(element["text"]), "H1"))
+        elif not body_started:
             continue
-
-        # H2
-        if line.startswith("## "):
-            elements.append({"type": "h2", "text": line[3:].strip()})
-            i += 1
-            continue
-
-        # H3
-        if line.startswith("### "):
-            elements.append({"type": "h3", "text": line[4:].strip()})
-            i += 1
-            continue
-
-        # H4
-        if line.startswith("#### "):
-            elements.append({"type": "h4", "text": line[5:].strip()})
-            i += 1
-            continue
-
-        # HR
-        if line.strip() == "---":
-            elements.append({"type": "hr"})
-            i += 1
-            continue
-
-        # Code block (fenced)
-        if line.strip().startswith("```"):
-            language = line.strip()[3:].strip()
-            code_lines = []
-            i += 1
-            while i < len(lines) and not lines[i].strip().startswith("```"):
-                code_lines.append(lines[i])
-                i += 1
-            if i < len(lines):
-                i += 1  # skip closing ```
-            code_text = "\n".join(code_lines).strip()
-            if code_text:
-                elements.append({"type": "code", "text": code_text, "lang": language})
-            continue
-
-        # Table (ligne avec | et suivie d'un séparateur ---)
-        if "|" in line and i + 1 < len(lines) and re.match(r'^\|?[\s\-:|]+\|', lines[i + 1].strip()):
-            # Collecte l'en-tête
-            headers = [c.strip() for c in line.strip().strip("|").split("|")]
-            i += 2  # skip header + separator
-            rows = []
-            while i < len(lines) and "|" in lines[i]:
-                cells = [c.strip() for c in lines[i].strip().strip("|").split("|")]
-                rows.append(cells)
-                i += 1
-            elements.append({"type": "table", "headers": headers, "rows": rows})
-            continue
-
-        # Blockquote
-        if line.strip().startswith("> "):
-            quote_lines = []
-            while i < len(lines) and lines[i].strip().startswith("> "):
-                quote_lines.append(lines[i].strip()[2:])
-                i += 1
-            elements.append({"type": "blockquote", "text": " ".join(quote_lines).strip()})
-            continue
-
-        # Bullet list (consecutive lines starting with -)
-        if line.strip().startswith("- "):
-            bullet_lines = []
-            while i < len(lines) and lines[i].strip().startswith("- "):
-                bullet_lines.append(lines[i].strip()[2:])
-                i += 1
-            elements.append({"type": "bullets", "items": bullet_lines})
-            continue
-
-        # Numbered list (consecutive lines starting with N.)
-        if re.match(r'^\d+\.\s', line.strip()):
-            num_lines = []
-            while i < len(lines) and re.match(r'^\d+\.\s', lines[i].strip()):
-                num_lines.append(re.sub(r'^\d+\.\s+', '', lines[i].strip()))
-                i += 1
-            elements.append({"type": "numbered", "items": num_lines})
-            continue
-
-        # Paragraphe
-        para_lines = []
-        while i < len(lines) and lines[i].strip() and not lines[i].strip().startswith("#") and not lines[i].strip().startswith("```") and not lines[i].strip().startswith("- ") and not re.match(r'^\d+\.\s', lines[i].strip()) and not lines[i].strip().startswith("> ") and lines[i].strip() != "---":
-            para_lines.append(lines[i].strip())
-            i += 1
-        if para_lines:
-            raw = " ".join(para_lines).strip()
-            if raw:
-                elements.append({"type": "p", "text": raw})
-        else:
-            i += 1
-
-    return elements
-
-
-def sanitize_unicode(text):
-    """Remplace les caractères Unicode absents des polices DejaVu."""
-    replacements = {
-        "\u2705": "[OK]",       # ✅
-        "\u2714": "[OK]",       # ✔
-        "\u2713": "[OK]",       # ✓
-        "\u274c": "[KO]",       # ❌
-        "\u26a0": "[!]",        # ⚠
-        "\u2795": "+",          # ➕
-        "\u2796": "-",          # ➖
-        "\u2013": "-",          # –
-        "\u2014": "--",         # —
-        "\u2018": "'",          # '
-        "\u2019": "'",          # '
-        "\u201c": '"',          # "
-        "\u201d": '"',          # "
-        "\u2026": "...",        # …
-        "\u00a0": " ",          # non-breaking space
-    }
-    for char, replacement in replacements.items():
-        text = text.replace(char, replacement)
-    return text
-
-
-def md_to_html(text):
-    """Convertit le markdown inline en HTML compatible reportlab."""
-    text = sanitize_unicode(text)
-    # Bold
-    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
-    # Italic
-    text = re.sub(r'\*(.+?)\*', r'<i>\1</i>', text)
-    # Code inline
-    text = re.sub(r'`([^`]+)`', r'<font face="DejaVuMono" size="8" color="#13293D">\1</font>', text)
-    return text
-
-
-# ── Construction du document ─────────────────────────────────────────
-
-doc = SimpleDocTemplate(
-    OUT,
-    pagesize=A4,
-    rightMargin=1.4 * cm,
-    leftMargin=1.4 * cm,
-    topMargin=1.35 * cm,
-    bottomMargin=1.7 * cm,
-    title="FortiFlow — Guide complet : Revue, Déploiement & HTTPS",
-)
-story = []
-
-# Lire le markdown
-with open(MD_PATH, "r", encoding="utf-8") as f:
-    md_text = f.read()
-
-# Extraire le bloc d'en-tête (titre + ligne après le titre + citation de version)
-lines = md_text.split("\n")
-title_line = lines[0].strip("# ").strip()
-subtitle_found = ""
-for ln in lines[1:10]:
-    stripped = ln.strip()
-    if stripped.startswith("> "):
-        subtitle_found = md_to_html(stripped[2:].strip())
-        break
-
-# ── Page de garde ───────────────────────────────────────────────────
-story += [Spacer(1, 1.8 * cm)]
-story.append(p("FortiFlow", "CoverTitle"))
-story.append(p(subtitle_found if subtitle_found else "Guide complet : Revue, Déploiement & HTTPS", "Subtitle"))
-story.append(Spacer(1, 0.3 * cm))
-story.append(callout(
-    "À propos",
-    "FortiFlow est un outil d'analyse de logs trafic <b>FortiGate / FortiAnalyzer</b> pour les prestations de segmentation réseau. "
-    "Ce guide couvre l'ensemble du cycle de vie : analyse de code, déploiement Docker (VPS et Portainer), configuration HTTPS et maintenance.",
-    LIGHT_GREEN,
-))
-story.append(PageBreak())
-
-# ── Parsing et rendu ─────────────────────────────────────────────────
-elements = parse_markdown(md_text)
-
-# Garder une trace pour ne pas répéter le titre/sous-titre déjà en couverture
-skip_first_h1 = True
-
-i = 0
-while i < len(elements):
-    elem = elements[i]
-    t = elem["type"]
-
-    if t == "h1":
-        if skip_first_h1:
-            skip_first_h1 = False
-            i += 1
-            continue
-        story.append(p(md_to_html(elem["text"]), "H1x"))
-        i += 1
-
-    elif t == "h2":
-        text = md_to_html(elem["text"])
-        # Détection Portainer → callout Repository
-        if "portainer" in text.lower():
+        elif kind == "h2":
+            story.append(para(inline(element["text"]), "H2"))
+        elif kind == "paragraph":
+            story.append(para(inline(element["text"])))
+        elif kind == "code":
+            story.append(code_block(element["text"]))
+            story.append(Spacer(1, 0.18 * cm))
+        elif kind == "table":
+            story.append(markdown_table(element["headers"], element["rows"]))
+            story.append(Spacer(1, 0.22 * cm))
+        elif kind == "quote":
+            text = inline(element["text"])
+            background = ORANGE_BG if "jamais" in element["text"].lower() else LIGHT_BLUE
+            story.append(callout("NOTE", text, background))
+            story.append(Spacer(1, 0.1 * cm))
+        elif kind == "bullets":
+            for item in element["items"]:
+                story.append(para("•  " + inline(item), "Bulletx"))
+            story.append(Spacer(1, 0.08 * cm))
+        elif kind == "numbered":
+            for item_index, item in enumerate(element["items"], start=1):
+                story.append(para(f"{item_index}.  {inline(item)}", "Bulletx"))
+            story.append(Spacer(1, 0.08 * cm))
+        elif kind == "rule":
             story.append(Spacer(1, 0.2 * cm))
-            story.append(repo_callout(
-                title="Repository",
-                body=f"<b>{text}</b> — déploiement via registre d'images Docker",
-                icon="",
-                accent=PURPLE,
-            ))
-            story.append(Spacer(1, 0.1 * cm))
-        # Détection Mise à jour → callout upgrade_path
-        elif "mise à jour" in text.lower() or "mise a jour" in text.lower():
-            story.append(Spacer(1, 0.2 * cm))
-            story.append(repo_callout(
-                title="Upgrade Path",
-                body=f"<b>{text}</b> — procédure de montée de version",
-                icon="",
-                accent=TEAL,
-            ))
-            story.append(Spacer(1, 0.1 * cm))
-        else:
-            story.append(p(text, "H2x"))
-        i += 1
-
-    elif t == "h3":
-        story.append(p(f"<b>{md_to_html(elem['text'])}</b>", "Bodyx"))
-        i += 1
-
-    elif t == "h4":
-        text = elem["text"]
-        html_text = md_to_html(text)
-        # Détection Option A / Option B → callout avec badge coloré
-        is_option_a = text.strip().lower().startswith("option a")
-        is_option_b = text.strip().lower().startswith("option b")
-        if is_option_a or is_option_b:
-            accent = AMBER if is_option_a else TEAL
-            # Extraire le label sans le préfixe "Option X —"
-            import re as _re
-            label = _re.sub(r'^Option\s+[AB]\s*[—\-–]\s*', '', text.strip(), flags=_re.IGNORECASE)
-            # Collecter le paragraphe suivant comme corps
-            body_text = ""
-            if i + 1 < len(elements) and elements[i + 1]["type"] == "p":
-                body_text = elements[i + 1]["text"]
-                i += 1  # consomme le paragraphe
-            story.append(Spacer(1, 0.2 * cm))
-            story.append(option_box(
-                option_id="Option A" if is_option_a else "Option B",
-                label=label,
-                body=md_to_html(body_text) if body_text else "",
-                accent_color=accent,
-            ))
-            story.append(Spacer(1, 0.1 * cm))
-        else:
-            story.append(p(f"<b>{html_text}</b>", "H4x"))
-        i += 1
-
-    elif t == "p":
-        raw_html = md_to_html(elem["text"])
-        # Détection GHCR → ajout d'un badge visuel
-        if "ghcr.io" in elem["text"].lower() or "github container registry" in elem["text"].lower():
-            story.append(Spacer(1, 0.1 * cm))
-            ghcr_badge = Table(
-                [[p(raw_html, "Bodyx")]],
-                colWidths=[17.2 * cm],
-            )
-            ghcr_badge.setStyle(TableStyle([
-                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#E8F4FD")),
-                ("BOX", (0, 0), (-1, -1), 0.6, GHCR_BLUE),
-                ("LEFTPADDING", (0, 0), (-1, -1), 10),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 10),
-                ("TOPPADDING", (0, 0), (-1, -1), 6),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-            ]))
-            story.append(ghcr_badge)
-            story.append(Spacer(1, 0.1 * cm))
-        else:
-            story.append(p(raw_html, "Bodyx"))
-        i += 1
-
-    elif t == "code":
-        code_text = elem["text"]
-        story.append(code_block(code_text))
-        story.append(Spacer(1, 0.2 * cm))
-        # Si le bloc contient ghcr.io, ajouter un petit badge d'info
-        if "ghcr.io" in code_text.lower():
-            story.append(p(
-                '<font face="DejaVuMono" size="7" color="#2496ED">'
-                '  GHCR — GitHub Container Registry</font>',
-                "Small"
-            ))
-            story.append(Spacer(1, 0.1 * cm))
-        i += 1
-
-    elif t == "table":
-        story.append(Spacer(1, 0.15 * cm))
-        story.append(make_table(elem["headers"], elem["rows"]))
-        story.append(Spacer(1, 0.3 * cm))
-        i += 1
-
-    elif t == "hr":
-        story.append(Spacer(1, 0.3 * cm))
-        i += 1
-
-    elif t == "blockquote":
-        # Traiter comme un callout
-        body = md_to_html(elem["text"])
-        # Détecter si c'est une note spéciale
-        if "sécurité" in body.lower() or "fail" in body.lower():
-            bg = ORANGE_BG
-        elif "ghcr.io" in elem["text"].lower() or "github container registry" in elem["text"].lower():
-            bg = colors.HexColor("#E8F4FD")  # GHCR blue
-        elif "version" in body.lower() or "août" in body.lower():
-            bg = LIGHT_BLUE
-        else:
-            bg = LIGHT_BLUE
-        story.append(callout("Note", body, bg))
-        story.append(Spacer(1, 0.1 * cm))
-        i += 1
-
-    elif t == "bullets":
-        first = True
-        for item in elem["items"]:
-            if not first:
-                story.append(Spacer(1, 0.05 * cm))
-            story.append(bullet(md_to_html(item)))
-            first = False
-        story.append(Spacer(1, 0.15 * cm))
-        i += 1
-
-    elif t == "numbered":
-        for idx, item in enumerate(elem["items"], 1):
-            story.append(numbered_bullet(idx, md_to_html(item)))
-        story.append(Spacer(1, 0.15 * cm))
-        i += 1
-
-    else:
-        i += 1
+    return story
 
 
-# ── Génération du PDF ────────────────────────────────────────────────
-doc.build(story, onFirstPage=footer, onLaterPages=footer)
-print(f"✅ PDF généré : {OUT}")
-print(f"   Taille : {__import__('os').path.getsize(OUT):,} octets")
+def main() -> None:
+    markdown = MD_PATH.read_text(encoding="utf-8")
+    elements = parse_markdown(markdown)
+    chapters = [element["text"] for element in elements if element["type"] == "h1"]
+    expected = [
+        "1. Prérequis",
+        "2. Préparer le serveur cible",
+        "3. Déployer avec Portainer",
+        "4. Vérifier le déploiement",
+        "5. Configurer HTTPS",
+        "6. Mettre à jour",
+        "7. Dépannage",
+        "8. Checklist finale",
+    ]
+    if chapters != expected:
+        raise ValueError(f"Chapitres invalides : {chapters!r}")
+
+    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    document = BaseDocTemplate(
+        str(OUT_PATH),
+        pagesize=A4,
+        leftMargin=MARGIN_X,
+        rightMargin=MARGIN_X,
+        topMargin=MARGIN_TOP,
+        bottomMargin=MARGIN_BOTTOM,
+        title=f"{PROJECT} - Guide opérationnel",
+        author="Documentation technique",
+        subject="Déploiement Portainer, HTTPS et mise à jour",
+    )
+    frame = Frame(
+        MARGIN_X,
+        MARGIN_BOTTOM,
+        CONTENT_W,
+        PAGE_H - MARGIN_TOP - MARGIN_BOTTOM,
+        id="content",
+    )
+    document.addPageTemplates(
+        [PageTemplate(id="guide", frames=[frame], onPage=footer)]
+    )
+    document.build(build_story(elements))
+    print(f"[OK] PDF généré : {OUT_PATH}")
+    print(f"     Taille : {OUT_PATH.stat().st_size:,} octets")
+
+
+if __name__ == "__main__":
+    main()
