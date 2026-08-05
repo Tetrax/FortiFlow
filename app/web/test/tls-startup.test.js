@@ -40,7 +40,7 @@ function request(scheme, port) {
 function startServer(env) {
   const child = spawn(process.execPath, [SERVER], {
     cwd: WEB_ROOT,
-    env: { ...process.env, ...env },
+    env: { ...process.env, FORTIFLOW_BIND_ADDRESS: '127.0.0.1', ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let output = '';
