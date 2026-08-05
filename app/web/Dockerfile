@@ -1,7 +1,7 @@
 FROM node:22-alpine
 
-# su-exec pour drop de privilèges dans l'entrypoint
-RUN apk add --no-cache su-exec
+# Runtime TLS tooling: OpenSSL validates/imports PFX and Python runs certctl.
+RUN apk add --no-cache openssl python3 su-exec
 
 # Non-root user
 RUN addgroup -S fortiflow && adduser -S fortiflow -G fortiflow
@@ -21,7 +21,8 @@ COPY . .
 # - /app/uploads    : fichiers temporaires
 RUN mkdir -p /sessions-cache /app/workspaces /app/uploads \
     && chown -R fortiflow:fortiflow /app /sessions-cache \
-    && chmod +x /app/entrypoint.sh
+    && chmod +x /app/entrypoint.sh /app/scripts/fortiflow-certctl \
+    && ln -s /app/scripts/fortiflow-certctl /usr/local/bin/fortiflow-certctl
 
 EXPOSE 3737
 

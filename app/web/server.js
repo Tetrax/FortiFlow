@@ -20,7 +20,10 @@ const { buildHostPairCoverage, buildPolicyOrderIssues }  = require('./lib/covera
 const { getCaptureDeploymentBlockers }                    = require('./lib/deploy-safety');
 
 const app   = express();
+// Le port interne reste 3737. FORTIFLOW_HTTPS_PORT pilote uniquement
+// le port publié par Docker/Portainer (443 en production).
 const PORT  = process.env.PORT || 3737;
+const BIND_ADDRESS = process.env.FORTIFLOW_BIND_ADDRESS || '127.0.0.1';
 const tsNow = () => new Date().toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '-');
 const cliCommentText = value => String(value ?? '')
   .replace(/[\r\n\u0000-\u001f\u007f]/g, ' ')
@@ -2023,9 +2026,18 @@ app.use((err, req, res, next) => {
 
 const https = require('https');
 
-const DOMAIN = process.env.DOMAIN || 'devval.com';
-const SSL_KEY  = process.env.SSL_KEY  || `/etc/letsencrypt/live/${DOMAIN}/privkey.pem`;
-const SSL_CERT = process.env.SSL_CERT || `/etc/letsencrypt/live/${DOMAIN}/fullchain.pem`;
+const TLS_CERT = (process.env.FORTIFLOW_TLS_CERT || '').trim();
+const TLS_KEY = (process.env.FORTIFLOW_TLS_KEY || '').trim();
+const TLS_HOSTNAME = (process.env.FORTIFLOW_TLS_HOSTNAME || '').trim();
+const TLS_VALUES = [TLS_CERT, TLS_KEY, TLS_HOSTNAME];
+const TLS_ENABLED = TLS_VALUES.every(Boolean);
+
+if (TLS_VALUES.some(Boolean) && !TLS_ENABLED) {
+  throw new Error(
+    'Configuration TLS incomplète : FORTIFLOW_TLS_CERT, FORTIFLOW_TLS_KEY et '
+    + 'FORTIFLOW_TLS_HOSTNAME doivent être tous renseignés ou tous vides.'
+  );
+}
 
 function attachWss(server) {
   const wss = new WebSocketServer({ noServer: true });
@@ -2060,21 +2072,20 @@ function attachWss(server) {
   });
 }
 
-if (fs.existsSync(SSL_KEY) && fs.existsSync(SSL_CERT)) {
+if (TLS_ENABLED) {
   const sslOptions = {
-    key:  fs.readFileSync(SSL_KEY),
-    cert: fs.readFileSync(SSL_CERT),
+    key:  fs.readFileSync(TLS_KEY),
+    cert: fs.readFileSync(TLS_CERT),
   };
   const server = https.createServer(sslOptions, app);
   attachWss(server);
-  server.listen(PORT, () => {
-    console.log(`\n  FortiFlow  →  https://${DOMAIN}:${PORT}\n`);
+  server.listen(PORT, BIND_ADDRESS, () => {
+    console.log(`\n  FortiFlow  →  https://${TLS_HOSTNAME}:${PORT}\n`);
   });
   setupGracefulShutdown(server);
 } else {
-  // Fallback HTTP si les certificats ne sont pas encore présents
-  const server = app.listen(PORT, () => {
-    console.log(`\n  FortiFlow  →  http://localhost:${PORT}  (HTTP — certificats SSL introuvables)\n`);
+  const server = app.listen(PORT, BIND_ADDRESS, () => {
+    console.log(`\n  FortiFlow  →  http://${BIND_ADDRESS}:${PORT}\n`);
   });
   attachWss(server);
   setupGracefulShutdown(server);

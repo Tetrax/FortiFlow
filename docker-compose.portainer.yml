@@ -1,48 +1,40 @@
-# Portainer Stack — FortiFlow (Repository method)
-# Portainer télécharge automatiquement l'image depuis GHCR.
-# Fichier référencé dans Portainer → Stacks → Add stack → Repository
-
 services:
   fortiflow:
     image: ghcr.io/tetrax/fortiflow:latest
     container_name: fortiflow
     restart: unless-stopped
     ports:
-      # Bind et port hôte configurables dans les variables de stack Portainer.
-      # Défaut sûr : backend local. Pour HTTPS direct : 0.0.0.0 et 443.
       - "${FORTIFLOW_BIND_ADDRESS:-127.0.0.1}:${FORTIFLOW_HTTPS_PORT:-13737}:3737"
     environment:
-      - PORT=3737
-      - DOMAIN=devval.com
-      - MAX_UPLOAD_SIZE_MB=2048
-      - MAX_DECOMPRESSED_SIZE_MB=4096
-      - MAX_ARCHIVE_ENTRIES=100
-      - MAX_XLSX_SIZE_MB=100
-      - MAX_WORKSPACE_UNCOMPRESSED_MB=1024
-      - MAX_SESSION_DEDUPE_KEYS=2000000
-      - MAX_ANALYSIS_WORKERS=1
-      - MAX_ANALYSIS_QUEUE=3
-      - ANALYSIS_WORKER_MEMORY_MB=0
-      # HTTPS — chemins vers certificats dans le conteneur
-      - SSL_KEY=/certs/privkey.pem
-      - SSL_CERT=/certs/fullchain.pem
+      PORT: "3737"
+      FORTIFLOW_BIND_ADDRESS: "0.0.0.0"
+      FORTIFLOW_TLS_CERT: "${FORTIFLOW_TLS_CERT:-}"
+      FORTIFLOW_TLS_KEY: "${FORTIFLOW_TLS_KEY:-}"
+      FORTIFLOW_TLS_HOSTNAME: "${FORTIFLOW_TLS_HOSTNAME:-}"
+      MAX_UPLOAD_SIZE_MB: "${MAX_UPLOAD_SIZE_MB:-2048}"
+      MAX_DECOMPRESSED_SIZE_MB: "${MAX_DECOMPRESSED_SIZE_MB:-4096}"
+      MAX_ARCHIVE_ENTRIES: "${MAX_ARCHIVE_ENTRIES:-100}"
+      MAX_XLSX_SIZE_MB: "${MAX_XLSX_SIZE_MB:-100}"
+      MAX_WORKSPACE_UNCOMPRESSED_MB: "${MAX_WORKSPACE_UNCOMPRESSED_MB:-1024}"
+      MAX_SESSION_DEDUPE_KEYS: "${MAX_SESSION_DEDUPE_KEYS:-2000000}"
+      MAX_ANALYSIS_WORKERS: "${MAX_ANALYSIS_WORKERS:-1}"
+      MAX_ANALYSIS_QUEUE: "${MAX_ANALYSIS_QUEUE:-3}"
+      ANALYSIS_WORKER_MEMORY_MB: "${ANALYSIS_WORKER_MEMORY_MB:-0}"
     security_opt:
       - no-new-privileges:true
     tmpfs:
-      - /tmp:rw,noexec,nosuid,size=128m
+      - /tmp:rw,noexec,nosuid,size=128m,mode=1777
     healthcheck:
-      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3737/',r=>{process.exit(r.statusCode===200?0:1)}).on('error',()=>{require('https').get('https://localhost:3737/',r=>process.exit(r.statusCode===200?0:1),{rejectUnauthorized:false}).on('error',()=>process.exit(1))})"]
+      test: ["CMD", "node", "/app/scripts/container-healthcheck.js"]
       interval: 30s
-      timeout: 5s
+      timeout: 7s
       retries: 3
       start_period: 10s
     volumes:
-      # Persistance des données
       - fortiflow_sessions:/sessions-cache
       - fortiflow_workspaces:/app/workspaces
       - fortiflow_uploads:/app/uploads
-      # HTTPS — certificats montés depuis l'hôte (lecture seule)
-      - /etc/ssl/fortiflow:/certs:ro
+      - "${FORTIFLOW_CERTIFICATES_PATH:-/srv/fortiflow/certificates}:/certificates"
 
 volumes:
   fortiflow_sessions:
