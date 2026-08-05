@@ -32,8 +32,8 @@ if Path(__file__).stem == "create_fortiflow_pdf":
     MD_PATH = ROOT / "docs" / "TUTORIEL.md"
     OUT_PATH = ROOT / "docs" / "fortiflow-tutoriel.pdf"
     SUMMARY = (
-        "Déployer un conteneur FortiFlow avec Portainer Repository, "
-        "valider son état de santé et publier le service en HTTPS."
+        "Installer ou mettre à jour FortiFlow depuis Portainer Repository, "
+        "importer un PFX en sécurité et valider le HTTPS direct."
     )
 else:
     PROJECT = "Upgrade Path"
@@ -497,13 +497,13 @@ def main() -> None:
     elements = parse_markdown(markdown)
     chapters = [element["text"] for element in elements if element["type"] == "h1"]
     expected = [
-        "1. Prérequis",
-        "2. Préparer le serveur cible",
-        "3. Déployer avec Portainer",
-        "4. Vérifier le déploiement",
-        "5. Configurer HTTPS",
-        "6. Mettre à jour",
-        "7. Dépannage",
+        "1. Choisir le bon parcours",
+        "2. Préparer la VM et Portainer",
+        "3. Mettre à niveau ou installer la stack",
+        "4. Importer et valider le certificat PFX",
+        "5. Activer et vérifier HTTPS direct",
+        "6. Mettre à jour FortiFlow ou renouveler le PFX",
+        "7. Sauvegarde, rollback et dépannage",
         "8. Checklist finale",
     ]
     if chapters != expected:
