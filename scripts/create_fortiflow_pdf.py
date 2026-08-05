@@ -32,8 +32,8 @@ if Path(__file__).stem == "create_fortiflow_pdf":
     MD_PATH = ROOT / "docs" / "TUTORIEL.md"
     OUT_PATH = ROOT / "docs" / "fortiflow-tutoriel.pdf"
     SUMMARY = (
-        "Installer ou mettre à jour FortiFlow depuis Portainer Repository, "
-        "importer un PFX en sécurité et valider le HTTPS direct."
+        "Installer FortiFlow depuis une VM neuve, importer un PFX en sécurité, "
+        "valider le HTTPS direct, puis maintenir séparément l’installation."
     )
 else:
     PROJECT = "Upgrade Path"
@@ -111,10 +111,21 @@ styles.add(
         name="TOCEntry",
         parent=styles["BodyText"],
         fontName="DejaVu",
-        fontSize=10.2,
-        leading=20,
+        fontSize=9.3,
+        leading=15,
         textColor=DARK_TEXT,
         leftIndent=8,
+    )
+)
+styles.add(
+    ParagraphStyle(
+        name="TOCSubEntry",
+        parent=styles["BodyText"],
+        fontName="DejaVu",
+        fontSize=8.4,
+        leading=12,
+        textColor=GRAY,
+        leftIndent=20,
     )
 )
 styles.add(
@@ -140,6 +151,19 @@ styles.add(
         textColor=BLUE,
         spaceBefore=10,
         spaceAfter=5,
+        keepWithNext=True,
+    )
+)
+styles.add(
+    ParagraphStyle(
+        name="H3",
+        parent=styles["Heading3"],
+        fontName="DejaVu-Bold",
+        fontSize=9.6,
+        leading=13,
+        textColor=TEAL,
+        spaceBefore=7,
+        spaceAfter=4,
         keepWithNext=True,
     )
 )
@@ -247,6 +271,10 @@ def parse_markdown(text: str) -> list[dict]:
             continue
         if line.startswith("## "):
             elements.append({"type": "h1", "text": line[3:].strip()})
+            index += 1
+            continue
+        if line.startswith("#### "):
+            elements.append({"type": "h3", "text": line[5:].strip()})
             index += 1
             continue
         if line.startswith("### "):
@@ -443,8 +471,8 @@ def build_story(elements: list[dict]) -> list:
     story.append(
         callout(
             "MÉTHODE",
-            "Dépôt GitHub public, image GHCR et redéploiement depuis Portainer. "
-            "Déploiement reproductible depuis le dépôt et le registre.",
+            "PARTIE I : installation complète et validation. "
+            "PARTIE II : mise à jour, migration PFX, rollback et dépannage.",
             LIGHT_BLUE,
         )
     )
@@ -452,14 +480,23 @@ def build_story(elements: list[dict]) -> list:
 
     story.append(para("SOMMAIRE", "TOCTitle"))
     story.append(Spacer(1, 0.1 * cm))
-    for chapter in chapters:
-        story.append(para(inline(chapter["text"]), "TOCEntry"))
+    for element in elements:
+        if element["type"] == "h1":
+            story.append(
+                para("<b>" + inline(element["text"]) + "</b>", "TOCEntry")
+            )
+        elif element["type"] == "h2":
+            story.append(para(inline(element["text"]), "TOCSubEntry"))
     story.append(PageBreak())
 
     body_started = False
+    chapter_index = 0
     for element in elements:
         kind = element["type"]
         if kind == "h1":
+            chapter_index += 1
+            if body_started and chapter_index > 1:
+                story.append(Spacer(1, 0.8 * cm))
             body_started = True
             story.append(para(inline(element["text"]), "H1"))
         elif not body_started:
@@ -497,14 +534,8 @@ def main() -> None:
     elements = parse_markdown(markdown)
     chapters = [element["text"] for element in elements if element["type"] == "h1"]
     expected = [
-        "1. Choisir le bon parcours",
-        "2. Préparer la VM et Portainer",
-        "3. Mettre à niveau ou installer la stack",
-        "4. Importer et valider le certificat PFX",
-        "5. Activer et vérifier HTTPS direct",
-        "6. Mettre à jour FortiFlow ou renouveler le PFX",
-        "7. Sauvegarde, rollback et dépannage",
-        "8. Checklist finale",
+        "PARTIE I — INSTALLATION FROM SCRATCH",
+        "PARTIE II — MISE À JOUR",
     ]
     if chapters != expected:
         raise ValueError(f"Chapitres invalides : {chapters!r}")

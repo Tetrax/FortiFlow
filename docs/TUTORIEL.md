@@ -1,82 +1,87 @@
-# FortiFlow — Tutoriel d’installation et de mise à jour
+# FortiFlow — Tutoriel de déploiement complet
 
-> Portainer Repository, image GHCR, certificat PFX et HTTPS direct. Aucun Nginx, aucun reverse proxy, aucun secret dans Git ou dans les variables de stack.
+> Pars d’une VM prête à recevoir Docker. Termine avec FortiFlow `healthy`, accessible en HTTPS direct sur `<IP_VM>:443`, puis utilise la partie finale uniquement pour les mises à jour.
 
-## 1. Choisir le bon parcours
+## PARTIE I — INSTALLATION FROM SCRATCH
 
-### Cas A — La stack `fortiflow` existe déjà dans Portainer
+Cette partie est un parcours unique. Suis les étapes dans l’ordre. Tu vas créer la stack depuis le dépôt GitHub, démarrer FortiFlow en HTTP local, importer le PFX sans exposer son mot de passe, puis basculer en HTTPS.
 
-Si elle contient déjà les trois valeurs suivantes, **ne la recrée pas** :
+### 1. Comprendre l’architecture finale
 
-```text
-Repository URL       : https://github.com/Tetrax/FortiFlow
-Repository reference : refs/heads/main
-Compose path         : docker-compose.portainer.yml
-```
+Le déploiement utilise exclusivement ces sources :
 
-La mise à niveau se fait depuis **Stacks → fortiflow → Pull and redeploy → Update**.
-
-Pour la première activation PFX, le parcours comporte volontairement deux mises à jour :
-
-1. mettre à jour avec TLS vide pour récupérer l’image contenant `fortiflow-certctl` ;
-2. importer le PFX, renseigner les variables TLS, puis refaire **Pull and redeploy → Update** pour démarrer en HTTPS.
-
-> Si la stack utilise déjà l’image PFX et que `/certificates/active` existe, les mises à jour applicatives suivantes ne demandent qu’un seul **Pull and redeploy → Update**.
-
-### Cas B — La stack n’existe pas
-
-Créer une stack Portainer de type **Repository** avec les trois valeurs ci-dessus. Ne pas utiliser Web editor, TAR, build manuel ou import d’image local.
-
-### Architecture finale
+| Élément | Valeur |
+|---|---|
+| Dépôt | `https://github.com/Tetrax/FortiFlow` |
+| Référence Git | `refs/heads/main` |
+| Compose | `docker-compose.portainer.yml` |
+| Image | `ghcr.io/tetrax/fortiflow:latest` |
+| Port interne | `3737` — immuable |
+| Port hôte final | `443` |
+| Certificats persistants | `/srv/fortiflow/certificates` |
 
 ```text
-Client HTTPS
-    |
-    | https://<FQDN>:443
-    v
-IP LAN de la VM:443
-    |
-    | publication Docker
-    v
-FortiFlow:3737 — TLS terminé directement par Node.js
+Navigateur ou client HTTPS
+        |
+        | https://<FQDN_REEL>:443
+        v
+<IP_VM>:443
+        |
+        | publication Docker
+        v
+FortiFlow:3737 — terminaison TLS dans l’application
 ```
 
-L’image est `ghcr.io/tetrax/fortiflow:latest`. Les trois volumes applicatifs et le répertoire de certificats survivent aux recréations du conteneur.
+Les données applicatives résident dans trois volumes Docker : `/sessions-cache`, `/app/workspaces` et `/app/uploads`. Les certificats résident sur la VM et sont montés dans le conteneur sous `/certificates`.
 
-## 2. Préparer la VM et Portainer
+> **Résultat attendu —** Tu sais que `443` est le port public et que `3737` reste le port interne. Tu n’as rien à compiler ni à importer manuellement dans Portainer.
 
-### Prérequis
+### 2. Réunir les prérequis
 
+Prépare les éléments suivants avant d’ouvrir Portainer :
+
+- une VM Linux avec un accès shell `root` ;
 - Docker Engine et Portainer opérationnels ;
-- accès de la VM à GitHub et à `ghcr.io` ;
-- FQDN résolu vers l’IP LAN réellement utilisée ;
-- certificat PFX dont le SAN contient exactement ce FQDN ;
-- accès SSH root à la VM pour l’import initial ;
-- port `443` autorisé uniquement depuis les réseaux nécessaires.
+- un accès réseau sortant vers GitHub et `ghcr.io` ;
+- une vraie adresse `<IP_VM>` fixe ou réservée ;
+- un vrai `<FQDN_REEL>` résolu vers cette adresse ;
+- un PFX dont le SAN DNS contient exactement ce FQDN ;
+- la chaîne de confiance nécessaire sur les postes clients ;
+- un flux entrant TCP `443` limité aux réseaux autorisés.
 
-Ne jamais placer le PFX, sa clé privée ou son mot de passe dans Git, le Compose, une variable Portainer, Discord ou un rapport.
+Les chaînes entre chevrons sont des placeholders. Remplace-les par tes vraies valeurs. N’invente jamais une IP ou un FQDN.
 
-### Vérifier Docker et le port 443
+> **Ne continue pas si —** Le PFX ne correspond pas au FQDN, la VM ne joint pas le dépôt ou le registre, ou tu ne disposes pas d’un accès `root`.
 
-Exécuter séparément :
+### 3. Préparer la VM
+
+#### 3.1 Vérifier Docker et Portainer
+
+Exécute les commandes séparément :
 
 ```bash
+docker version
 docker ps
+docker info --format 'Docker {{.ServerVersion}} opérationnel'
 ```
 
-Puis contrôler le port sans interrompre le shell :
+Dans un navigateur, ouvre l’URL habituelle de Portainer. Vérifie que l’environnement Docker cible est joignable.
+
+> **Résultat attendu —** Les commandes répondent sans erreur et Portainer affiche l’environnement comme actif.
+
+#### 3.2 Vérifier que le port 443 est libre
 
 ```bash
 if ss -ltnp | grep -qE '(^|[[:space:]])[^[:space:]]*:443[[:space:]]'; then
-  echo 'Port 443 déjà occupé : identifier le service avant de continuer'
+  echo 'Port 443 occupé : identifier le service avant de continuer'
 else
   echo 'Port 443 libre'
 fi
 ```
 
-Ne pas poursuivre si un autre service écoute déjà sur l’adresse choisie et le port `443`.
+> **Ne continue pas si —** Un autre service écoute sur `<IP_VM>:443`. Identifie-le et libère le port sans supprimer un service utile.
 
-### Préparer le stockage persistant TLS
+#### 3.3 Créer le stockage persistant des certificats
 
 ```bash
 install -d -m 700 /srv/fortiflow/certificates
@@ -84,9 +89,44 @@ stat -c 'mode=%a propriétaire=%U:%G chemin=%n' \
   /srv/fortiflow/certificates
 ```
 
-### Variables Portainer pour le bootstrap HTTP local
+Le résultat doit indiquer le mode `700`, le propriétaire `root:root` et le bon chemin.
 
-Dans **Stacks → fortiflow → Environment variables**, définir :
+### 4. Créer la stack Repository dans Portainer
+
+#### 4.1 Ouvrir l’assistant
+
+1. Dans la barre latérale, clique **Stacks**.
+2. Clique **Add stack**.
+3. Dans **Build method**, sélectionne **Repository**.
+4. Dans **Name**, saisis `fortiflow`.
+
+> **À faire —** Reste dans le mode Repository. Le Compose doit toujours venir du dépôt officiel.
+
+#### 4.2 Renseigner le dépôt
+
+Dans **Git repository**, saisis exactement :
+
+```text
+Repository URL       : https://github.com/Tetrax/FortiFlow
+Repository reference : refs/heads/main
+Compose path         : docker-compose.portainer.yml
+```
+
+Le dépôt est public. Ne renseigne aucun identifiant Git si Portainer n’en demande pas.
+
+> **Résultat attendu —** L’écran affiche le dépôt, la branche `main` sous sa référence complète et le fichier Compose à la racine.
+
+#### 4.3 Ne pas encore déployer
+
+Descends jusqu’à **Environment variables**. Garde la page ouverte : les variables de bootstrap doivent être ajoutées avant le premier déploiement.
+
+> **Ne continue pas si —** Le nom de stack, l’URL, la référence ou le chemin Compose diffèrent du tableau ci-dessus.
+
+### 5. Définir le bootstrap HTTP local
+
+Le premier démarrage reste volontairement local. Il permet d’obtenir le conteneur et l’outil `fortiflow-certctl` avant d’activer TLS.
+
+Dans **Environment variables**, ajoute les six variables suivantes. Les trois valeurs TLS restent vides :
 
 ```text
 FORTIFLOW_BIND_ADDRESS=127.0.0.1
@@ -97,33 +137,20 @@ FORTIFLOW_TLS_KEY=
 FORTIFLOW_TLS_HOSTNAME=
 ```
 
-Les trois variables TLS doivent être soit toutes vides, soit toutes renseignées. Une configuration partielle arrête FortiFlow ; aucun fallback HTTP silencieux n’est autorisé.
+N’ajoute pas le mot de passe du PFX. Ne place jamais le PFX, sa clé privée ou son mot de passe dans Git, le Compose ou les variables Portainer.
 
-Les autres paramètres applicatifs peuvent conserver leurs valeurs par défaut. Ne pas ajouter de variable contenant le mot de passe du PFX.
+Les trois variables `FORTIFLOW_TLS_CERT`, `FORTIFLOW_TLS_KEY` et `FORTIFLOW_TLS_HOSTNAME` doivent être toutes vides ou toutes renseignées. Une configuration partielle arrête le service.
 
-## 3. Mettre à niveau ou installer la stack
+> **À faire —** Relis chaque nom de variable. Conserve le port hôte temporaire `13737` et l’adresse locale `127.0.0.1`.
 
-### Stack existante déjà liée à GitHub
+### 6. Effectuer le premier déploiement
 
-1. Ouvrir **Portainer → Stacks → fortiflow**.
-2. Vérifier la branche `refs/heads/main` et le chemin `docker-compose.portainer.yml`.
-3. Vérifier les six variables du bootstrap HTTP.
-4. Cliquer **Pull and redeploy**.
-5. Confirmer avec **Update**.
-6. Attendre que le conteneur `fortiflow` soit `healthy`.
+1. En bas de l’écran, clique **Deploy the stack**.
+2. Attends le téléchargement du Compose et de l’image GHCR.
+3. Ouvre **Containers → fortiflow**.
+4. Attends que l’état de santé devienne `healthy`.
 
-Tu n’as pas à supprimer ni recréer la stack. Portainer récupère le Compose depuis GitHub et l’image `latest` depuis GHCR. Les volumes existants restent attachés.
-
-### Nouvelle stack Repository
-
-1. Ouvrir **Stacks → Add stack → Repository**.
-2. Nommer la stack `fortiflow`.
-3. Saisir le dépôt, la référence et le chemin Compose indiqués au chapitre 1.
-4. Ajouter les six variables du bootstrap HTTP.
-5. Déployer la stack.
-6. Attendre l’état `healthy`.
-
-### Contrôles du bootstrap
+Vérifie ensuite depuis le shell `root` de la VM :
 
 ```bash
 docker ps --filter name=fortiflow
@@ -133,28 +160,32 @@ curl --fail http://127.0.0.1:13737/ >/dev/null \
 docker exec fortiflow command -v fortiflow-certctl
 ```
 
-Le dernier contrôle doit retourner `/usr/local/bin/fortiflow-certctl`. Si la commande est absente, l’ancienne image est encore utilisée : refaire **Pull and redeploy → Update** et attendre la fin du pull.
+La dernière commande doit afficher `/usr/local/bin/fortiflow-certctl`.
 
-## 4. Importer et valider le certificat PFX
+> **Résultat attendu —** Le conteneur est `healthy`, le test HTTP local réussit et `fortiflow-certctl` existe.
 
-### Préparer les valeurs non secrètes
+> **Ne continue pas si —** Le healthcheck n’est pas `healthy`, le port local ne répond pas ou l’outil est absent. Consulte `docker logs --tail 100 fortiflow` et corrige le premier déploiement.
 
-Le PFX doit être présent temporairement sur la VM, hors du dépôt Git :
+### 7. Importer le PFX en sécurité
+
+#### 7.1 Définir les vraies valeurs
+
+Place temporairement le PFX sur la VM dans un emplacement protégé, hors du dépôt. Puis adapte ces deux valeurs :
 
 ```bash
-PFX_SOURCE='/chemin/protege/fortiflow.pfx'
-TLS_HOSTNAME='fortiflow.monentreprise.lan'
+PFX_SOURCE='<CHEMIN_PFX_REEL>'
+TLS_HOSTNAME='<FQDN_REEL>'
 
 test -f "$PFX_SOURCE" \
   && echo 'PFX source présent' \
   || echo 'PFX source introuvable : corriger le chemin'
 ```
 
-Remplacer les exemples par le chemin réel et le véritable FQDN. Ne jamais inventer le FQDN : il doit être couvert par le SAN du certificat.
+> **Ne continue pas si —** Le test ne confirme pas la présence du PFX ou `TLS_HOSTNAME` n’est pas le nom couvert par son SAN DNS.
 
-### Injecter le PFX et le mot de passe dans le tmpfs
+#### 7.2 Copier le PFX dans le tmpfs du conteneur
 
-Le PFX et le fichier de mot de passe sont écrits uniquement dans `/tmp` du conteneur, monté en `tmpfs`. Le mot de passe n’apparaît ni dans la ligne de commande du processus ni dans les variables Portainer.
+Le `/tmp` du conteneur est un `tmpfs`. Le PFX et son mot de passe y restent temporaires.
 
 ```bash
 docker exec -i fortiflow sh -c \
@@ -168,7 +199,9 @@ printf '%s' "$PFX_PASSWORD" | docker exec -i fortiflow \
 unset PFX_PASSWORD
 ```
 
-### Installer le certificat
+Le mot de passe n’apparaît ni dans la ligne de commande du processus ni dans la configuration Portainer.
+
+#### 7.3 Installer avec fortiflow-certctl
 
 ```bash
 docker exec fortiflow fortiflow-certctl install \
@@ -184,20 +217,11 @@ docker exec fortiflow rm -f \
 printf 'Code retour certctl : %s\n' "$CERTCTL_RC"
 ```
 
-Un code retour `0` confirme l’installation. Si le code est différent, ne pas activer HTTPS : corriger le PFX, le mot de passe, la chaîne ou le FQDN, puis recommencer.
+Un code `0` confirme l’installation. L’outil vérifie le mot de passe, les dates, le SAN DNS, le FQDN, l’usage serveur, la chaîne et la correspondance entre certificat et clé. La publication est atomique : un PFX invalide ne remplace pas un certificat actif.
 
-`fortiflow-certctl` contrôle avant publication :
+> **Ne continue pas si —** Le code diffère de `0`. Corrige le PFX, son mot de passe, sa chaîne ou le FQDN, puis recommence l’import.
 
-- le mot de passe PKCS#12 ;
-- les dates de validité ;
-- la présence d’un SAN DNS et sa correspondance avec le FQDN ;
-- l’usage serveur ;
-- la chaîne de certificats ;
-- la correspondance entre clé privée et certificat.
-
-La publication est atomique. Un import invalide ne remplace pas la génération active précédente.
-
-### Vérifier sans afficher la clé
+#### 7.4 Vérifier les fichiers sans afficher la clé
 
 ```bash
 docker exec fortiflow test -L /certificates/active \
@@ -219,18 +243,18 @@ docker exec fortiflow su-exec fortiflow test -r \
   && echo 'Clé lisible par FortiFlow'
 ```
 
-La cible active doit être en `0750` et la clé en `0640`, avec le groupe de l’utilisateur `fortiflow`.
+La cible active doit être en `0750`. La clé doit être en `0640`, avec le groupe du compte `fortiflow`.
 
-Après validation, supprimer également la copie PFX temporaire conservée sur la VM si la politique PKI n’impose pas son archivage. Si elle doit être conservée, la déplacer vers un stockage chiffré et contrôlé.
+> **Résultat attendu —** Le lien `active` existe, le FQDN correspond, les dates sont valides et l’application peut lire la clé.
 
-## 5. Activer et vérifier HTTPS direct
+### 8. Activer HTTPS sur IP_VM:443
 
-### Modifier les variables Portainer
+#### 8.1 Remplacer les variables de bootstrap
 
-Dans la même stack, remplacer uniquement les valeurs nécessaires :
+Dans **Stacks → fortiflow**, ouvre l’éditeur de la stack. Dans **Environment variables**, remplace les valeurs par :
 
 ```text
-FORTIFLOW_BIND_ADDRESS=<IP_LAN_VM>
+FORTIFLOW_BIND_ADDRESS=<IP_VM>
 FORTIFLOW_HTTPS_PORT=443
 FORTIFLOW_CERTIFICATES_PATH=/srv/fortiflow/certificates
 FORTIFLOW_TLS_CERT=/certificates/active/fullchain.pem
@@ -238,152 +262,209 @@ FORTIFLOW_TLS_KEY=/certificates/active/privkey.pem
 FORTIFLOW_TLS_HOSTNAME=<FQDN_REEL>
 ```
 
-Utiliser l’adresse LAN précise de la VM pour limiter l’exposition. N’utiliser `0.0.0.0` que si l’écoute sur toutes les interfaces est réellement voulue et filtrée par le firewall.
+Utilise l’adresse exacte de la VM. N’emploie `0.0.0.0` que si l’écoute sur toutes les interfaces est voulue et filtrée.
 
-### Redéployer
+#### 8.2 Appliquer la configuration finale
 
-1. Ouvrir **Stacks → fortiflow**.
-2. Cliquer **Pull and redeploy**.
-3. Cliquer **Update**.
-4. Attendre le retour à `healthy`.
+1. Clique **Pull and redeploy**.
+2. Vérifie que l’option de récupération de l’image est active si Portainer la propose.
+3. Confirme avec **Update**.
+4. Attends que `fortiflow` redevienne `healthy`.
 
-Docker publie alors :
+Cette action termine l’installation initiale. Docker publie désormais :
 
 ```text
-<IP_LAN_VM>:443 → fortiflow:3737
+<IP_VM>:443 -> fortiflow:3737
 ```
 
-Le processus Node.js continue d’écouter sur le port non privilégié `3737` dans le conteneur et termine lui-même TLS.
+Le port interne `3737` ne change jamais. FortiFlow termine lui-même TLS.
 
-### Vérifier le conteneur
+> **Ne continue pas si —** Portainer signale une erreur, le conteneur redémarre en boucle ou le healthcheck reste `unhealthy`.
+
+### 9. Valider l’installation finale
+
+#### 9.1 Contrôler le conteneur et le mapping
 
 ```bash
 docker inspect --format '{{.State.Health.Status}}' fortiflow
+docker port fortiflow 3737
 docker logs --tail 80 fortiflow
 ```
 
-Le journal doit annoncer HTTPS, le port interne `3737` et le FQDN configuré. Une configuration TLS partielle ou un fichier illisible doit provoquer un échec explicite.
+Le healthcheck doit répondre `healthy`. Le mapping doit associer `<IP_VM>:443` au port `3737/tcp`. Les journaux doivent annoncer HTTPS sans erreur de certificat.
 
-### Vérifier depuis un client
+#### 9.2 Tester le certificat depuis un client
 
-Avec une CA interne :
+Si la CA est interne :
 
 ```bash
-curl --fail --cacert /chemin/ca.pem \
-  --resolve <FQDN_REEL>:443:<IP_LAN_VM> \
+curl --fail --cacert <CHEMIN_CA_REEL> \
+  --resolve <FQDN_REEL>:443:<IP_VM> \
   https://<FQDN_REEL>/ >/dev/null \
   && echo 'HTTPS FortiFlow validé'
 ```
 
-Avec une CA déjà approuvée par le système :
+Si la CA est déjà approuvée par le système :
 
 ```bash
 curl --fail https://<FQDN_REEL>/ >/dev/null \
   && echo 'HTTPS FortiFlow validé'
 ```
 
-Ne pas utiliser `curl -k` pour la validation finale. Vérifier également depuis un navigateur autorisé : cadenas valide, FQDN correct et absence d’alerte de chaîne.
+N’ignore pas les contrôles TLS. Ouvre aussi `https://<FQDN_REEL>/` dans un navigateur autorisé. Vérifie le cadenas, le nom, la chaîne et les dates.
 
-## 6. Mettre à jour FortiFlow ou renouveler le PFX
+> **Résultat attendu —** Le client valide TLS, la page FortiFlow s’ouvre et aucune alerte de certificat n’apparaît.
 
-### Mise à jour applicative courante
+### 10. Réaliser la sauvegarde initiale
 
-Quand la stack est déjà configurée en HTTPS et que le certificat actif est valide :
-
-1. ouvrir **Stacks → fortiflow** ;
-2. vérifier que les six variables sont toujours présentes ;
-3. cliquer **Pull and redeploy** ;
-4. confirmer avec **Update** ;
-5. attendre `healthy` ;
-6. refaire le test HTTPS.
-
-Aucun nouvel import PFX n’est nécessaire pour une simple mise à jour applicative. Les trois volumes et `/srv/fortiflow/certificates` sont conservés.
-
-### Vérifications après chaque mise à jour
-
-```bash
-docker inspect --format '{{.State.Health.Status}}' fortiflow
-docker logs --tail 50 fortiflow
-curl --fail https://<FQDN_REEL>/ >/dev/null \
-  && echo 'Mise à jour validée'
-```
-
-Si la CA est interne, conserver l’option `--cacert /chemin/ca.pem`.
-
-### Renouvellement du certificat
-
-1. conserver les variables TLS actuelles ;
-2. importer le nouveau PFX avec la procédure du chapitre 4 ;
-3. vérifier SAN, dates et permissions ;
-4. faire **Pull and redeploy → Update** pour redémarrer Node.js ;
-5. vérifier le nouveau certificat depuis un client.
-
-Le lien `active` est remplacé atomiquement. Si le nouveau PFX échoue, l’ancien certificat actif reste intact et la stack ne doit pas être redéployée.
-
-## 7. Sauvegarde, rollback et dépannage
-
-### Identifier les stockages persistants
+Identifie d’abord les montages réels :
 
 ```bash
 docker inspect fortiflow --format \
   '{{range .Mounts}}{{println .Destination "<-" .Name .Source}}{{end}}'
 ```
 
-Avant une mise à jour importante, sauvegarder :
+Sauvegarde ensuite, avec ton outil de sauvegarde habituel :
 
 - le volume monté sur `/sessions-cache` ;
 - le volume monté sur `/app/workspaces` ;
 - le volume monté sur `/app/uploads` ;
-- `/srv/fortiflow/certificates` vers un stockage protégé.
+- `/srv/fortiflow/certificates` vers un stockage chiffré et restreint.
 
-Le répertoire TLS contient une clé privée : sa sauvegarde doit rester chiffrée, avec un accès restreint. Ne jamais l’attacher à un ticket ou à un message.
+Teste la restauration sur un emplacement isolé. Le répertoire de certificats contient une clé privée : ne le joins jamais à un ticket, un message ou un dépôt.
 
-### Règles de rollback
+> **À faire —** Note les noms de volumes retournés par Docker, la date de la sauvegarde, sa destination et le résultat du test de restauration.
 
-- ne jamais supprimer les volumes lors d’un rollback ;
-- ne pas supprimer `/srv/fortiflow/certificates` ;
-- ne pas utiliser `docker system prune -a --volumes` ;
-- utiliser un tag GHCR immuable correspondant à un commit connu pour revenir à une version précise ;
-- après rollback, vérifier `healthy`, les volumes et HTTPS.
+### 11. Checklist de fin d’installation
 
-L’image publiée possède `latest` et un tag immuable :
+- [ ] La stack `fortiflow` est une stack Repository reliée au dépôt, à `refs/heads/main` et au bon Compose.
+- [ ] L’image exécutée provient de `ghcr.io/tetrax/fortiflow:latest`.
+- [ ] Les trois volumes applicatifs sont présents et montés aux bonnes destinations.
+- [ ] `/srv/fortiflow/certificates` persiste sur la VM.
+- [ ] Aucun PFX, clé privée ou mot de passe n’est dans Git, le Compose ou Portainer.
+- [ ] Le PFX a été installé par `fortiflow-certctl install` avec le vrai FQDN.
+- [ ] Les fichiers temporaires du conteneur ont été supprimés.
+- [ ] Le mapping final est `<IP_VM>:443 -> 3737`.
+- [ ] Le conteneur est `healthy` et les journaux ne montrent aucune erreur TLS.
+- [ ] Le test HTTPS valide la CA, le SAN, le FQDN et la chaîne.
+- [ ] La sauvegarde initiale et son test de restauration sont documentés.
 
-```text
-ghcr.io/tetrax/fortiflow:<SHA_GIT>
+> **Installation terminée —** Ne passe à la partie II que lorsque chaque point applicable est validé.
+
+## PARTIE II — MISE À JOUR
+
+Cette partie s’applique à une installation déjà terminée. Elle ne sert pas à créer une nouvelle stack.
+
+### 12. Effectuer une mise à jour normale
+
+Si le lien GitHub est déjà configuré, **ne recrée pas la stack**. Une mise à jour normale se limite au parcours suivant :
+
+1. Ouvre **Stacks → fortiflow**.
+2. Vérifie `https://github.com/Tetrax/FortiFlow`, `refs/heads/main` et `docker-compose.portainer.yml`.
+3. Vérifie que les six variables HTTPS sont toujours présentes.
+4. Clique **Pull and redeploy**.
+5. Confirme avec **Update**.
+6. Attends le retour à `healthy`.
+
+Portainer récupère le Compose depuis GitHub et l’image `latest` depuis GHCR. Les volumes et `/srv/fortiflow/certificates` restent attachés. Un nouvel import PFX n’est pas nécessaire pour une mise à jour applicative ordinaire.
+
+> **Résultat attendu —** La stack existante est redéployée sans être supprimée ni recréée.
+
+### 13. Effectuer les contrôles post-MAJ
+
+```bash
+docker inspect --format '{{.State.Health.Status}}' fortiflow
+docker port fortiflow 3737
+docker logs --tail 80 fortiflow
+curl --fail https://<FQDN_REEL>/ >/dev/null \
+  && echo 'Mise à jour validée'
 ```
 
-Pour un rollback durable avec une stack Repository, faire modifier dans Git la ligne `image:` du Compose vers le SHA validé, puis utiliser **Pull and redeploy → Update**. Ne pas improviser une suppression manuelle de conteneur ou de volume.
+Avec une CA interne, ajoute `--cacert <CHEMIN_CA_REEL>` au test HTTPS.
 
-### Dépannage
+Contrôle également dans Portainer que les trois volumes d’origine sont toujours montés et que `/certificates` pointe vers `/srv/fortiflow/certificates`.
+
+> **Ne continue pas si —** Le conteneur n’est pas `healthy`, le mapping n’est plus `<IP_VM>:443 -> 3737`, HTTPS échoue ou un volume attendu manque.
+
+### 14. Renouveler le PFX
+
+Le renouvellement du certificat est indépendant d’une mise à jour applicative :
+
+1. Conserve les six variables HTTPS actuelles.
+2. Reprends les étapes 7.1 à 7.4 avec le nouveau PFX et le même vrai FQDN.
+3. Ne redéploie pas si `fortiflow-certctl install` retourne un code différent de `0`.
+4. Si l’import réussit, ouvre **Stacks → fortiflow**.
+5. Clique **Pull and redeploy**, puis **Update**, pour redémarrer l’application sur le nouveau certificat.
+6. Reprends les validations HTTPS de l’étape 9.
+
+Le lien `active` est remplacé atomiquement. Un PFX invalide laisse l’ancienne génération active intacte.
+
+### 15. Première migration d’une ancienne stack vers le support PFX
+
+Ce cas est exceptionnel. Il concerne une stack Repository déjà reliée à GitHub, mais dont l’image en cours ne contient pas encore `fortiflow-certctl`. Ne le confonds pas avec la mise à jour normale de l’étape 12.
+
+#### 15.1 Ne pas recréer la stack
+
+Conserve la stack existante, ses volumes et son lien GitHub. Vérifie la présence de l’outil :
+
+```bash
+docker exec fortiflow command -v fortiflow-certctl
+```
+
+Si la commande retourne `/usr/local/bin/fortiflow-certctl`, passe directement à l’import PFX. Sinon, effectue le bootstrap ci-dessous.
+
+#### 15.2 Bootstrap nécessaire une seule fois
+
+1. Dans **Stacks → fortiflow → Environment variables**, place temporairement les six valeurs de bootstrap de l’étape 5.
+2. Clique **Pull and redeploy → Update** pour récupérer l’image qui contient `fortiflow-certctl`.
+3. Attends `healthy` et rejoue la commande de vérification ci-dessus.
+4. Importe le PFX avec toute l’étape 7.
+5. Renseigne les six valeurs HTTPS de l’étape 8.1.
+6. Clique une seconde fois **Pull and redeploy → Update**.
+7. Exécute toutes les validations de l’étape 9.
+
+Après cette première migration, les mises à jour suivantes reviennent au flux normal de l’étape 12 : un seul **Pull and redeploy → Update**, sans nouvel import PFX.
+
+> **Ne continue pas si —** L’outil reste absent après le premier redéploiement. Vérifie le pull de `ghcr.io/tetrax/fortiflow:latest` et les journaux avant d’importer un certificat.
+
+### 16. Préparer un rollback
+
+Avant une mise à jour importante :
+
+- vérifie la dernière sauvegarde des trois volumes et des certificats ;
+- relève le SHA Git complet de la version applicative actuellement validée ;
+- confirme que l’image immuable `ghcr.io/tetrax/fortiflow:<SHA_GIT>` existe ;
+- documente la version cible et la procédure de retour.
+
+Pour revenir durablement à une version précise avec une stack Repository, fais valider par le mainteneur une révision du Compose qui fixe l’image au tag SHA connu, puis applique **Pull and redeploy → Update**. Ne supprime jamais les volumes ni `/srv/fortiflow/certificates` pendant le rollback.
+
+Après le retour arrière, répète les contrôles de l’étape 13 et vérifie les données fonctionnelles.
+
+> **À faire —** Si tu n’as pas de tag SHA vérifié et de sauvegarde restaurable, n’engage pas un rollback improvisé.
+
+### 17. Dépanner sans détruire les données
 
 | Symptôme | Vérification et action |
 |---|---|
-| `fortiflow-certctl` absent | L’ancienne image tourne encore. Faire Pull and redeploy, attendre le pull et revérifier. |
-| Import PFX refusé | Vérifier mot de passe, dates, SAN, usage serveur, chaîne et correspondance clé/certificat. |
+| `fortiflow-certctl` absent | Appliquer uniquement le bootstrap de l’étape 15 et attendre la fin du pull. |
+| Import PFX refusé | Vérifier mot de passe, dates, SAN DNS, FQDN, usage serveur, chaîne et paire clé/certificat. |
 | Service arrêté au démarrage | Les trois variables `FORTIFLOW_TLS_*` doivent être toutes vides ou toutes renseignées. |
-| Clé illisible | Contrôler le montage `/certificates`, la cible `active`, le mode `0640` et le groupe `fortiflow`. |
-| Conteneur `unhealthy` | Lire les logs et vérifier le protocole déterminé par les variables TLS. Le healthcheck contrôle aussi le SAN. |
-| Port 443 inaccessible | Vérifier l’IP de bind, le firewall, `ss -ltnp` et le mapping `443:3737`. |
-| Alerte navigateur | Vérifier FQDN, SAN, dates, chaîne complète et confiance dans la CA. |
-| Données absentes après update | Vérifier que les trois volumes existants sont toujours attachés et qu’ils n’ont pas été recréés ou supprimés. |
-| Échec juste après Update | Ne pas supprimer les volumes. Lire les logs, corriger les variables ou revenir à un tag immuable. |
+| Clé illisible | Vérifier le montage `/certificates`, le lien `active`, le mode `0640` et le groupe `fortiflow`. |
+| Conteneur `unhealthy` | Lire les journaux et vérifier les fichiers TLS, le FQDN et le protocole attendu par le healthcheck. |
+| Port 443 inaccessible | Vérifier l’adresse de bind, le firewall, `ss -ltnp` et le mapping `443 -> 3737`. |
+| Alerte navigateur | Vérifier FQDN, SAN, dates, chaîne complète et confiance du client dans la CA. |
+| Données absentes après MAJ | Vérifier que les trois volumes d’origine sont toujours attachés. Ne pas en créer de nouveaux. |
+| Échec juste après MAJ | Conserver les volumes, lire les journaux, corriger les variables ou appliquer le rollback validé. |
 
-## 8. Checklist finale
+Commandes de diagnostic sans modification :
 
-### Installation ou première migration PFX
+```bash
+docker inspect --format '{{json .State}}' fortiflow
+docker inspect fortiflow --format \
+  '{{range .Mounts}}{{println .Destination "<-" .Name .Source}}{{end}}'
+docker port fortiflow 3737
+docker logs --tail 150 fortiflow
+ss -ltnp
+```
 
-- [ ] La stack pointe vers `https://github.com/Tetrax/FortiFlow`, `refs/heads/main` et `docker-compose.portainer.yml` ; l’image GHCR est accessible.
-- [ ] Le port `443` est libre sur l’adresse choisie ; `/srv/fortiflow/certificates` existe en `0700`.
-- [ ] Les trois volumes applicatifs sont persistants ; le bootstrap HTTP local est `healthy` et expose `fortiflow-certctl`.
-- [ ] Le PFX a été validé avec le véritable FQDN ; les fichiers PFX et mot de passe temporaires ont été supprimés du tmpfs.
-- [ ] Aucune donnée secrète n’est dans Git, Compose ou Portainer ; les trois variables TLS sont toutes renseignées.
-- [ ] Le mapping final est `<IP_LAN_VM>:443 → 3737` et le conteneur est `healthy` en HTTPS.
-- [ ] Le test client valide la CA, la chaîne et le SAN sans `-k`.
-
-### Mise à jour courante
-
-- [ ] Les données et certificats nécessaires sont sauvegardés ; les variables de stack sont conservées.
-- [ ] **Pull and redeploy → Update** a été utilisé sans recréer la stack.
-- [ ] Les volumes existants sont restés attachés et le conteneur est revenu à `healthy`.
-- [ ] Le test HTTPS et le navigateur sont conformes.
-- [ ] Aucun prune global ni suppression de volume n’a été effectué.
+> **Règle de sécurité —** Ne lance aucune commande globale de nettoyage Docker et ne supprime aucun volume pour résoudre un problème de déploiement.
