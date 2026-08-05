@@ -8,7 +8,9 @@ services:
     container_name: fortiflow
     restart: unless-stopped
     ports:
-      - "127.0.0.1:13737:3737"
+      # Bind et port hôte configurables dans les variables de stack Portainer.
+      # Défaut sûr : backend local. Pour HTTPS direct : 0.0.0.0 et 443.
+      - "${FORTIFLOW_BIND_ADDRESS:-127.0.0.1}:${FORTIFLOW_HTTPS_PORT:-13737}:3737"
     environment:
       - PORT=3737
       - DOMAIN=devval.com
