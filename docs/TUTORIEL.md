@@ -116,32 +116,28 @@ Le dépôt est public. Ne renseigne aucun identifiant Git si Portainer n’en de
 
 > **Résultat attendu —** L’écran affiche le dépôt, la branche `main` sous sa référence complète et le fichier Compose à la racine.
 
-#### 4.3 Ne pas encore déployer
+#### 4.3 Laisser les variables vides
 
-Descends jusqu’à **Environment variables**. Garde la page ouverte : les variables de bootstrap doivent être ajoutées avant le premier déploiement.
+Descends jusqu’à **Environment variables**. Pour le premier déploiement, **n’ajoute aucune variable**. Les valeurs de bootstrap sont déjà définies comme valeurs par défaut dans `docker-compose.portainer.yml`.
 
 > **Ne continue pas si —** Le nom de stack, l’URL, la référence ou le chemin Compose diffèrent du tableau ci-dessus.
 
-### 5. Définir le bootstrap HTTP local
+### 5. Utiliser le bootstrap HTTP par défaut
 
 Le premier démarrage reste volontairement local. Il permet d’obtenir le conteneur et l’outil `fortiflow-certctl` avant d’activer TLS.
 
-Dans **Environment variables**, ajoute les six variables suivantes. Les trois valeurs TLS restent vides :
+Tu n’as rien à saisir dans Portainer à cette étape. Lorsque la section **Environment variables** est vide, le Compose applique automatiquement :
 
-```text
-FORTIFLOW_BIND_ADDRESS=127.0.0.1
-FORTIFLOW_HTTPS_PORT=13737
-FORTIFLOW_CERTIFICATES_PATH=/srv/fortiflow/certificates
-FORTIFLOW_TLS_CERT=
-FORTIFLOW_TLS_KEY=
-FORTIFLOW_TLS_HOSTNAME=
-```
+- une écoute hôte locale sur `127.0.0.1` ;
+- le port hôte temporaire `13737` vers le port interne `3737` ;
+- le stockage des certificats sous `/srv/fortiflow/certificates` ;
+- TLS désactivé pour ce premier démarrage.
 
-N’ajoute pas le mot de passe du PFX. Ne place jamais le PFX, sa clé privée ou son mot de passe dans Git, le Compose ou les variables Portainer.
+Ne recopie aucune ligne de configuration et n’ajoute pas le mot de passe du PFX. Ne place jamais le PFX, sa clé privée ou son mot de passe dans Git, le Compose ou Portainer.
 
-Les trois variables `FORTIFLOW_TLS_CERT`, `FORTIFLOW_TLS_KEY` et `FORTIFLOW_TLS_HOSTNAME` doivent être toutes vides ou toutes renseignées. Une configuration partielle arrête le service.
+Les variables TLS seront ajoutées plus tard, uniquement à l’étape 8 après l’import du PFX. Elles devront alors être toutes renseignées ; une configuration partielle arrête le service.
 
-> **À faire —** Relis chaque nom de variable. Conserve le port hôte temporaire `13737` et l’adresse locale `127.0.0.1`.
+> **Résultat attendu —** La section Environment variables est vide. Le Compose publiera automatiquement `127.0.0.1:13737` et démarrera FortiFlow en HTTP local.
 
 ### 6. Effectuer le premier déploiement
 
@@ -249,9 +245,9 @@ La cible active doit être en `0750`. La clé doit être en `0640`, avec le grou
 
 ### 8. Activer HTTPS sur IP_VM:443
 
-#### 8.1 Remplacer les variables de bootstrap
+#### 8.1 Ajouter les variables HTTPS
 
-Dans **Stacks → fortiflow**, ouvre l’éditeur de la stack. Dans **Environment variables**, remplace les valeurs par :
+Dans **Stacks → fortiflow**, ouvre l’éditeur de la stack. Dans **Environment variables**, ajoute maintenant les six variables suivantes :
 
 ```text
 FORTIFLOW_BIND_ADDRESS=<IP_VM>
@@ -415,7 +411,7 @@ Si la commande retourne `/usr/local/bin/fortiflow-certctl`, passe directement à
 
 #### 15.2 Bootstrap nécessaire une seule fois
 
-1. Dans **Stacks → fortiflow → Environment variables**, place temporairement les six valeurs de bootstrap de l’étape 5.
+1. Dans **Stacks → fortiflow → Environment variables**, retire temporairement les variables `FORTIFLOW_*` de l’ancienne configuration. Ne saisis aucune valeur de bootstrap : les défauts de l’étape 5 sont fournis par le Compose.
 2. Clique **Pull and redeploy → Update** pour récupérer l’image qui contient `fortiflow-certctl`.
 3. Attends `healthy` et rejoue la commande de vérification ci-dessus.
 4. Importe le PFX avec toute l’étape 7.
