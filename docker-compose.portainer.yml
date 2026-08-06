@@ -35,8 +35,19 @@ services:
       - fortiflow_workspaces:/app/workspaces
       - fortiflow_uploads:/app/uploads
       - "${FORTIFLOW_CERTIFICATES_PATH:-/srv/fortiflow/certificates}:/certificates"
+    networks:
+      fortiflow_net:
+        ipv4_address: 172.30.250.2
 
 volumes:
   fortiflow_sessions:
   fortiflow_workspaces:
   fortiflow_uploads:
+
+networks:
+  fortiflow_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.250.0/29
+          gateway: 172.30.250.1
