@@ -37,7 +37,7 @@ services:
       - "${FORTIFLOW_CERTIFICATES_PATH:-/srv/fortiflow/certificates}:/certificates"
     networks:
       fortiflow_net:
-        ipv4_address: 172.30.240.2
+        ipv4_address: 172.30.250.2
 
 volumes:
   fortiflow_sessions:
@@ -46,8 +46,5 @@ volumes:
 
 networks:
   fortiflow_net:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.30.240.0/29
-          gateway: 172.30.240.1
+    external: true
+    name: Subnet-Docker
