@@ -37,7 +37,7 @@ services:
       - "${FORTIFLOW_CERTIFICATES_PATH:-/srv/fortiflow/certificates}:/certificates"
     networks:
       fortiflow_net:
-        ipv4_address: 172.30.250.4
+        ipv4_address: 172.30.250.5
 
 volumes:
   fortiflow_sessions:
