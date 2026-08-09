@@ -186,8 +186,14 @@ function createRateLimiter(maxRequests = 20, windowMs = 60000) {
 }
 
 const sessionLimiter = createRateLimiter(20, 60000);
-app.use('/api/upload', sessionLimiter);
-app.use('/api/admin', sessionLimiter);
+app.use([
+  '/api/upload',
+  '/api/admin',
+  '/api/import/workspace',
+  '/api/import/policies-xlsx',
+  '/api/deploy/config-upload',
+  '/api/deploy/dynamic-routes',
+], sessionLimiter);
 
 app.use(express.static(path.join(__dirname, 'public'), {
   setHeaders(res, filePath) {
