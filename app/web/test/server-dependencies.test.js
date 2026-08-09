@@ -28,11 +28,24 @@ test('server imports every analyzer function used by deployment re-analysis', ()
   }
 });
 
-test('le reverse proxy écrase X-Forwarded-For avec l’adresse TCP réelle', () => {
-  const nginxConfig = fs.readFileSync(
-    path.resolve(__dirname, '../../..', 'infra', 'nginx', 'fortiflow.conf'),
-    'utf8',
-  );
-  assert.ok(nginxConfig.includes('proxy_set_header X-Forwarded-For $remote_addr;'));
-  assert.ok(!nginxConfig.includes('proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;'));
-});
+const nginxConfigPath = path.resolve(
+  __dirname,
+  '../../..',
+  'infra',
+  'nginx',
+  'fortiflow.conf',
+);
+
+test(
+  'le reverse proxy écrase X-Forwarded-For avec l’adresse TCP réelle',
+  {
+    skip: !fs.existsSync(nginxConfigPath)
+      ? 'infra/nginx/fortiflow.conf is outside the application image'
+      : false,
+  },
+  () => {
+    const nginxConfig = fs.readFileSync(nginxConfigPath, 'utf8');
+    assert.ok(nginxConfig.includes('proxy_set_header X-Forwarded-For $remote_addr;'));
+    assert.ok(!nginxConfig.includes('proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;'));
+  },
+);
