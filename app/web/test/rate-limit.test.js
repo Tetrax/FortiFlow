@@ -23,6 +23,7 @@ function freePort() {
 
 function request(port, options = {}) {
   return new Promise((resolve, reject) => {
+    const body = options.body;
     const req = http.request({
       hostname: '127.0.0.1',
       port,
@@ -35,6 +36,7 @@ function request(port, options = {}) {
       response.once('end', () => resolve(response.statusCode));
     });
     req.once('error', reject);
+    if (body !== undefined) req.write(body);
     req.end();
   });
 }
@@ -179,3 +181,65 @@ test('respecte la limite upload configurée sans créer de fichier géant', asyn
     await stop(state);
   }
 });
+
+function multipartWithoutFile(pathname) {
+  const boundary = '----FortiFlowNoFileBoundary';
+  const body = Buffer.from(`--${boundary}--\r\n`);
+  return {
+    method: 'POST',
+    path: pathname,
+    headers: {
+      'content-type': `multipart/form-data; boundary=${boundary}`,
+      'content-length': body.length,
+    },
+    body,
+  };
+}
+
+const costlyRouteCases = [
+  {
+    name: 'import workspace avant le parsing raw',
+    request: port => request(port, {
+      method: 'POST',
+      path: '/api/import/workspace',
+      headers: { 'content-type': 'application/octet-stream', 'content-length': '1' },
+      body: Buffer.from('{'),
+    }),
+    downstreamStatus: 400,
+  },
+  {
+    name: 'import policies-xlsx avant Multer',
+    request: port => request(port, multipartWithoutFile('/api/import/policies-xlsx')),
+    downstreamStatus: 400,
+  },
+  {
+    name: 'deploy config-upload avant Multer',
+    request: port => request(port, multipartWithoutFile('/api/deploy/config-upload')),
+    downstreamStatus: 400,
+  },
+  {
+    name: 'deploy dynamic-routes avant express.json',
+    request: port => request(port, {
+      method: 'POST',
+      path: '/api/deploy/dynamic-routes',
+      headers: { 'content-type': 'application/json', 'content-length': '1' },
+      body: Buffer.from('{'),
+    }),
+    downstreamStatus: 400,
+  },
+];
+
+for (const routeCase of costlyRouteCases) {
+  test(`limite ${routeCase.name}`, async () => {
+    const state = await startServer();
+    try {
+      await waitForReady(state);
+      const statuses = [];
+      for (let i = 0; i < 21; i++) statuses.push(await routeCase.request(state.port));
+      assert.deepEqual(statuses.slice(0, 20), Array(20).fill(routeCase.downstreamStatus));
+      assert.equal(statuses[20], 429);
+    } finally {
+      await stop(state);
+    }
+  });
+}
