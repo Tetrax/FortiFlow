@@ -31,6 +31,7 @@ test('server imports every analyzer function used by deployment re-analysis', ()
 test('server exposes the Policy Engine V2 endpoint', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(source, /app\.get\(['"]\/api\/policy-engine\/v2['"]/);
+  assert.match(source, /optimization:\s*result\.optimization/);
 });
 
 test('deployment preflight receives the complete V2 atom set after user selection', () => {

@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const { Readable } = require('node:stream');
 
 const analyzer = require('../lib/analyzer');
+const { applySafeSourceAggregation, evaluatePolicies } = require('../lib/policy-engine-v2');
 const {
   analyzePolicies,
   preflightValidation,
@@ -159,6 +160,107 @@ test('partially similar sources keep source-service affinity', () => {
   const dns = result.policies.find(policy => policy.serviceKeys.includes('UDP:53'));
   assert.deepEqual(dns.sources, ['192.0.2.10', '192.0.2.20']);
   assert.deepEqual(dns.destinations, [destination]);
+});
+
+test('safe source aggregation merges only policies with identical technical scope', () => {
+  const flows = [
+    flow('192.0.2.10', '198.51.100.10', 6, 443, 'HTTPS'),
+    flow('192.0.2.20', '198.51.100.10', 6, 443, 'HTTPS'),
+  ];
+  const strict = analyzer.buildPolicyEngineV2(flows, { profile: 'strict' });
+
+  const merged = applySafeSourceAggregation(strict.policies, strict.atoms);
+  const metrics = evaluatePolicies(strict.atoms, merged);
+
+  assert.equal(strict.policies.length, 2);
+  assert.equal(merged.length, 1);
+  assert.deepEqual(merged[0].sources, ['192.0.2.10', '192.0.2.20']);
+  assert.equal(metrics.coverageRatio, 1);
+  assert.equal(metrics.missingRequiredTuples, 0);
+  assert.equal(metrics.unexpectedAllowedTuples, 0);
+  assert.equal(metrics.expansionRatio, 0);
+});
+
+test('safe source aggregation never merges same-label TCP and UDP services', () => {
+  const strict = analyzer.buildPolicyEngineV2([
+    flow('192.0.2.10', '198.51.100.10', 6, 53, 'DNS'),
+    flow('192.0.2.20', '198.51.100.10', 17, 53, 'DNS'),
+  ], { profile: 'strict' });
+
+  const merged = applySafeSourceAggregation(strict.policies, strict.atoms);
+  const metrics = evaluatePolicies(strict.atoms, merged);
+
+  assert.equal(merged.length, 2);
+  assert.deepEqual(merged.map(policy => policy.serviceKeys), [['TCP:53'], ['UDP:53']]);
+  assert.equal(metrics.missingRequiredTuples, 0);
+  assert.equal(metrics.unexpectedAllowedTuples, 0);
+  assert.equal(metrics.expansionRatio, 0);
+});
+
+test('recommended reuses an existing source CIDR only on exact full membership', () => {
+  const flows = [0, 1, 2, 3].map(host =>
+    flow(`192.0.2.${host}`, '198.51.100.10', 6, 443, 'HTTPS')
+  );
+  const config = {
+    addresses: {
+      'AVR-LAN-STATIONS-192.0.2.0/30': { name: 'AVR-LAN-STATIONS-192.0.2.0/30', cidr: '192.0.2.0/30' },
+      SERVER: { name: 'SERVER', cidr: '198.51.100.10/32' },
+    },
+    addressGroups: {}, customServices: {}, serviceGroups: {}, zones: {},
+    interfaces: {
+      users: { name: 'users', cidr: '192.0.2.0/24' },
+      servers: { name: 'servers', cidr: '198.51.100.0/24' },
+    },
+  };
+
+  const result = analyzer.buildPolicyEngineV2(flows, { profile: 'recommended', fortiConfig: config });
+
+  assert.equal(result.policies.length, 1);
+  assert.equal(result.policies[0].srcSubnet, '192.0.2.0/30');
+  assert.equal(result.policies[0]._use32Src, false);
+  assert.deepEqual(result.policies[0].sourceObjectReuse, {
+    name: 'AVR-LAN-STATIONS-192.0.2.0/30',
+    cidr: '192.0.2.0/30',
+    addressCount: 4,
+  });
+  assert.equal(result.optimization.before.policyCount, 1);
+  assert.equal(result.optimization.after.policyCount, 1);
+  assert.equal(result.optimization.sourceObjectsReused, 1);
+  assert.equal(result.optimization.after.missingRequiredTuples, 0);
+  assert.equal(result.optimization.after.unexpectedAllowedTuples, 0);
+  assert.equal(result.optimization.after.expansionRatio, 0);
+
+  const analyzed = analyzePolicies(result.policies, config, null);
+  assert.equal(analyzed[0].analysis.srcAddr.found, true);
+  assert.equal(analyzed[0].analysis.srcAddr.name, 'AVR-LAN-STATIONS-192.0.2.0/30');
+  const cli = generateConfig(analyzed, {
+    addresses: config.addresses,
+    addressGroups: config.addressGroups,
+    serviceGroups: config.serviceGroups,
+    zones: config.zones,
+  });
+  assert.match(cli, /set srcaddr "AVR-LAN-STATIONS-192\.0\.2\.0\/30"/);
+  assert.doesNotMatch(cli, /edit "AVR-LAN-STATIONS-192\.0\.2\.0\/30"/);
+});
+
+test('recommended refuses sparse reuse of an existing source CIDR', () => {
+  const flows = [0, 1, 2].map(host =>
+    flow(`192.0.2.${host}`, '198.51.100.10', 6, 443, 'HTTPS')
+  );
+  const result = analyzer.buildPolicyEngineV2(flows, {
+    profile: 'recommended',
+    fortiConfig: {
+      addresses: {
+        BROAD: { name: 'BROAD', cidr: '192.0.2.0/30' },
+      },
+    },
+  });
+
+  assert.equal(result.policies[0].sourceObjectReuse, undefined);
+  assert.equal(result.policies[0]._use32Src, true);
+  assert.equal(result.optimization.sourceObjectsReused, 0);
+  assert.equal(result.metrics.unexpectedAllowedTuples, 0);
+  assert.equal(result.metrics.expansionRatio, 0);
 });
 
 test('recommended mode exactly preserves every non-empty 2x2x2 permission graph', () => {

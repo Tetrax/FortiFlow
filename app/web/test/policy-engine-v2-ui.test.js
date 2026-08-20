@@ -29,3 +29,10 @@ test('Deploy exposes a destination-service affinity matrix in policy details', (
   assert.match(styleSource, /\.affinity-matrix/);
   assert.match(styleSource, /\.pe-metrics/);
 });
+
+test('Deploy exposes source optimization policy counts and safety metrics', () => {
+  assert.ok(appSource.includes('policyEngineOptimization'));
+  assert.ok(appSource.includes('Avant optimisation'));
+  assert.ok(appSource.includes('Après optimisation'));
+  assert.ok(appSource.includes('sourceObjectsReused'));
+});
