@@ -1211,7 +1211,12 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
         const icmpCustomMatch = customCandidate
           && customCandidate.proto === 'ICMP'
           && relevantTuples.length > 0
-          && relevantTuples.every(t => /^(1|icmp)$/i.test(String(t.proto)));
+          && relevantTuples.every(t => {
+            if (!/^(1|icmp)$/i.test(String(t.proto))) return false;
+            if (Number.isInteger(t.icmpType) && customCandidate.icmptype !== t.icmpType) return false;
+            if (Number.isInteger(t.icmpCode) && customCandidate.icmpcode !== t.icmpCode) return false;
+            return true;
+          });
         const customMatch = icmpCustomMatch ? customCandidate : customCandidate && (!relevantTuples.length || relevantTuples.every(t => {
           const port = Number(t.port);
           const isUdpTuple = /^(17|udp)$/i.test(String(t.proto));
@@ -1225,7 +1230,8 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
         // Fuzzy name match (e.g. "NETBIOS" → "NetBIOS_NS" / "NetBIOS_DS")
         // Skip port-notation labels (e.g. "TCP/853") — they use the port-based fallback path
         const isPortNotationLabel = /^(TCP|UDP)\/\d+$/i.test(svc);
-        const fuzzyMatch = (!knownPredef && !customMatch && !icmpMatch && !isPortNotationLabel)
+        const fuzzyMatch = (!knownPredef && !customMatch && !icmpMatch && !isPortNotationLabel
+          && ['TCP', 'UDP'].includes(observedProtoLabel))
           ? (observedProtoLabel ? findServiceByName(svc, observedPorts, observedProtoLabel, customServices) : null)
           : null;
 
@@ -2139,7 +2145,39 @@ function segmentationEvidenceHosts(policy, side) {
   return match ? [match[1]] : [];
 }
 
-function preflightValidation(selectedPolicies, config, observedFlows = null) {
+function policyEngineSelectionMetrics(requiredAtoms, selectedPolicies) {
+  const key = (partitionKey, source, destination, serviceKey) =>
+    [partitionKey, source, destination, serviceKey].join('||');
+  const required = new Set((requiredAtoms || [])
+    .filter(atom => atom?.service?.deploymentBlocked !== true)
+    .map(atom => key(atom.partitionKey, atom.source, atom.destination, atom.service.key)));
+  const allowed = new Set();
+  for (const policy of (selectedPolicies || [])) {
+    for (const source of (policy.allowedSources || policy.sources || [])) {
+      for (const destination of (policy.allowedDestinations || policy.destinations || [])) {
+        for (const serviceKey of (policy.serviceKeys || [])) {
+          allowed.add(key(policy.partitionKey, source, destination, serviceKey));
+        }
+      }
+    }
+  }
+  let coveredRequiredTuples = 0;
+  for (const tuple of required) if (allowed.has(tuple)) coveredRequiredTuples++;
+  let unexpectedAllowedTuples = 0;
+  for (const tuple of allowed) if (!required.has(tuple)) unexpectedAllowedTuples++;
+  const missingRequiredTuples = required.size - coveredRequiredTuples;
+  return {
+    observedRequiredTuples: required.size,
+    coveredRequiredTuples,
+    missingRequiredTuples,
+    allowedTuples: allowed.size,
+    unexpectedAllowedTuples,
+    coverageRatio: required.size ? coveredRequiredTuples / required.size : 1,
+    expansionRatio: required.size ? unexpectedAllowedTuples / required.size : 0,
+  };
+}
+
+function preflightValidation(selectedPolicies, config, observedFlows = null, requiredAtoms = null) {
   const issues = []; // { level: 'warn'|'error', msg }
   const addresses      = config.addresses      || {};
   const addressGroups  = config.addressGroups   || {};
@@ -2446,6 +2484,29 @@ function preflightValidation(selectedPolicies, config, observedFlows = null) {
     });
   }
 
+  let selectionMetrics = null;
+  const v2Policies = selectedPolicies.filter(policy => policy?._policyEngineV2);
+  if (v2Policies.length > 0 && Array.isArray(requiredAtoms)) {
+    selectionMetrics = policyEngineSelectionMetrics(requiredAtoms, v2Policies);
+    if (selectionMetrics.missingRequiredTuples > 0) {
+      issues.push({
+        level: 'error',
+        code: 'POLICY_ENGINE_MISSING_REQUIRED_TUPLES',
+        msg: `${selectionMetrics.missingRequiredTuples} tuple(s) déployable(s) requis ne sont plus couverts par la sélection finale`,
+      });
+    }
+    const safeProfile = v2Policies.every(policy =>
+      ['recommended', 'strict', 'expert'].includes(policy._policyEngineV2.profile)
+    );
+    if (safeProfile && selectionMetrics.unexpectedAllowedTuples > 0) {
+      issues.push({
+        level: 'error',
+        code: 'POLICY_ENGINE_UNEXPECTED_ALLOWED_TUPLES',
+        msg: `${selectionMetrics.unexpectedAllowedTuples} tuple(s) inattendu(s) sont autorisés par la sélection finale`,
+      });
+    }
+  }
+
   // Summary counts
   const errors   = issues.filter(i => i.level === 'error').length;
   const warnings = issues.filter(i => i.level === 'warn').length;
@@ -2459,7 +2520,7 @@ function preflightValidation(selectedPolicies, config, observedFlows = null) {
     unclassifiedPolicies,
     routingContextUnproven,
   };
-  return { issues, errors, warnings, ok: errors === 0, certification };
+  return { issues, errors, warnings, ok: errors === 0, certification, selectionMetrics };
 }
 
 function formatExistingPolicies(policies) {
@@ -2492,6 +2553,7 @@ module.exports = {
   generateConfig,
   validateAgainstExisting,
   preflightValidation,
+  policyEngineSelectionMetrics,
   findInterfaceForSubnet,
   detectWanCandidates,
   findAddress,

@@ -42,7 +42,7 @@ La correction minimale appliquée est indépendante du dataset :
 
 - une identité ICMP nommée devient `ICMP:NAME:<service>` ;
 - deux noms ICMP distincts ne sont plus fusionnés ;
-- un nom ICMP est réutilisable uniquement si la configuration FortiGate sélectionnée contient exactement le même objet de protocole ICMP ;
+- un nom ICMP est réutilisable uniquement si la configuration FortiGate sélectionnée contient exactement le même objet de protocole ICMP et si les type/code observés, lorsqu'ils sont disponibles, correspondent exactement ;
 - un type/code explicite reste une clé technique séparée ;
 - le parser conserve désormais `icmptype` et `icmpcode` et les ajoute à la clé d'agrégation ;
 - le preflight compare la même clé technique ;

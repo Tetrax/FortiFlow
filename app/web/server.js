@@ -189,6 +189,7 @@ const sessionLimiter = createRateLimiter(20, 60000);
 app.use([
   '/api/upload',
   '/api/admin',
+  '/api/policy-engine/v2',
   '/api/import/workspace',
   '/api/import/policies-xlsx',
   '/api/deploy/config-upload',
@@ -261,6 +262,29 @@ function flowsForFortiConfig(flows, fortiConfig) {
   const hasVdomMetadata = list.some(flow => String(flow.vdom || '').trim());
   if (!hasVdomMetadata) return list;
   return list.filter(flow => String(flow.vdom || '').trim() === selectedVdom);
+}
+
+function getPolicyEngineResult(session, profile = 'recommended', fortiConfig = session.fortiConfig || {}) {
+  const flows = session.data?.flows || [];
+  const cached = session.policyEngineV2Cache;
+  if (cached
+    && cached.profile === profile
+    && cached.flows === flows
+    && cached.fortiConfig === fortiConfig) {
+    return cached.result;
+  }
+  const result = buildPolicyEngineV2(flows, { profile, fortiConfig });
+  session.policyEngineV2Cache = { profile, flows, fortiConfig, result };
+  return result;
+}
+
+function getRequiredPolicyEngineAtoms(session, selectedPolicies, fortiConfig) {
+  const profiles = [...new Set((selectedPolicies || [])
+    .map(policy => policy?._policyEngineV2?.profile)
+    .filter(Boolean))];
+  if (profiles.length === 0) return null;
+  if (profiles.length > 1) throw new Error('Plusieurs profils Policy Engine V2 sont mélangés dans la sélection');
+  return getPolicyEngineResult(session, profiles[0], fortiConfig).atoms;
 }
 
 function requireSession(req, res) {
@@ -655,10 +679,7 @@ app.get('/api/policy-engine/v2', (req, res) => {
     return res.status(400).json({ error: 'Profil Policy Engine V2 invalide' });
   }
   try {
-    const result = buildPolicyEngineV2(s.data.flows, {
-      profile,
-      fortiConfig: s.fortiConfig || {},
-    });
+    const result = getPolicyEngineResult(s, profile, s.fortiConfig || {});
     const captureBlockers = getCaptureDeploymentBlockers(s.data, s.fortiConfig || {});
     const quality = {
       captureStart: s.data.stats?.captureStart ?? null,
@@ -1855,7 +1876,8 @@ app.post('/api/deploy/preflight', (req, res) => {
   }
 
   try {
-    const result = preflightValidation(selectedPolicies, s.fortiConfig, s.data?.flows || []);
+    const requiredPolicyEngineAtoms = getRequiredPolicyEngineAtoms(s, selectedPolicies, s.fortiConfig);
+    const result = preflightValidation(selectedPolicies, s.fortiConfig, s.data?.flows || [], requiredPolicyEngineAtoms);
     const augmented = augmentPreflightEvidence(result, s.data, s.fortiConfig, selectedPolicies);
     const deploymentBlockers = augmented.deploymentBlockers;
     res.json({ ...result, deploymentBlockers });
@@ -1906,11 +1928,12 @@ app.post('/api/deploy/generate', (req, res) => {
       });
       configToUse = { ...s.fortiConfig, interfaces: patchedInterfaces };
     }
+    const requiredPolicyEngineAtoms = getRequiredPolicyEngineAtoms(s, selectedPolicies, configToUse);
 
     // SD-WAN zone takes priority; if none, preferredWanIntf falls to null (detectWanCandidates handles it)
     // Les contrôles bloquants s'appliquent à la CLI finale, pas à la préparation de la matrice.
     if (!o.analysisOnly) {
-      const requestedPreflight = preflightValidation(selectedPolicies, configToUse, s.data?.flows || []);
+      const requestedPreflight = preflightValidation(selectedPolicies, configToUse, s.data?.flows || [], requiredPolicyEngineAtoms);
       augmentPreflightEvidence(requestedPreflight, s.data, configToUse, selectedPolicies);
       if (!requestedPreflight.ok) {
         return res.status(422).json({
@@ -1989,7 +2012,7 @@ app.post('/api/deploy/generate', (req, res) => {
     // La route de génération applique toujours le preflight côté serveur pour
     // une CLI finale. Le mode analysisOnly ne produit aucune configuration.
     if (!o.analysisOnly) {
-      finalPreflight = preflightValidation(analyzed, configToUse, s.data?.flows || []);
+      finalPreflight = preflightValidation(analyzed, configToUse, s.data?.flows || [], requiredPolicyEngineAtoms);
       augmentPreflightEvidence(finalPreflight, s.data, configToUse, analyzed);
       if (!finalPreflight.ok) {
         return res.status(422).json({

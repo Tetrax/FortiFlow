@@ -198,6 +198,11 @@ function multipartWithoutFile(pathname) {
 
 const costlyRouteCases = [
   {
+    name: 'policy-engine V2 avant le calcul synchrone',
+    request: port => request(port, { path: '/api/policy-engine/v2?session=missing' }),
+    downstreamStatus: 404,
+  },
+  {
     name: 'import workspace avant le parsing raw',
     request: port => request(port, {
       method: 'POST',

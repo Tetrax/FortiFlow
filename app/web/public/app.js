@@ -5690,6 +5690,7 @@ function groupByInterfacePair(policies) {
 }
 
 function buildSequenceAggregated(policies) {
+  if (!window.FortiFlowSegmentation?.sequenceAggregationAllowed(policies)) return policies;
   const groups = new Map();
   for (const p of policies) {
     const srcKey = p.srcSubnets ? p.srcSubnets.slice().sort().join('|') : (p.srcSubnet || '');

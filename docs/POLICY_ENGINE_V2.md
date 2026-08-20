@@ -121,13 +121,13 @@ Les ports TCP élevés restent des tuples exacts en recommandé/strict. Une plag
 
 ## Intégration et traçabilité
 
-Le moteur V2 est un module backend pur. L'API renvoie les policies, métriques, inventaire d'objets et explications. Le pipeline FortiGate existant continue d'analyser les objets, routes, zones et services puis exécute le preflight avant génération CLI.
+Le moteur V2 est un module backend pur. L'API renvoie les policies, métriques, inventaire d'objets et explications. Le pipeline FortiGate existant continue d'analyser les objets, routes, zones et services puis exécute le preflight avant génération CLI. Après toute sélection utilisateur, le preflight recalcule coverage, missing et unexpected sur les FlowAtoms déployables complets ; une sélection incomplète ne peut plus être certifiée `exact`.
 
 Chaque policy conserve : identifiants d'atomes, membres exacts, signatures, motif de regroupement, services communs/résiduels, métriques et niveau de confiance. L'UI peut ainsi répondre « pourquoi ? » sans reconstruire artificiellement la preuve.
 
 ## Complexité algorithmique
 
-L'agrégation initiale est une passe sur les flux. Les signatures utilisent des `Map`/`Set`, puis des tris canoniques. Aucun parcours des combinaisons possibles source × destination n'est effectué pour trouver les groupes ; seuls les tuples observés sont indexés. Les expansions synthétiques sont comptées avec des cardinalités bornées et des échantillons limités.
+L'agrégation initiale est une passe sur les flux. Les signatures utilisent des `Map`/`Set`, puis des tris canoniques. Aucun parcours des combinaisons possibles source × destination n'est effectué pour trouver les groupes ; seuls les tuples observés sont indexés. La matrice d'affinité construit une fois un index `service → destinations` au lieu de rescanner toutes les policies pour chaque cellule. Les expansions synthétiques sont comptées avec des cardinalités bornées et des échantillons limités.
 
 ## Validation mesurée
 
@@ -163,6 +163,16 @@ Pipeline streaming synthétique, résultat recommandé sans tuple manquant/inatt
 | 1 000 000 | 50 000 | 5 426 ms | 587 ms | 439 MiB |
 
 Le profil strict sur le dataset réel produit 7 230 policies en environ 1,7 s. La réponse API tronque par défaut les listes d'atomes de traçabilité par policy à 100 entrées ; `include_trace=1` conserve la preuve complète à la demande.
+
+Benchmark de régression de la matrice d'affinité, topologie clairsemée d'une source avec une destination et un service distincts par policy :
+
+| Policies | Temps après indexation |
+| ---: | ---: |
+| 250 | 25 ms |
+| 500 | 54 ms |
+| 1 000 | 207 ms |
+
+Avant correction, le cas 1 000 policies dépassait 5 secondes. L'endpoint est également placé derrière le rate limiter des routes coûteuses et met en cache le résultat par session, profil, flux et configuration.
 
 ## Review contradictoire DeepSeek
 

@@ -33,6 +33,12 @@ test('server exposes the Policy Engine V2 endpoint', () => {
   assert.match(source, /app\.get\(['"]\/api\/policy-engine\/v2['"]/);
 });
 
+test('deployment preflight receives the complete V2 atom set after user selection', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const wiredCalls = source.match(/preflightValidation\([^\n]+requiredPolicyEngineAtoms\)/g) || [];
+  assert.equal(wiredCalls.length, 3);
+});
+
 const nginxConfigPath = path.resolve(
   __dirname,
   '../../..',

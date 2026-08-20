@@ -173,6 +173,28 @@ test('input order does not change atoms, policies, names or metrics', () => {
   assert.deepEqual(reverse, forward);
 });
 
+test('affinity views stay bounded for 1000 sparse destination-service policies', { timeout: 5000 }, () => {
+  const flows = Array.from({ length: 1000 }, (_unused, index) =>
+    flow(
+      '10.0.0.10',
+      `10.${1 + Math.floor(index / 65536)}.${Math.floor(index / 256) % 256}.${index % 256}`,
+      6,
+      1000 + index,
+      `SVC-${index}`,
+    )
+  );
+
+  const started = process.hrtime.bigint();
+  const result = analyzer.buildPolicyEngineV2(flows, { profile: 'recommended' });
+  const elapsedMs = Number(process.hrtime.bigint() - started) / 1e6;
+
+  assert.equal(result.policies.length, 1000);
+  assert.equal(result.affinityViews.length, 1);
+  assert.equal(result.affinityViews[0].matrix['TCP:1000']['10.1.0.0'], true);
+  assert.equal(result.affinityViews[0].matrix['TCP:1000']['10.1.0.1'], false);
+  assert.ok(elapsedMs < 2000, `affinity build took ${Math.round(elapsedMs)} ms`);
+});
+
 test('different FortiGate scopes and interface pairs are never merged', () => {
   const base = flow('192.0.2.10', '198.51.100.10', 6, 443, 'HTTPS');
   const result = analyzer.buildPolicyEngineV2([
@@ -184,6 +206,30 @@ test('different FortiGate scopes and interface pairs are never merged', () => {
   assert.equal(result.policies.length, 3);
   assert.equal(result.metrics.observedRequiredTuples, 3);
   assert.equal(result.metrics.unexpectedAllowedTuples, 0);
+});
+
+test('preflight rejects a V2 policy that collapses two observed interface pairs', () => {
+  const flows = [
+    flow('10.0.0.10', '10.0.1.10', 6, 443, 'HTTPS', { srcintf: 'users-a', dstintf: 'servers-a' }),
+    flow('10.0.0.10', '10.0.1.10', 6, 443, 'HTTPS', { srcintf: 'users-b', dstintf: 'servers-b' }),
+  ];
+  const config = {
+    addresses: {}, addressGroups: {}, customServices: {}, serviceGroups: {}, zones: {},
+    interfaces: { 'users-a': {}, 'users-b': {}, 'servers-a': {}, 'servers-b': {} },
+  };
+  const engine = analyzer.buildPolicyEngineV2(flows, { profile: 'recommended', fortiConfig: config });
+  const analyzed = analyzePolicies(engine.policies, config, null);
+  const collapsed = {
+    ...analyzed[0],
+    srcintf: ['users-a', 'users-b'],
+    dstintf: ['servers-a', 'servers-b'],
+  };
+
+  const preflight = preflightValidation([collapsed], config, flows, engine.atoms);
+
+  assert.equal(preflight.ok, false);
+  assert.equal(preflight.selectionMetrics.missingRequiredTuples, 1);
+  assert.ok(preflight.issues.some(issue => issue.code === 'POLICY_ENGINE_MISSING_REQUIRED_TUPLES'));
 });
 
 test('strict mode emits one exact policy per canonical tuple', () => {
@@ -344,6 +390,26 @@ test('preflight certifies grouped V2 rectangles from exact technical tuples', ()
 
   assert.equal(preflight.ok, true);
   assert.equal(preflight.certification.level, 'exact');
+});
+
+test('preflight rejects a selected V2 subset that omits a deployable required tuple', () => {
+  const flows = [
+    flow('10.0.0.10', '10.0.1.10', 6, 443, 'HTTPS'),
+    flow('10.0.0.20', '10.0.1.20', 6, 22, 'SSH'),
+  ];
+  const config = {
+    addresses: {}, addressGroups: {}, customServices: {}, serviceGroups: {}, zones: {},
+    interfaces: { users: {}, servers: {} },
+  };
+  const engine = analyzer.buildPolicyEngineV2(flows, { profile: 'recommended', fortiConfig: config });
+  const analyzed = analyzePolicies(engine.policies, config, null);
+
+  const preflight = preflightValidation([analyzed[0]], config, flows, engine.atoms);
+
+  assert.equal(preflight.ok, false);
+  assert.equal(preflight.selectionMetrics.coverageRatio, 0.5);
+  assert.equal(preflight.selectionMetrics.missingRequiredTuples, 1);
+  assert.ok(preflight.issues.some(issue => issue.code === 'POLICY_ENGINE_MISSING_REQUIRED_TUPLES'));
 });
 
 test('preflight rejects the same service label when protocol or port differs', () => {
@@ -536,6 +602,25 @@ test('a named ICMP service is reusable when the selected FortiGate config define
   assert.equal(result.blockers.length, 0);
   const analyzed = analyzePolicies(result.policies, config, null);
   assert.equal(preflightValidation(analyzed, config, flows).ok, true);
+});
+
+test('named ICMP is blocked when observed type/code conflicts with the same-named FortiGate object', () => {
+  const config = {
+    addresses: {}, addressGroups: {}, serviceGroups: {}, zones: {},
+    interfaces: { users: {}, servers: {} },
+    customServices: {
+      PING: { name: 'PING', proto: 'ICMP', tcpPorts: [], udpPorts: [], icmptype: 3, icmpcode: 1 },
+    },
+  };
+  const flows = [flow('10.0.0.10', '10.0.1.10', 1, '', 'PING', { icmpType: 8, icmpCode: 0 })];
+  const result = analyzer.buildPolicyEngineV2(flows, { profile: 'recommended', fortiConfig: config });
+  const analyzed = analyzePolicies(result.policies, config, null);
+  const preflight = preflightValidation(analyzed, config, flows, result.atoms);
+
+  assert.equal(result.atoms[0].service.key, 'ICMP:8:0');
+  assert.equal(result.blockers.length, 1);
+  assert.equal(analyzed[0].analysis.services[0].found, false);
+  assert.equal(preflight.ok, false);
 });
 
 test('different named ICMP services never collapse when type and code are absent', () => {

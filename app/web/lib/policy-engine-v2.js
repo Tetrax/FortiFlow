@@ -560,6 +560,8 @@ function buildRecommendedPolicies(atoms) {
           proto: protocolNumber(service.protocol),
           port: service.port == null ? '' : String(service.port),
           service: service.label,
+          icmpType: service.icmpType,
+          icmpCode: service.icmpCode,
           sessions: supportingAtoms
             .filter(atom => atom.service.key === service.key)
             .reduce((sum, atom) => sum + atom.count, 0),
@@ -708,13 +710,18 @@ function buildAffinityViews(policies) {
       const sources = [...new Set(group.flatMap(policy => policy.sources))].sort();
       const destinations = [...new Set(group.flatMap(policy => policy.destinations))].sort();
       const serviceKeys = [...new Set(group.flatMap(policy => policy.serviceKeys))].sort();
+      const destinationsByService = new Map(serviceKeys.map(serviceKey => [serviceKey, new Set()]));
+      for (const policy of group) {
+        for (const serviceKey of policy.serviceKeys) {
+          const serviceDestinations = destinationsByService.get(serviceKey);
+          for (const destination of policy.destinations) serviceDestinations.add(destination);
+        }
+      }
       const matrix = {};
       for (const serviceKey of serviceKeys) {
         matrix[serviceKey] = {};
         for (const destination of destinations) {
-          matrix[serviceKey][destination] = group.some(policy =>
-            policy.serviceKeys.includes(serviceKey) && policy.destinations.includes(destination)
-          );
+          matrix[serviceKey][destination] = destinationsByService.get(serviceKey).has(destination);
         }
       }
       const commonServiceKeys = serviceKeys.filter(serviceKey =>
@@ -757,7 +764,14 @@ function buildStrictPolicies(atoms) {
     destinations: [atom.destination],
     serviceKeys: [atom.service.key],
     serviceDescriptors: [{ ...atom.service }],
-    serviceTuples: [{ proto: protocolNumber(atom.service.protocol), port: atom.service.port == null ? '' : String(atom.service.port), service: atom.service.label, sessions: atom.count }],
+    serviceTuples: [{
+      proto: protocolNumber(atom.service.protocol),
+      port: atom.service.port == null ? '' : String(atom.service.port),
+      service: atom.service.label,
+      icmpType: atom.service.icmpType,
+      icmpCode: atom.service.icmpCode,
+      sessions: atom.count,
+    }],
     services: [atom.service.label],
     ports: atom.service.port == null ? [] : [atom.service.port],
     protos: [atom.service.protocol],
