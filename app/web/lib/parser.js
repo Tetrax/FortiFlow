@@ -112,6 +112,10 @@ const HEADER_MAP = {
   // Service
   service: 'service', 'service name': 'service', servicename: 'service', app: 'service',
 
+  // ICMP evidence when exported explicitly by FortiOS/FortiAnalyzer
+  icmptype: 'icmptype', icmp_type: 'icmptype', 'icmp type': 'icmptype',
+  icmpcode: 'icmpcode', icmp_code: 'icmpcode', 'icmp code': 'icmpcode',
+
   // Interfaces
   srcintf: 'srcintf', src_intf: 'srcintf', srcinterface: 'srcintf',
   'source interface': 'srcintf', 'src interface': 'srcintf', 'interface source': 'srcintf', ingressintf: 'srcintf',
@@ -353,6 +357,14 @@ function extractFlow(fields) {
   const policytype = String(fields.policytype || '').toLowerCase().trim();
   const trandisp = String(fields.trandisp || '').toLowerCase().trim();
   const dstport = String(fields.dstport || '').trim();
+  const parseIcmpByte = value => {
+    const text = String(value ?? '').trim();
+    if (!/^\d+$/.test(text)) return null;
+    const number = Number(text);
+    return number >= 0 && number <= 255 ? number : null;
+  };
+  const icmpType = parseIcmpByte(fields.icmptype);
+  const icmpCode = parseIcmpByte(fields.icmpcode);
   const evidenceIssues = [];
 
   if (decision === 'allow') {
@@ -392,6 +404,8 @@ function extractFlow(fields) {
     action,
     decision,
     service,
+    icmpType,
+    icmpCode,
     srcintf:    fields.srcintf    || '',
     dstintf:    fields.dstintf    || '',
     policyid:   fields.policyid   || '',
@@ -470,12 +484,16 @@ function aggregateFlow(flowMap, flow, dedupeState = null) {
   // légitimement utiliser les mêmes réseaux RFC1918 sans représenter le même contexte.
   // Le libellé de service n'est pas une identité réseau : FortiOS peut ne le
   // renseigner qu'au log terminal. Le tuple protocole/port reste la preuve.
-  const key = `${flow.devid || flow.devname}|${flow.vdom}|${flow.srcip}|${flow.dstip}|${flow.dstport}|${flow.proto}|${flow.decision}|${flow.srcintf}|${flow.dstintf}|${flow.policyid}|${flow.subtype}|${flow.policytype}|${flow.trandisp}|${flow.evidenceIssues.join(',')}`;
+  const portlessServiceIdentity = !/^(6|17|tcp|udp)$/i.test(String(flow.proto || ''))
+    ? String(flow.service || '').toUpperCase()
+    : '';
+  const key = `${flow.devid || flow.devname}|${flow.vdom}|${flow.srcip}|${flow.dstip}|${flow.dstport}|${flow.proto}|${flow.icmpType ?? ''}|${flow.icmpCode ?? ''}|${portlessServiceIdentity}|${flow.decision}|${flow.srcintf}|${flow.dstintf}|${flow.policyid}|${flow.subtype}|${flow.policytype}|${flow.trandisp}|${flow.evidenceIssues.join(',')}`;
   if (!flowMap.has(key)) {
     flowMap.set(key, {
       srcip: flow.srcip, dstip: flow.dstip,
       srcport: flow.srcport, dstport: flow.dstport,
       proto: flow.proto, action: flow.action, decision: flow.decision, service: flow.service,
+      icmpType: flow.icmpType, icmpCode: flow.icmpCode,
       srcintf: flow.srcintf, dstintf: flow.dstintf, policyid: flow.policyid, policyname: flow.policyname,
       devname: flow.devname, devid: flow.devid, vdom: flow.vdom,
       logid: flow.logid, poluuid: flow.poluuid,

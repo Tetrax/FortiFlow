@@ -1,6 +1,7 @@
 'use strict';
 
 const { portName } = require('./ports');
+const { buildPolicyEngineV2 } = require('./policy-engine-v2');
 
 // ─── RFC1918 ──────────────────────────────────────────────────────────────────
 
@@ -596,11 +597,13 @@ function consolidatePolicies(rawPolicies) {
   for (const p of rawPolicies) {
     const fp = serviceFingerprint(p);
     const scopeKey = `${p.scope?.devid || p.scope?.devname || ''}::${p.scope?.vdom || ''}`;
-    const key = `${scopeKey}||${p.dstTarget}||${fp}`;
+    const srcIntf = p.flowSrcintf || p.srcintf || '';
+    const dstIntf = p.flowDstintf || p.dstintf || '';
+    const key = `${scopeKey}||${srcIntf}||${dstIntf}||${p.dstTarget}||${fp}`;
     if (!phase1.has(key)) {
       phase1.set(key, {
         srcs: new Set(), dst: p.dstTarget, dstType: p.dstType,
-        scope: p.scope || {}, fp, services: p.services, ports: p.ports, protos: p.protos,
+        scope: p.scope || {}, srcIntf, dstIntf, fp, services: p.services, ports: p.ports, protos: p.protos,
         serviceTuples: p.serviceTuples || [],
         serviceDesc: p.serviceDesc, sessions: 0, sentBytes: 0, rcvdBytes: 0, noRcvdFlows: 0, noRcvdSrcHosts: [],
       });
@@ -619,11 +622,11 @@ function consolidatePolicies(rawPolicies) {
   for (const e of phase1.values()) {
     const srcsKey = [...e.srcs].sort().join('|');
     const scopeKey = `${e.scope?.devid || e.scope?.devname || ''}::${e.scope?.vdom || ''}`;
-    const key = `${scopeKey}||${srcsKey}||${e.fp}`;
+    const key = `${scopeKey}||${e.srcIntf}||${e.dstIntf}||${srcsKey}||${e.fp}`;
     if (!phase2.has(key)) {
       phase2.set(key, {
         srcSubnets: [...e.srcs].sort(), dstTargets: [], dstTypes: {},
-        scope: e.scope, fp: e.fp, services: e.services, ports: e.ports, protos: e.protos,
+        scope: e.scope, srcIntf: e.srcIntf, dstIntf: e.dstIntf, fp: e.fp, services: e.services, ports: e.ports, protos: e.protos,
         serviceTuples: e.serviceTuples,
         serviceDesc: e.serviceDesc, sessions: 0, sentBytes: 0, rcvdBytes: 0, noRcvdFlows: 0, noRcvdSrcHosts: [],
       });
@@ -653,6 +656,9 @@ function consolidatePolicies(rawPolicies) {
         dstTypes:     g.dstTypes,
         dstTypeSummary,
         scope:        g.scope,
+        flowSrcintf:  g.srcIntf,
+        srcintf:      g.srcIntf,
+        dstintf:      g.dstIntf,
         services:     g.services,
         ports:        g.ports,
         protos:       g.protos,
@@ -682,4 +688,5 @@ module.exports = {
   isExpectedOneWayFlow,
   buildAnalysis,
   consolidatePolicies,
+  buildPolicyEngineV2,
 };

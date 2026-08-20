@@ -2134,10 +2134,18 @@ const deployState = {
   wizardStep:    1,                // 1: config upload, 2: routes, 3: interfaces, 4: policies
   use32Global:   false,            // global /32 mode (use real hosts instead of /24)
   bruteMode:     'off',            // 'off' | 'service' (split by svc) | 'host' (split by src+svc)
-  granularity:   'reseau',         // compat workspaces v2 (remplacé par segmentationPlan)
-  segmentationPlan: { source: 'network', destination: 'network', services: 'grouped' },
-  segmentationPreset: 'wide',
+  granularity:   'policy-engine-v2',
+  segmentationPlan: { source: 'host', destination: 'host', services: 'grouped' },
+  segmentationPreset: 'recommended',
   segmentationCustomOpen: false,
+  policyEngineProfile: 'recommended',
+  policyEngineMetrics: null,
+  policyEngineQuality: null,
+  policyEngineBlockers: [],
+  policyEngineAtomCount: 0,
+  policyEngineInputSummary: null,
+  serviceInventory: [],
+  affinityViews: [],
   deploymentBlockers: { unsupportedIpv6: 0, unknownActionSessions: 0, failedConnectionSessions: 0, hasExcludedTraffic: false, blocked: false },
   _detailOriginal: null,           // M3: snapshot pré-détail (≠ _analyzedOriginal pré-fusion)
   captureWindow: null,             // #1: { start, end, days, available } — fenêtre d'observation
@@ -2297,6 +2305,14 @@ async function exportSession() {
         namingPrefix:         deployState.namingPrefix,   // #5
         segmentationPlan:      deployState.segmentationPlan,
         segmentationPreset:    deployState.segmentationPreset,
+        policyEngineProfile:    deployState.policyEngineProfile,
+        policyEngineMetrics:    deployState.policyEngineMetrics,
+        policyEngineQuality:    deployState.policyEngineQuality,
+        policyEngineBlockers:   deployState.policyEngineBlockers,
+        policyEngineAtomCount:  deployState.policyEngineAtomCount,
+        policyEngineInputSummary: deployState.policyEngineInputSummary,
+        serviceInventory:       deployState.serviceInventory,
+        affinityViews:          deployState.affinityViews,
       },
     };
     // Compression gzip via l'API native (zéro dépendance)
@@ -2367,6 +2383,14 @@ function importSession(file) {
           deployState.namingPrefix         = ds.namingPrefix  || 'FF';   // #5
           deployState.segmentationPlan      = window.FortiFlowSegmentation?.normalizePlan(ds.segmentationPlan) || { source: 'network', destination: 'network', services: 'grouped' };
           deployState.segmentationPreset    = ds.segmentationPreset || window.FortiFlowSegmentation?.inferPreset(deployState.segmentationPlan) || 'wide';
+          deployState.policyEngineProfile   = ds.policyEngineProfile || 'recommended';
+          deployState.policyEngineMetrics   = ds.policyEngineMetrics || null;
+          deployState.policyEngineQuality   = ds.policyEngineQuality || null;
+          deployState.policyEngineBlockers  = ds.policyEngineBlockers || [];
+          deployState.policyEngineAtomCount = ds.policyEngineAtomCount || 0;
+          deployState.policyEngineInputSummary = ds.policyEngineInputSummary || null;
+          deployState.serviceInventory      = ds.serviceInventory || [];
+          deployState.affinityViews         = ds.affinityViews || [];
         }
 
         // Navigation : deploy si dispo, sinon dashboard
@@ -3062,6 +3086,11 @@ function mountDrawer() {
   drawer.addEventListener('click', e => {
     const p = _drawerIdx !== null ? deployState.analyzed[_drawerIdx] : null;
     if (!p) return;
+    const structuralControl = e.target.closest('.drawer-mode-btn, .drawer-dstall-btn, .drawer-multidst-mode, .drawer-multisrc-mode, .svc-do-merge');
+    if (p._policyEngineV2 && structuralControl) {
+      alert('Périmètre verrouillé par Policy Engine V2. Changez de profil puis relancez l’analyse au lieu d’élargir manuellement cette policy.');
+      return;
+    }
     const _snapAndShow = () => {
       _snapDrawer(p);
       const hint = document.getElementById('drawer-undo-hint');
@@ -3520,12 +3549,38 @@ function syncSvcCell(idx) {
   syncRowStatus(idx);
 }
 
+function buildPolicyAffinityHtml(policy) {
+  const view = (deployState.affinityViews || []).find(candidate => candidate.policyIds?.includes(policy.id));
+  if (!view) return '';
+  const destinations = view.destinations.slice(0, 20);
+  const serviceKeys = view.serviceKeys.slice(0, 30);
+  const labels = new Map((deployState.serviceInventory || []).map(service => [service.key, service.label || service.key]));
+  const head = destinations.map(destination => `<th class="mono">${escHtml(destination)}</th>`).join('');
+  const rows = serviceKeys.map(serviceKey => `<tr>
+    <th>${escHtml(labels.get(serviceKey) || serviceKey)}</th>
+    ${destinations.map(destination => `<td class="${view.matrix?.[serviceKey]?.[destination] ? 'is-allowed' : 'is-empty'}">${view.matrix?.[serviceKey]?.[destination] ? '✓' : '·'}</td>`).join('')}
+  </tr>`).join('');
+  const common = (view.commonServiceKeys || []).map(key => labels.get(key) || key);
+  const residuals = Object.entries(view.residualServiceKeysByDestination || {})
+    .map(([destination, keys]) => `<li><span class="mono">${escHtml(destination)}</span> : ${keys.map(key => escHtml(labels.get(key) || key)).join(', ')}</li>`)
+    .join('');
+  const truncated = view.destinations.length > destinations.length || view.serviceKeys.length > serviceKeys.length;
+  return `<div class="drawer-section drawer-section-affinity">
+    <div class="drawer-section-title">Affinité destination × service</div>
+    <div class="affinity-explain">${escHtml(policy.trace?.reason || 'Rectangle exact issu des flow atoms.')}</div>
+    <div class="affinity-matrix-wrap"><table class="affinity-matrix"><thead><tr><th>Service</th>${head}</tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="affinity-summary"><strong>Communs :</strong> ${common.length ? common.map(escHtml).join(', ') : 'aucun'}</div>
+    ${residuals ? `<div class="affinity-summary"><strong>Résiduels :</strong><ul>${residuals}</ul></div>` : ''}
+    ${truncated ? '<small>Matrice tronquée dans cette vue ; l’export conserve toutes les associations.</small>' : ''}
+  </div>`;
+}
+
 function populateDrawer(idx) {
   const p = deployState.analyzed[idx];
   if (!p) return;
   const a = p.analysis || {};
   const title = document.getElementById('drawer-title');
-  title.textContent = `Policy ${p._policyName || (p.policyIds || [])[0] || idx}`;
+  title.textContent = `Policy ${p._policyName || p.name || (p.policyIds || [])[0] || idx + 1}`;
 
   const ifOpts = (deployState.ifaceOpts || []).map(o =>
     `<option value="${escHtml(o.value)}" ${(o.value === (p._srcintf || '')) ? 'selected' : ''}>${escHtml(o.label)}</option>`
@@ -3533,7 +3588,7 @@ function populateDrawer(idx) {
   const ifOptsDst = (deployState.ifaceOpts || []).map(o =>
     `<option value="${escHtml(o.value)}" ${(o.value === (p._dstintf || '')) ? 'selected' : ''}>${escHtml(o.label)}</option>`
   ).join('');
-  const pid0 = (p.policyIds || [])[0] || idx;
+  const pid0 = String((p.policyIds || [])[0] || p.id || idx + 1).replace(/[^A-Za-z0-9_-]/g, '_');
   const suggestedSrcGrp = `FF_POLICY_${pid0}_SRC`;
   const suggestedDstGrp = `GRP_${pid0}_DST`;
 
@@ -3872,11 +3927,14 @@ function populateDrawer(idx) {
 
   const body = document.getElementById('drawer-body');
   body.innerHTML = `
+    ${p._policyEngineV2 ? '<div class="seg-safety-warning"><strong>Périmètre V2 verrouillé</strong><span>Sources, destinations et services sont issus des tuples mesurés. Changez de profil pour recalculer la stratégie.</span></div>' : ''}
     <div class="drawer-section drawer-section-general">
       <div class="drawer-section-title">Général</div>
       <div class="drawer-field"><span class="drawer-field-label">Direction</span><span class="drawer-field-value">${p._isWan ? '<span class="dir-badge wan">WAN</span>' : '<span class="dir-badge lan">LAN</span>'}</span></div>
       <div class="drawer-field"><span class="drawer-field-label">Policy IDs</span><span class="drawer-field-value">${(p.policyIds||[]).join(', ') || '—'}</span></div>
       <div class="drawer-field"><span class="drawer-field-label">Sessions</span><span class="drawer-field-value">${fmtNum(p.sessions||0)}</span></div>
+      ${p.metrics ? `<div class="drawer-field"><span class="drawer-field-label">Tuples</span><span class="drawer-field-value">${fmtNum(p.metrics.observedTuples)} observés · ${fmtNum(p.metrics.allowedTuples)} autorisés</span></div>
+      <div class="drawer-field"><span class="drawer-field-label">Expansion</span><span class="drawer-field-value" style="color:${p.metrics.unexpectedAllowedTuples ? 'var(--warn)' : 'var(--success)'}">${fmtNum(p.metrics.unexpectedAllowedTuples)} inattendus · ${(Number(p.metrics.expansionRatio || 0) * 100).toFixed(2)} %</span></div>` : ''}
       <div class="drawer-field"><span class="drawer-field-label">Action</span>
         <div style="display:flex;gap:4px">
           <button class="btn-sm drawer-action-btn ${(p._action||'accept')==='accept'?'active':''}" data-action="accept" style="${(p._action||'accept')==='accept'?'background:var(--success,#22c55e);color:#fff;border-color:var(--success,#22c55e)':''}">✓ Accept</button>
@@ -3898,6 +3956,7 @@ function populateDrawer(idx) {
     </div>
     ${srcSection}
     ${dstSection}
+    ${buildPolicyAffinityHtml(p)}
     <div class="drawer-section drawer-section-interfaces">
       <div class="drawer-section-title">Interface de destination</div>
       <div class="drawer-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-dstintf">${ifOptsDst}</select></div>
@@ -4135,7 +4194,7 @@ async function deploy() {
         <div id="deploy-hps-warn" style="display:none;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);border-radius:6px;padding:5px 12px;font-size:12px;color:var(--danger,#ef4444);margin-bottom:4px"></div>
         <div class="deploy-toolbar" id="deploy-merge-bar" style="display:none">
           <span id="deploy-merge-info" style="font-size:11px;color:var(--text2)"></span>
-          <button class="btn-sm" id="btn-toggle-advanced" title="Contrôles avancés : presets, fusion détaillée, périmètre, détail manuel">Avancé ▾</button>
+          <button class="btn-sm" id="btn-toggle-advanced" style="display:none" title="La fusion legacy est désactivée avec Policy Engine V2">Avancé legacy</button>
           <span id="deploy-advanced-controls" style="display:none;align-items:center;gap:6px">
           <div class="dropdown-wrap" id="merge-dropdown-wrap">
             <button class="btn-sm dropdown-trigger">⚡ Fusion ▾</button>
@@ -4561,8 +4620,10 @@ async function deploy() {
       const preset = profileBtn.dataset.segPreset;
       const definition = SEGMENTATION_PRESETS.find(item => item.key === preset);
       if (!definition) return;
-      deployState.segmentationCustomOpen = false;
-      _applySegmentationPlan(definition.plan, preset);
+      if (preset === deployState.policyEngineProfile) return;
+      deployState.policyEngineProfile = preset;
+      deployState.segmentationPreset = preset;
+      analyzeDeployPolicies();
       return;
     }
 
@@ -5204,7 +5265,7 @@ function _updateMergeSelectionBtn() {
   const btn = el('btn-merge-selection');
   const countEl = el('merge-sel-count');
   const n = deployState.mergeSelected.size;
-  if (btn) btn.style.display = n >= 2 ? '' : 'none';
+  if (btn) btn.style.display = deployState.policyEngineProfile ? 'none' : (n >= 2 ? '' : 'none');
   if (countEl) countEl.textContent = n;
 }
 
@@ -5465,7 +5526,10 @@ function isScanPolicy(p) {
 
 // Retourne un Set d'indices pour toutes les policies non-scan (sélection initiale par défaut)
 function defaultSelectedSet(arr) {
-  return new Set(arr.reduce((acc, p, i) => { if (!isScanPolicy(p)) acc.push(i); return acc; }, []));
+  return new Set(arr.reduce((acc, p, i) => {
+    if (!isScanPolicy(p) && !p._policyEngineV2?.deploymentBlocked) acc.push(i);
+    return acc;
+  }, []));
 }
 
 function filterDeployPolicies() {
@@ -5626,6 +5690,7 @@ function groupByInterfacePair(policies) {
 }
 
 function buildSequenceAggregated(policies) {
+  if (!window.FortiFlowSegmentation?.sequenceAggregationAllowed(policies)) return policies;
   const groups = new Map();
   for (const p of policies) {
     const srcKey = p.srcSubnets ? p.srcSubnets.slice().sort().join('|') : (p.srcSubnet || '');
@@ -6603,15 +6668,30 @@ async function analyzeDeployPolicies() {
 
   let rawPolicies;
   try {
-    const polData = await api('/api/policies?include_no_rcvd=1');
+    const profile = deployState.policyEngineProfile || 'recommended';
+    const polData = await api(`/api/policy-engine/v2?profile=${encodeURIComponent(profile)}`);
     rawPolicies = polData.policies || polData;
-    deployState.captureWindow = polData.captureWindow || null;   // #1: fenêtre d'observation globale
+    deployState.policyEngineProfile = polData.profile || profile;
+    deployState.policyEngineMetrics = polData.metrics || null;
+    deployState.policyEngineQuality = polData.quality || null;
+    deployState.policyEngineBlockers = polData.blockers || [];
+    deployState.policyEngineAtomCount = polData.atomCount || 0;
+    deployState.policyEngineInputSummary = polData.inputSummary || null;
+    deployState.serviceInventory = polData.serviceInventory || [];
+    deployState.affinityViews = polData.affinityViews || [];
+    deployState.captureWindow = polData.quality ? {
+      start: polData.quality.captureStart,
+      end: polData.quality.captureEnd,
+      days: polData.quality.captureSpanDays,
+      coverageRatio: polData.quality.captureCoverageRatio,
+      available: polData.quality.temporalDataAvailable,
+    } : null;
     // Append pending denied flows if any
     if (deployState._pendingDenied && deployState._pendingDenied.length > 0) {
       rawPolicies = rawPolicies.concat(deployState._pendingDenied);
       deployState._pendingDenied = null;
     }
-    setLoadingText(`${rawPolicies.length} policies récupérées — analyse en cours…`);
+    setLoadingText(`${rawPolicies.length} policies V2 sûres — analyse FortiGate en cours…`);
     setLoadingPct(30);
   } catch (err) { resetAnalyzeBtn(); alert(err.message); return; }
   if (!rawPolicies || rawPolicies.length === 0) {
@@ -6782,9 +6862,9 @@ async function analyzeDeployPolicies() {
   }
 
   deployState.analyzed              = analyzed;
-  deployState.granularity           = 'reseau';   // compat workspaces historiques
-  deployState.segmentationPlan      = { source: 'network', destination: 'network', services: 'grouped' };
-  deployState.segmentationPreset    = 'wide';
+  deployState.granularity           = 'policy-engine-v2';
+  deployState.segmentationPlan      = analyzed[0]?._segmentationPlan || { source: 'host', destination: 'host', services: 'grouped' };
+  deployState.segmentationPreset    = deployState.policyEngineProfile || 'recommended';
   deployState.segmentationCustomOpen = false;
   deployState._analyzedOriginal     = null;
   deployState._detailOriginal       = null;  // M3: base de détail, réinitialisée à chaque analyse
@@ -6972,7 +7052,8 @@ function buildModePills(idx, type, currentMode, hasHosts) {
 function _buildSrcAddrCell(p, idx) {
   if (p.srcSubnets && p.srcSubnets.length > 1) {
     if (p._useSrcGroup) {
-      const srcGrpDisplay = p._srcAddrName || `FF_POLICY_${(p.policyIds||[])[0] || idx}_SRC`;
+      const srcToken = String((p.policyIds || [])[0] || p.id || idx + 1).replace(/[^A-Za-z0-9_-]/g, '_');
+      const srcGrpDisplay = p._srcAddrName || `FF_POLICY_${srcToken}_SRC`;
       return p._srcAddrGrpFound
         ? `<span class="inline-editable found" data-idx="${idx}" data-field="_srcAddrName">${escHtml(p._srcAddrName)}</span>`
         : `<span class="inline-editable missing" data-idx="${idx}" data-field="_srcAddrName">${escHtml(srcGrpDisplay)} ${badgeHtml('auto')}</span>`;
@@ -7015,7 +7096,8 @@ function _buildDstAddrCell(p, idx) {
   }
   if (p._isMultiDst && p._multiDstSubnets?.length) {
     if (p._useDstGroup) {
-      const dstGrpDisplay = p._dstAddrName || `GRP_${(p.policyIds||[])[0] || idx}_DST`;
+      const dstToken = String((p.policyIds || [])[0] || p.id || idx + 1).replace(/[^A-Za-z0-9_-]/g, '_');
+      const dstGrpDisplay = p._dstAddrName || `GRP_${dstToken}_DST`;
       return p._dstAddrGrpFound
         ? `<span class="inline-editable found" data-idx="${idx}" data-field="_dstAddrName">${escHtml(p._dstAddrName)}</span>`
         : `<span class="inline-editable missing" data-idx="${idx}" data-field="_dstAddrName">${escHtml(dstGrpDisplay)} ${badgeHtml('auto')}</span>`;
@@ -7880,34 +7962,27 @@ function _coverageBanner() {
   return `<span style="color:var(--text2)">🛡 vs config : <span style="color:#2563eb">${nw} nouvelles</span> · <span style="color:#16a34a">${al} déjà OK</span>${br ? ` · <span style="color:#d97706">${br} via règle existante large (à resserrer)</span>` : ''}${bl ? ` · <span style="color:#dc2626">${bl} bloquées</span>` : ''}${pa ? ` · <span style="color:#d97706">${pa} partielles</span>` : ''}${un ? ` · ${un} à vérifier` : ''}${btn}</span>`;
 }
 
-// Profils simples : les axes restent personnalisables sans exposer la complexité du moteur.
+// Policy Engine V2 profiles: safety intent first, not independent lossy axes.
 const SEGMENTATION_PRESETS = [
   {
-    key: 'wide',
-    label: 'Large',
-    badge: 'Moins de règles',
-    icon: '▦',
-    desc: 'Réseau → réseau, services regroupés',
-    help: 'Pour des zones homogènes ou une première étape de segmentation.',
-    plan: { source: 'network', destination: 'network', services: 'grouped' },
+    key: 'recommended', label: 'Recommandé', badge: '0 ouverture', icon: '✓',
+    desc: 'Affinité sûre, groupes exacts',
+    help: 'Compresse les tuples sans ajouter ni retirer de permission.',
   },
   {
-    key: 'targeted',
-    label: 'Serveurs ciblés',
-    badge: 'Conseillé users → servers',
-    icon: '◎',
-    desc: 'Réseau → serveur, services regroupés',
-    help: 'Les utilisateurs restent groupés ; chaque serveur est ciblé précisément.',
-    plan: { source: 'network', destination: 'host', services: 'grouped' },
+    key: 'strict', label: 'Strict', badge: '1 tuple / règle', icon: '⌖',
+    desc: 'Fidélité maximale',
+    help: 'Conserve une policy par tuple technique observé.',
   },
   {
-    key: 'strict',
-    label: 'Très précis',
-    badge: 'Micro-segmentation',
-    icon: '⌖',
-    desc: 'IP → IP, un service par règle',
-    help: 'Pour les enclaves critiques et les hôtes stables.',
-    plan: { source: 'host', destination: 'host', services: 'separate' },
+    key: 'synthetic', label: 'Synthétique', badge: 'Expansion mesurée', icon: '◇',
+    desc: 'Réseaux connus si justifiés',
+    help: 'Accepte uniquement les généralisations dont l’expansion est calculée.',
+  },
+  {
+    key: 'expert', label: 'Expert', badge: 'Comparaison', icon: '⚙',
+    desc: 'Moteur exact + contrôles avancés',
+    help: 'Expose la preuve et les paramètres sans activer de généralisation implicite.',
   },
 ];
 
@@ -7960,12 +8035,9 @@ function _applySegmentationPlan(plan, preset = 'custom') {
 }
 
 function _granularityBar() {
-  const engine = window.FortiFlowSegmentation;
-  const plan = engine?.normalizePlan(deployState.segmentationPlan) || { source: 'network', destination: 'network', services: 'grouped' };
-  const inferred = engine?.inferPreset(plan) || 'wide';
-  const activePreset = deployState.segmentationPreset === 'custom' ? inferred : (deployState.segmentationPreset || inferred);
+  const activePreset = deployState.policyEngineProfile || 'recommended';
   const profiles = SEGMENTATION_PRESETS.map(profile => `
-    <button class="seg-profile ${profile.key === activePreset && !deployState.segmentationCustomOpen ? 'active' : ''}" data-seg-preset="${profile.key}" title="${escHtml(profile.help)}">
+    <button class="seg-profile ${profile.key === activePreset ? 'active' : ''}" data-seg-preset="${profile.key}" title="${escHtml(profile.help)}">
       <span class="seg-profile-icon">${profile.icon}</span>
       <span class="seg-profile-copy">
         <strong>${escHtml(profile.label)}</strong>
@@ -7974,85 +8046,45 @@ function _granularityBar() {
       <span class="seg-profile-badge">${escHtml(profile.badge)}</span>
     </button>
   `).join('');
-  const labels = _segmentationLabels(plan);
-  const customOpen = deployState.segmentationCustomOpen === true;
-  const blockers = deployState.deploymentBlockers || {};
-  const unknownCount = Number(blockers.unknownActionSessions || 0);
-  const failedCount = Number(blockers.failedConnectionSessions || 0);
-  const ipv6Count = Number(blockers.unsupportedIpv6 || 0);
-  const invalidCount = Number(blockers.invalidFlowRecords || 0);
-  const archiveErrors = Number(blockers.archiveEntryErrors || 0);
-  const nonDeployableCount = Number(blockers.nonDeployableSessions || 0);
-  const possibleFazLimit = Number(blockers.possibleFazDownloadLimit || 0);
-  const duplicateSessionRecords = Number(blockers.duplicateSessionRecords || 0);
-  const blockerTotal = unknownCount + failedCount + ipv6Count + invalidCount + archiveErrors + nonDeployableCount;
-  const excludedDetails = [
-    failedCount > 0 ? `${fmtNum(failedCount)} tentative${failedCount > 1 ? 's' : ''} de connexion échouée${failedCount > 1 ? 's' : ''}` : '',
-    unknownCount > 0 ? `${fmtNum(unknownCount)} session${unknownCount > 1 ? 's' : ''} avec action réellement inconnue` : '',
-    ipv6Count > 0 ? `${fmtNum(ipv6Count)} flux IPv6 non pris en charge` : '',
-    invalidCount > 0 ? `${fmtNum(invalidCount)} ligne${invalidCount > 1 ? 's' : ''} de trafic invalide${invalidCount > 1 ? 's' : ''}` : '',
-    archiveErrors > 0 ? `${fmtNum(archiveErrors)} entrée${archiveErrors > 1 ? 's' : ''} d’archive illisible${archiveErrors > 1 ? 's' : ''}` : '',
-    nonDeployableCount > 0 ? `${fmtNum(nonDeployableCount)} session${nonDeployableCount > 1 ? 's' : ''} sans preuve de chemin/protocole exploitable` : '',
-    blockers.multipleScopes ? `${fmtNum(blockers.scopeCount || 0)} contextes équipement/VDOM mélangés` : '',
-    blockers.vdomEvidenceMissing ? 'VDOM de la configuration absent des logs' : '',
-    possibleFazLimit ? `exactement ${fmtNum(possibleFazLimit)} lignes : plafond FAZ possible` : '',
-    blockers.dedupeSaturated ? 'limite de déduplication des sessions atteinte' : '',
-    duplicateSessionRecords > 0 ? `${fmtNum(duplicateSessionRecords)} doublon(s) de session neutralisé(s)` : '',
-    (blockers.certificationWarnings || []).includes('capture_calendar_gaps')
-      ? `${fmtNum(blockers.captureActiveDays || 0)} jour(s) actifs sur ${fmtNum(blockers.captureSpanDays || 0)} jour(s)`
-      : '',
-  ].filter(Boolean).join(' · ');
-  const safetyTitle = blockers.blocked
-    ? 'Capture non certifiable pour le déploiement'
-    : blockers.evidenceLimited
-      ? 'Complétude de la capture à confirmer'
-    : unknownCount > 0
-    ? 'Trafic non classifié exclu des règles'
-    : failedCount > 0
-      ? 'Tentatives échouées écartées des règles'
-      : 'Trafic IPv6 exclu des règles';
-  const safetyNotice = (blockers.hasExcludedTraffic || blockers.evidenceLimited) ? `
+  const metrics = deployState.policyEngineMetrics || {};
+  const quality = deployState.policyEngineQuality || {};
+  const blockers = quality.deploymentBlockers || deployState.deploymentBlockers || {};
+  const engineBlockers = deployState.policyEngineBlockers || [];
+  const inputSummary = deployState.policyEngineInputSummary || {};
+  const coveragePct = Number(metrics.coverageRatio ?? 0) * 100;
+  const expansionPct = Number(metrics.expansionRatio ?? 0) * 100;
+  const reusedServices = (deployState.serviceInventory || []).filter(service => service.selectedObject).length;
+  const createdServices = (deployState.serviceInventory || []).filter(service => !service.selectedObject && !service.deploymentBlocked).length;
+  const blockedServices = (deployState.serviceInventory || []).filter(service => service.deploymentBlocked).length;
+  const safetyNotice = (blockers.blocked || blockers.evidenceLimited || engineBlockers.length) ? `
     <div class="seg-safety-warning" role="status">
-      <strong>${safetyTitle}</strong>
-      <span>${blockerTotal > 0 ? `${fmtNum(blockerTotal)} événement${blockerTotal > 1 ? 's' : ''} non retenu${blockerTotal > 1 ? 's' : ''} : ` : ''}${excludedDetails}.
-        ${blockers.blocked
-          ? 'Le CLI final est bloqué tant que le périmètre ou les données sources ne permettent pas une preuve fiable.'
-          : blockers.evidenceLimited
-            ? 'La génération reste possible, mais la certification est conditionnelle tant que la complétude ou le chemin n’est pas confirmé.'
-            : 'Ces événements restent visibles dans l’analyse, mais seuls les flux explicitement acceptés peuvent produire des règles.'}
-      </span>
+      <strong>${blockers.blocked || engineBlockers.length ? 'Déploiement bloqué par la preuve' : 'Complétude de capture à confirmer'}</strong>
+      <span>${engineBlockers.length ? `${fmtNum(engineBlockers.reduce((sum, blocker) => sum + Number(blocker.affectedTuples || 0), 0))} tuple(s) utilisent un protocole sans définition FortiGate suffisamment précise. ` : ''}${Number(inputSummary.excludedSessions || 0) ? `${fmtNum(inputSummary.excludedSessions)} session(s) ont été écartées avant génération. ` : ''}Les alertes de capture restent actives même lorsque l’optimizer réduit fortement le nombre de policies.</span>
     </div>` : '';
-  const optionGroup = (dimension, options) => `
-    <div class="seg-axis">
-      <span class="seg-axis-label">${dimension === 'source' ? 'Sources' : dimension === 'destination' ? 'Destinations' : 'Services'}</span>
-      <div class="seg-axis-options">${options.map(option => `
-        <button class="seg-option ${plan[dimension] === option.value ? 'active' : ''}" data-seg-dimension="${dimension}" data-seg-value="${option.value}">${option.label}</button>
-      `).join('')}</div>
-    </div>`;
 
-  return `<section class="seg-planner" aria-label="Stratégie de segmentation">
+  return `<section class="seg-planner" aria-label="Policy Engine V2">
     <div class="seg-planner-head">
       <div>
-        <strong>Quel niveau de segmentation souhaitez-vous ?</strong>
-        <span>Choisissez un profil, puis ajustez seulement si nécessaire.</span>
+        <strong>Policy Engine V2</strong>
+        <span>La fusion sûre est intégrée à la génération. Aucun produit cartésien implicite en mode recommandé.</span>
       </div>
-      <button class="btn-sm ${customOpen ? 'btn-active' : ''}" id="seg-custom-toggle">${customOpen ? 'Masquer les réglages' : 'Personnaliser'}</button>
     </div>
     ${safetyNotice}
     <div class="seg-profile-grid">${profiles}</div>
-    <div class="seg-custom-panel" style="display:${customOpen ? 'grid' : 'none'}">
-      ${optionGroup('source', [{ value: 'network', label: 'Réseau' }, { value: 'host', label: 'Hôte /32' }])}
-      ${optionGroup('destination', [{ value: 'network', label: 'Réseau' }, { value: 'host', label: 'Serveur /32' }])}
-      ${optionGroup('services', [{ value: 'grouped', label: 'Regroupés' }, { value: 'separate', label: 'Séparés' }])}
+    <div class="pe-metrics" role="status">
+      <div><strong>${fmtNum((deployState.analyzed || []).length)}</strong><span>Policies</span></div>
+      <div><strong>${fmtNum(metrics.observedRequiredTuples || 0)}</strong><span>Tuples requis</span></div>
+      <div><strong>${coveragePct.toFixed(2)} %</strong><span>Couverture</span></div>
+      <div class="${Number(metrics.missingRequiredTuples || 0) ? 'is-danger' : 'is-safe'}"><strong>${fmtNum(metrics.missingRequiredTuples || 0)}</strong><span>Manquants</span></div>
+      <div class="${Number(metrics.blockedRequiredTuples || 0) ? 'is-danger' : 'is-safe'}"><strong>${fmtNum(metrics.blockedRequiredTuples || 0)}</strong><span>Bloqués</span></div>
+      <div class="${Number(metrics.unexpectedAllowedTuples || 0) ? 'is-warn' : 'is-safe'}"><strong>${fmtNum(metrics.unexpectedAllowedTuples || 0)}</strong><span>Inattendus</span></div>
+      <div class="${expansionPct > 0 ? 'is-warn' : 'is-safe'}"><strong>${expansionPct.toFixed(2)} %</strong><span>Expansion</span></div>
     </div>
     <div class="seg-plan-summary">
-      <span><b>Source</b> ${escHtml(labels.source)}</span>
-      <span class="seg-arrow">→</span>
-      <span><b>Destination</b> ${escHtml(labels.destination)}</span>
-      <span class="seg-arrow">·</span>
-      <span><b>Services</b> ${escHtml(labels.services)}</span>
-      <strong class="seg-rule-count">${fmtNum((deployState.analyzed || []).length)} règle${(deployState.analyzed || []).length > 1 ? 's' : ''}</strong>
-      <small>Les destinations WAN restent toujours limitées aux IP observées.</small>
+      <span><b>Services</b> ${reusedServices} réutilisés · ${createdServices} à créer${blockedServices ? ` · <strong style="color:var(--danger)">${blockedServices} bloqué(s)</strong>` : ''}</span>
+      <span><b>Flow atoms</b> ${fmtNum(deployState.policyEngineAtomCount || 0)}</span>
+      <small>Ouvre le détail d’une policy pour voir la matrice destination × service et la justification de la fusion.</small>
+      <small>Métriques calculées sur le résultat V2 initial ; toute exclusion ou règle deny ajoutée manuellement reste soumise au preflight final.</small>
     </div>
   </section>`;
 }
@@ -8064,6 +8096,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
   if (!body) return;
   analyzed = analyzed || [];   // garde: liste absente → pas de crash sur .length plus bas
   if (resetPage) deployState.page = 1;
+  const v2ProfileActive = Boolean(deployState.policyEngineProfile);
 
   // In sequence mode, aggregate before pagination
   const viewMode = deployState.viewMode || 'interface-pair';
@@ -8182,7 +8215,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
       <tr class="deploy-policy-row ${isAgg ? 'seq-row' : ''} ${p._action === 'deny' ? 'policy-deny-row' : ''} ${p._disabled ? 'policy-disabled-row' : ''} ${isHighlighted ? 'policy-row-flash' : ''} ${isScan ? 'policy-scan-row' : ''}" data-idx="${idx}" ${isAgg ? `data-seq-members="${p._sequenceMembers.join(',')}"` : ''}>
         <td><button class="btn-del-item deploy-del-policy" data-idx="${idx}" ${isAgg ? `data-seq-members="${p._sequenceMembers.join(',')}"` : ''} title="Supprimer cette policy">✕</button></td>
         <td><input type="checkbox" ${chkAttr}></td>
-        <td class="merge-chk-cell"><input type="checkbox" ${mergeChkAttr} title="Sélectionner pour fusion"></td>
+        ${v2ProfileActive ? '' : `<td class="merge-chk-cell"><input type="checkbox" ${mergeChkAttr} title="Sélectionner pour fusion"></td>`}
         <td class="status-cell" title="${escHtml(statusTitle)}"><div class="status-bar status-${rowStatus}"></div></td>
         <td><button class="btn-toggle-policy" data-idx="${idx}" title="${p._disabled ? 'Policy désactivée — cliquer pour activer' : 'Policy activée — cliquer pour désactiver'}"><span class="policy-status-badge ${p._disabled ? 'badge-disabled' : 'badge-enabled'}">${p._disabled ? 'DIS' : 'ENA'}</span></button></td>
         <td class="impact-cell"><div class="impact-bar" style="width:${barW}%"></div><span class="impact-val">${fmtNum(p.sessions || 0)}</span>${_confidenceBadge(p)}</td>
@@ -8209,7 +8242,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
           <span class="intf-pair-toggle">${collapsed ? '▸' : '▾'}</span>
           <span class="intf-pair-name">${escHtml(pair)}</span>
           <span class="intf-pair-count">${members.length} polic${members.length > 1 ? 'ies' : 'y'}</span>
-          ${members.length > 1 ? `<button class="btn-sm btn-merge-group" data-merge-group="${escHtml(pair)}" title="Fusionner ce groupe (stratégie courante)">⚡ Fusionner</button>` : ''}
+          ${!v2ProfileActive && members.length > 1 ? `<button class="btn-sm btn-merge-group" data-merge-group="${escHtml(pair)}" title="Fusionner ce groupe (stratégie courante)">⚡ Fusionner</button>` : ''}
         </div></td>
       </tr>`);
       if (!collapsed) {
@@ -8252,7 +8285,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
         <thead><tr>
           <th></th>
           <th class="col-hdr-chk" title="Inclure dans le CLI généré"><input type="checkbox" id="chk-all-deploy" title="Tout cocher / décocher"></th>
-          <th class="col-hdr-chk" title="Sélectionner des policies à fusionner manuellement">⚡</th>
+          ${v2ProfileActive ? '' : '<th class="col-hdr-chk" title="Sélectionner des policies à fusionner manuellement">⚡</th>'}
           <th></th>
           <th title="Activer / désactiver la policy dans le CLI généré"></th>
           ${thSort('Sessions', 'sessions')}

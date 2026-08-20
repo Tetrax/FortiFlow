@@ -28,6 +28,10 @@
     return 'custom';
   }
 
+  function sequenceAggregationAllowed(policies) {
+    return !(policies || []).some(policy => policy?._policyEngineV2);
+  }
+
   function unique(values) {
     return [...new Set((values || []).filter(Boolean))];
   }
@@ -234,5 +238,5 @@
     return result;
   }
 
-  return { normalizePlan, inferPreset, buildPoliciesByPlan };
+  return { normalizePlan, inferPreset, buildPoliciesByPlan, sequenceAggregationAllowed };
 });

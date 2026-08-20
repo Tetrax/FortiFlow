@@ -1009,7 +1009,7 @@ function findServiceByName(label, observedPorts, protoName, customServices) {
     if (!observedPorts?.length) return true;
     const portSet = isUdp ? cs._udpSet : cs._tcpSet;
     const ports = isUdp ? (cs.udpPorts || []) : (cs.tcpPorts || []);
-    return observedPorts.every(port => portSet ? portSet.has(Number(port)) : ports.includes(Number(port)));
+    return observedPorts.every(port => portSet instanceof Set ? portSet.has(Number(port)) : ports.includes(Number(port)));
   };
 
   // 1. Correspondance exacte, mais jamais au prix d'une incompatibilité port/protocole.
@@ -1075,14 +1075,17 @@ function findService(port, protoName, customServices, opts) {
   for (const [name, svc] of Object.entries(customServices)) {
     const ports   = isUdp ? svc.udpPorts : svc.tcpPorts;
     const portSet = isUdp ? svc._udpSet  : svc._tcpSet;   // P1: lookup O(1)
-    if (ports.length <= maxPortCount && (portSet ? portSet.has(p) : ports.includes(p))) {
+    if (ports.length <= maxPortCount && (portSet instanceof Set ? portSet.has(p) : ports.includes(p))) {
       matches.push({ name, source: 'custom', portCount: ports.length });
     }
   }
 
   if (matches.length === 0) return { found: false };
-  // Prefer most specific match (fewest ports)
-  matches.sort((a, b) => a.portCount - b.portCount);
+  // Prefer the most specific match, then an exact object from the loaded
+  // configuration over a predefined alias with the same cardinality.
+  matches.sort((a, b) => a.portCount - b.portCount
+    || (a.source === 'custom' ? 0 : 1) - (b.source === 'custom' ? 0 : 1)
+    || a.name.localeCompare(b.name));
   return { found: true, name: matches[0].name, source: matches[0].source, allMatches: matches };
 }
 
@@ -1202,12 +1205,24 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
         }));
 
         const customCandidate = customServices[svc];
-        const customMatch = customCandidate && (!relevantTuples.length || relevantTuples.every(t => {
+        // Pour ICMP sans type/code brut, le nom de service FortiGate observé
+        // peut être réutilisé uniquement si la configuration sélectionnée
+        // contient exactement le même objet ICMP dans le même scope/VDOM.
+        const icmpCustomMatch = customCandidate
+          && customCandidate.proto === 'ICMP'
+          && relevantTuples.length > 0
+          && relevantTuples.every(t => {
+            if (!/^(1|icmp)$/i.test(String(t.proto))) return false;
+            if (Number.isInteger(t.icmpType) && customCandidate.icmptype !== t.icmpType) return false;
+            if (Number.isInteger(t.icmpCode) && customCandidate.icmpcode !== t.icmpCode) return false;
+            return true;
+          });
+        const customMatch = icmpCustomMatch ? customCandidate : customCandidate && (!relevantTuples.length || relevantTuples.every(t => {
           const port = Number(t.port);
           const isUdpTuple = /^(17|udp)$/i.test(String(t.proto));
           const set = isUdpTuple ? customCandidate._udpSet : customCandidate._tcpSet;
           const ports = isUdpTuple ? customCandidate.udpPorts : customCandidate.tcpPorts;
-          return set ? set.has(port) : (ports || []).includes(port);
+          return set instanceof Set ? set.has(port) : (ports || []).includes(port);
         })) ? customCandidate : null;
         // Try ICMP/CODE/TYPE label matching if not directly found
         const icmpMatch = (!knownPredef && !customMatch) ? findIcmpService(svc, customServices) : null;
@@ -1215,7 +1230,8 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
         // Fuzzy name match (e.g. "NETBIOS" → "NetBIOS_NS" / "NetBIOS_DS")
         // Skip port-notation labels (e.g. "TCP/853") — they use the port-based fallback path
         const isPortNotationLabel = /^(TCP|UDP)\/\d+$/i.test(svc);
-        const fuzzyMatch = (!knownPredef && !customMatch && !icmpMatch && !isPortNotationLabel)
+        const fuzzyMatch = (!knownPredef && !customMatch && !icmpMatch && !isPortNotationLabel
+          && ['TCP', 'UDP'].includes(observedProtoLabel))
           ? (observedProtoLabel ? findServiceByName(svc, observedPorts, observedProtoLabel, customServices) : null)
           : null;
 
@@ -1283,7 +1299,7 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
         // Réutiliser un objet uniquement si son périmètre protocole/port est
         // exactement égal aux tuples observés. Un simple sous-ensemble ouvrirait
         // silencieusement des ports supplémentaires.
-        const exactExisting = !!icmpMatch || (
+        const exactExisting = !!icmpMatch || !!icmpCustomMatch || (
           candidateFound
           && relevantTuples.length > 0
           && observedTransport.size === relevantTuples.length
@@ -2060,6 +2076,27 @@ function segmentationFlowServiceKey(flow) {
   return Number.isInteger(port) && proto ? `${port}/${proto}` : '';
 }
 
+function segmentationFlowTechnicalKey(flow) {
+  const port = Number(flow?.dstport ?? flow?.port);
+  const rawProto = String(flow?.proto || '').trim().toUpperCase();
+  const proto = /^(6|tcp)$/i.test(rawProto) ? 'TCP'
+    : /^(17|udp)$/i.test(rawProto) ? 'UDP'
+      : /^(1|icmp)$/i.test(rawProto) ? 'ICMP'
+        : rawProto ? `PROTO-${rawProto}` : 'PROTO-UNKNOWN';
+  if (proto === 'ICMP') {
+    if (Number.isInteger(flow?.icmpType) && Number.isInteger(flow?.icmpCode)) {
+      return `ICMP:${flow.icmpType}:${flow.icmpCode}`;
+    }
+    const label = String(flow?.service || '').trim().toUpperCase();
+    const icmp = label.match(/^ICMP\/(\d+)\/(\d+)$/);
+    if (icmp) return `ICMP:${Number(icmp[1])}:${Number(icmp[2])}`;
+    if (label && !['ICMP', 'ALL_ICMP', 'ALL_ICMP6'].includes(label)) return `ICMP:NAME:${label}`;
+  }
+  return ['TCP', 'UDP'].includes(proto) && Number.isInteger(port) && port >= 1
+    ? `${proto}:${port}`
+    : proto;
+}
+
 function segmentationServiceMatchesTuple(service, tuple) {
   const wanted = segmentationServiceKey(service);
   const named = String(tuple?.service || '').toUpperCase();
@@ -2108,7 +2145,39 @@ function segmentationEvidenceHosts(policy, side) {
   return match ? [match[1]] : [];
 }
 
-function preflightValidation(selectedPolicies, config, observedFlows = null) {
+function policyEngineSelectionMetrics(requiredAtoms, selectedPolicies) {
+  const key = (partitionKey, source, destination, serviceKey) =>
+    [partitionKey, source, destination, serviceKey].join('||');
+  const required = new Set((requiredAtoms || [])
+    .filter(atom => atom?.service?.deploymentBlocked !== true)
+    .map(atom => key(atom.partitionKey, atom.source, atom.destination, atom.service.key)));
+  const allowed = new Set();
+  for (const policy of (selectedPolicies || [])) {
+    for (const source of (policy.allowedSources || policy.sources || [])) {
+      for (const destination of (policy.allowedDestinations || policy.destinations || [])) {
+        for (const serviceKey of (policy.serviceKeys || [])) {
+          allowed.add(key(policy.partitionKey, source, destination, serviceKey));
+        }
+      }
+    }
+  }
+  let coveredRequiredTuples = 0;
+  for (const tuple of required) if (allowed.has(tuple)) coveredRequiredTuples++;
+  let unexpectedAllowedTuples = 0;
+  for (const tuple of allowed) if (!required.has(tuple)) unexpectedAllowedTuples++;
+  const missingRequiredTuples = required.size - coveredRequiredTuples;
+  return {
+    observedRequiredTuples: required.size,
+    coveredRequiredTuples,
+    missingRequiredTuples,
+    allowedTuples: allowed.size,
+    unexpectedAllowedTuples,
+    coverageRatio: required.size ? coveredRequiredTuples / required.size : 1,
+    expansionRatio: required.size ? unexpectedAllowedTuples / required.size : 0,
+  };
+}
+
+function preflightValidation(selectedPolicies, config, observedFlows = null, requiredAtoms = null) {
   const issues = []; // { level: 'warn'|'error', msg }
   const addresses      = config.addresses      || {};
   const addressGroups  = config.addressGroups   || {};
@@ -2273,9 +2342,10 @@ function preflightValidation(selectedPolicies, config, observedFlows = null) {
       }
 
       const effectiveDestinationMode = isWan ? 'host' : plan.destination;
-      const exactScope = plan.source === 'host'
+      const v2SafeExact = p._policyEngineV2?.safeExact === true;
+      const exactScope = v2SafeExact || (plan.source === 'host'
         && effectiveDestinationMode === 'host'
-        && plan.services === 'separate';
+        && plan.services === 'separate');
       if (exactScope) exactScopePolicies++;
       else generalizedPolicies++;
       const srcEvidenceHosts = segmentationEvidenceHosts(p, 'src');
@@ -2302,6 +2372,39 @@ function preflightValidation(selectedPolicies, config, observedFlows = null) {
 
         if (!evidenceFlows.length) {
           issues.push({ level: 'error', msg: `${label}: aucun flux accepté ne prouve cette règle` });
+        } else if (v2SafeExact) {
+          for (const src of srcEvidenceHosts) {
+            for (const dst of dstEvidenceHosts) {
+              for (const serviceKey of (p.serviceKeys || [])) {
+                if (!evidenceFlows.some(flow =>
+                  flow.srcip === src && flow.dstip === dst && segmentationFlowTechnicalKey(flow) === serviceKey
+                )) {
+                  issues.push({
+                    level: 'error',
+                    msg: `${label}: couple ${src} → ${dst} / ${serviceKey} non observé`,
+                  });
+                }
+              }
+            }
+          }
+        } else if (plan.source === 'host' && effectiveDestinationMode === 'host' && (p.serviceTuples || []).length) {
+          const technicalKeys = [...new Set((p.serviceTuples || [])
+            .map(segmentationFlowTechnicalKey)
+            .filter(Boolean))];
+          for (const src of srcEvidenceHosts) {
+            for (const dst of dstEvidenceHosts) {
+              for (const serviceKey of technicalKeys) {
+                if (!evidenceFlows.some(flow =>
+                  flow.srcip === src && flow.dstip === dst && segmentationFlowTechnicalKey(flow) === serviceKey
+                )) {
+                  issues.push({
+                    level: 'error',
+                    msg: `${label}: couple ${src} → ${dst} / ${serviceKey} non observé`,
+                  });
+                }
+              }
+            }
+          }
         } else if (plan.source === 'host' && effectiveDestinationMode === 'host') {
           for (const src of srcEvidenceHosts) {
             for (const dst of dstEvidenceHosts) {
@@ -2381,6 +2484,29 @@ function preflightValidation(selectedPolicies, config, observedFlows = null) {
     });
   }
 
+  let selectionMetrics = null;
+  const v2Policies = selectedPolicies.filter(policy => policy?._policyEngineV2);
+  if (v2Policies.length > 0 && Array.isArray(requiredAtoms)) {
+    selectionMetrics = policyEngineSelectionMetrics(requiredAtoms, v2Policies);
+    if (selectionMetrics.missingRequiredTuples > 0) {
+      issues.push({
+        level: 'error',
+        code: 'POLICY_ENGINE_MISSING_REQUIRED_TUPLES',
+        msg: `${selectionMetrics.missingRequiredTuples} tuple(s) déployable(s) requis ne sont plus couverts par la sélection finale`,
+      });
+    }
+    const safeProfile = v2Policies.every(policy =>
+      ['recommended', 'strict', 'expert'].includes(policy._policyEngineV2.profile)
+    );
+    if (safeProfile && selectionMetrics.unexpectedAllowedTuples > 0) {
+      issues.push({
+        level: 'error',
+        code: 'POLICY_ENGINE_UNEXPECTED_ALLOWED_TUPLES',
+        msg: `${selectionMetrics.unexpectedAllowedTuples} tuple(s) inattendu(s) sont autorisés par la sélection finale`,
+      });
+    }
+  }
+
   // Summary counts
   const errors   = issues.filter(i => i.level === 'error').length;
   const warnings = issues.filter(i => i.level === 'warn').length;
@@ -2394,7 +2520,7 @@ function preflightValidation(selectedPolicies, config, observedFlows = null) {
     unclassifiedPolicies,
     routingContextUnproven,
   };
-  return { issues, errors, warnings, ok: errors === 0, certification };
+  return { issues, errors, warnings, ok: errors === 0, certification, selectionMetrics };
 }
 
 function formatExistingPolicies(policies) {
@@ -2427,6 +2553,7 @@ module.exports = {
   generateConfig,
   validateAgainstExisting,
   preflightValidation,
+  policyEngineSelectionMetrics,
   findInterfaceForSubnet,
   detectWanCandidates,
   findAddress,

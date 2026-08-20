@@ -2,7 +2,12 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { buildPoliciesByPlan, inferPreset, normalizePlan } = require('../public/segmentation-plan.js');
+const {
+  buildPoliciesByPlan,
+  inferPreset,
+  normalizePlan,
+  sequenceAggregationAllowed,
+} = require('../public/segmentation-plan.js');
 
 const services = [
   { label: 'HTTPS', name: 'HTTPS' },
@@ -49,6 +54,18 @@ test('normalizes plans and identifies the three simple presets', () => {
   assert.equal(inferPreset({ source: 'network', destination: 'host', services: 'grouped' }), 'targeted');
   assert.equal(inferPreset({ source: 'host', destination: 'host', services: 'separate' }), 'strict');
   assert.equal(inferPreset({ source: 'network', destination: 'host', services: 'separate' }), 'custom');
+});
+
+test('sequence aggregation is disabled whenever a Policy Engine V2 policy is present', () => {
+  const legacy = { srcintf: 'users-a', dstintf: 'servers-a' };
+  const v2 = {
+    srcintf: 'users-b',
+    dstintf: 'servers-b',
+    _policyEngineV2: { profile: 'recommended', safeExact: true },
+  };
+
+  assert.equal(sequenceAggregationAllowed([legacy]), true);
+  assert.equal(sequenceAggregationAllowed([legacy, v2]), false);
 });
 
 test('wide mode keeps one network-to-network rule with grouped services', () => {
