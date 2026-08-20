@@ -1009,7 +1009,7 @@ function findServiceByName(label, observedPorts, protoName, customServices) {
     if (!observedPorts?.length) return true;
     const portSet = isUdp ? cs._udpSet : cs._tcpSet;
     const ports = isUdp ? (cs.udpPorts || []) : (cs.tcpPorts || []);
-    return observedPorts.every(port => portSet ? portSet.has(Number(port)) : ports.includes(Number(port)));
+    return observedPorts.every(port => portSet instanceof Set ? portSet.has(Number(port)) : ports.includes(Number(port)));
   };
 
   // 1. Correspondance exacte, mais jamais au prix d'une incompatibilité port/protocole.
@@ -1075,14 +1075,17 @@ function findService(port, protoName, customServices, opts) {
   for (const [name, svc] of Object.entries(customServices)) {
     const ports   = isUdp ? svc.udpPorts : svc.tcpPorts;
     const portSet = isUdp ? svc._udpSet  : svc._tcpSet;   // P1: lookup O(1)
-    if (ports.length <= maxPortCount && (portSet ? portSet.has(p) : ports.includes(p))) {
+    if (ports.length <= maxPortCount && (portSet instanceof Set ? portSet.has(p) : ports.includes(p))) {
       matches.push({ name, source: 'custom', portCount: ports.length });
     }
   }
 
   if (matches.length === 0) return { found: false };
-  // Prefer most specific match (fewest ports)
-  matches.sort((a, b) => a.portCount - b.portCount);
+  // Prefer the most specific match, then an exact object from the loaded
+  // configuration over a predefined alias with the same cardinality.
+  matches.sort((a, b) => a.portCount - b.portCount
+    || (a.source === 'custom' ? 0 : 1) - (b.source === 'custom' ? 0 : 1)
+    || a.name.localeCompare(b.name));
   return { found: true, name: matches[0].name, source: matches[0].source, allMatches: matches };
 }
 
@@ -1207,7 +1210,7 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
           const isUdpTuple = /^(17|udp)$/i.test(String(t.proto));
           const set = isUdpTuple ? customCandidate._udpSet : customCandidate._tcpSet;
           const ports = isUdpTuple ? customCandidate.udpPorts : customCandidate.tcpPorts;
-          return set ? set.has(port) : (ports || []).includes(port);
+          return set instanceof Set ? set.has(port) : (ports || []).includes(port);
         })) ? customCandidate : null;
         // Try ICMP/CODE/TYPE label matching if not directly found
         const icmpMatch = (!knownPredef && !customMatch) ? findIcmpService(svc, customServices) : null;
@@ -2060,6 +2063,22 @@ function segmentationFlowServiceKey(flow) {
   return Number.isInteger(port) && proto ? `${port}/${proto}` : '';
 }
 
+function segmentationFlowTechnicalKey(flow) {
+  const port = Number(flow?.dstport ?? flow?.port);
+  const rawProto = String(flow?.proto || '').trim().toUpperCase();
+  const proto = /^(6|tcp)$/i.test(rawProto) ? 'TCP'
+    : /^(17|udp)$/i.test(rawProto) ? 'UDP'
+      : /^(1|icmp)$/i.test(rawProto) ? 'ICMP'
+        : rawProto ? `PROTO-${rawProto}` : 'PROTO-UNKNOWN';
+  if (proto === 'ICMP') {
+    const icmp = String(flow?.service || '').trim().toUpperCase().match(/^ICMP\/(\d+)\/(\d+)$/);
+    if (icmp) return `ICMP:${Number(icmp[1])}:${Number(icmp[2])}`;
+  }
+  return ['TCP', 'UDP'].includes(proto) && Number.isInteger(port) && port >= 1
+    ? `${proto}:${port}`
+    : proto;
+}
+
 function segmentationServiceMatchesTuple(service, tuple) {
   const wanted = segmentationServiceKey(service);
   const named = String(tuple?.service || '').toUpperCase();
@@ -2273,9 +2292,10 @@ function preflightValidation(selectedPolicies, config, observedFlows = null) {
       }
 
       const effectiveDestinationMode = isWan ? 'host' : plan.destination;
-      const exactScope = plan.source === 'host'
+      const v2SafeExact = p._policyEngineV2?.safeExact === true;
+      const exactScope = v2SafeExact || (plan.source === 'host'
         && effectiveDestinationMode === 'host'
-        && plan.services === 'separate';
+        && plan.services === 'separate');
       if (exactScope) exactScopePolicies++;
       else generalizedPolicies++;
       const srcEvidenceHosts = segmentationEvidenceHosts(p, 'src');
@@ -2302,6 +2322,39 @@ function preflightValidation(selectedPolicies, config, observedFlows = null) {
 
         if (!evidenceFlows.length) {
           issues.push({ level: 'error', msg: `${label}: aucun flux accepté ne prouve cette règle` });
+        } else if (v2SafeExact) {
+          for (const src of srcEvidenceHosts) {
+            for (const dst of dstEvidenceHosts) {
+              for (const serviceKey of (p.serviceKeys || [])) {
+                if (!evidenceFlows.some(flow =>
+                  flow.srcip === src && flow.dstip === dst && segmentationFlowTechnicalKey(flow) === serviceKey
+                )) {
+                  issues.push({
+                    level: 'error',
+                    msg: `${label}: couple ${src} → ${dst} / ${serviceKey} non observé`,
+                  });
+                }
+              }
+            }
+          }
+        } else if (plan.source === 'host' && effectiveDestinationMode === 'host' && (p.serviceTuples || []).length) {
+          const technicalKeys = [...new Set((p.serviceTuples || [])
+            .map(segmentationFlowTechnicalKey)
+            .filter(Boolean))];
+          for (const src of srcEvidenceHosts) {
+            for (const dst of dstEvidenceHosts) {
+              for (const serviceKey of technicalKeys) {
+                if (!evidenceFlows.some(flow =>
+                  flow.srcip === src && flow.dstip === dst && segmentationFlowTechnicalKey(flow) === serviceKey
+                )) {
+                  issues.push({
+                    level: 'error',
+                    msg: `${label}: couple ${src} → ${dst} / ${serviceKey} non observé`,
+                  });
+                }
+              }
+            }
+          }
         } else if (plan.source === 'host' && effectiveDestinationMode === 'host') {
           for (const src of srcEvidenceHosts) {
             for (const dst of dstEvidenceHosts) {
