@@ -13,7 +13,7 @@ const { createSession, getSession, setSessionData, setFortiConfig,
         getStats, listSessions } = require('./lib/store');
 const { parseFortiConfig, analyzePolicies,
         generateConfig, validateAgainstExisting,
-        preflightValidation,
+        preflightValidation, sameServiceLabelScope,
         parseFullRoutingTable, parseOspfRoutingTable, parseBgpNetworkTable,
         sortRoutes, formatExistingPolicies }             = require('./lib/forticonfig');
 const { buildHostPairCoverage, buildPolicyOrderIssues }  = require('./lib/coverage');
@@ -1973,10 +1973,12 @@ app.post('/api/deploy/generate', (req, res) => {
       }
 
       if (src._segmentationPlan) {
-        const expected = srcServices.map(s => String(s.label || s.name || '').toUpperCase()).filter(Boolean).sort();
-        const recalculated = analyzed[i].analysis.services
-          .map(s => String(s.label || s.name || '').toUpperCase()).filter(Boolean).sort();
-        if (expected.length !== recalculated.length || expected.some((value, index) => value !== recalculated[index])) {
+        const expected = [...new Set(srcServices
+          .map(s => String(s.label || s.name || '').toUpperCase()).filter(Boolean))].sort();
+        const recalculatedServices = analyzed[i].analysis.services;
+        const recalculated = [...new Set(recalculatedServices
+          .map(s => String(s.label || s.name || '').toUpperCase()).filter(Boolean))].sort();
+        if (!sameServiceLabelScope(srcServices, recalculatedServices)) {
           serviceScopeIssues.push({
             level: 'error',
             msg: `Policy #${i + 1}: dérive de services après ré-analyse (attendu: ${expected.join(', ') || 'aucun'}; obtenu: ${recalculated.join(', ') || 'aucun'})`,

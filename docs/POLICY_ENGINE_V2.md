@@ -121,7 +121,7 @@ Les ports TCP élevés restent des tuples exacts en recommandé/strict. Une plag
 
 ## Intégration et traçabilité
 
-Le moteur V2 est un module backend pur. L'API renvoie les policies, métriques, inventaire d'objets et explications. Le pipeline FortiGate existant continue d'analyser les objets, routes, zones et services puis exécute le preflight avant génération CLI. Après toute sélection utilisateur, le preflight recalcule coverage, missing et unexpected sur les FlowAtoms déployables complets ; une sélection incomplète ne peut plus être certifiée `exact`.
+Le moteur V2 est un module backend pur. L'API renvoie les policies, métriques, inventaire d'objets et explications. Le pipeline FortiGate existant continue d'analyser les objets, routes, zones et services puis exécute le preflight avant génération CLI. Après toute sélection utilisateur, le preflight recalcule coverage, missing et unexpected sur les FlowAtoms déployables complets ; une sélection incomplète ne peut plus être certifiée `exact`. Lors de la ré-analyse FortiGate, plusieurs tuples techniques portant le même libellé peuvent être représentés par un seul objet service exact ; le contrôle de dérive compare donc les ensembles de libellés uniques, tandis que le preflight technique reste autoritaire sur protocoles et ports.
 
 Chaque policy conserve : identifiants d'atomes, membres exacts, signatures, motif de regroupement, services communs/résiduels, métriques et niveau de confiance. L'UI peut ainsi répondre « pourquoi ? » sans reconstruire artificiellement la preuve.
 
