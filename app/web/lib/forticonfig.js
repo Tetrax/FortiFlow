@@ -2062,6 +2062,16 @@ function segmentationServiceKey(service) {
   return String(service.label || service.name || '').toUpperCase();
 }
 
+function sameServiceLabelScope(requestedServices, recalculatedServices) {
+  const labels = services => [...new Set((services || [])
+    .map(segmentationServiceKey)
+    .filter(Boolean))].sort();
+  const requested = labels(requestedServices);
+  const recalculated = labels(recalculatedServices);
+  return requested.length === recalculated.length
+    && requested.every((label, index) => label === recalculated[index]);
+}
+
 function segmentationProto(proto) {
   if (/^(6|tcp)$/i.test(String(proto || ''))) return 'TCP';
   if (/^(17|udp)$/i.test(String(proto || ''))) return 'UDP';
@@ -2554,6 +2564,7 @@ module.exports = {
   validateAgainstExisting,
   preflightValidation,
   policyEngineSelectionMetrics,
+  sameServiceLabelScope,
   findInterfaceForSubnet,
   detectWanCandidates,
   findAddress,

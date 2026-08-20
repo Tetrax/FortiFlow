@@ -5,11 +5,35 @@ const assert = require('node:assert/strict');
 const { Readable } = require('node:stream');
 
 const analyzer = require('../lib/analyzer');
-const { analyzePolicies, preflightValidation, generateConfig } = require('../lib/forticonfig');
+const {
+  analyzePolicies,
+  preflightValidation,
+  generateConfig,
+  sameServiceLabelScope,
+} = require('../lib/forticonfig');
 const { parseStream } = require('../lib/parser');
 
 test('Policy Engine V2 exposes a pure deterministic build entry point', () => {
   assert.equal(typeof analyzer.buildPolicyEngineV2, 'function');
+});
+
+test('service scope comparison ignores duplicate labels but still detects real drift', () => {
+  const requested = [
+    { label: 'MMS' },
+    { label: 'MMS' },
+    { label: 'DNS' },
+    { label: 'DNS' },
+    { label: 'LDAP' },
+  ];
+  const recalculated = [
+    { label: 'MMS' },
+    { label: 'DNS' },
+    { label: 'LDAP' },
+  ];
+
+  assert.equal(sameServiceLabelScope(requested, recalculated), true);
+  assert.equal(sameServiceLabelScope(requested, [...recalculated, { label: 'SMB' }]), false);
+  assert.equal(sameServiceLabelScope(requested, recalculated.filter(service => service.label !== 'LDAP')), false);
 });
 
 function flow(source, destination, proto, port, service, extra = {}) {
@@ -291,6 +315,27 @@ test('synthetic mode aggregates a dense known subnet and measures every addition
   assert.equal(result.metrics.allowedTuples, 4);
   assert.equal(result.metrics.unexpectedAllowedTuples, 1);
   assert.equal(result.metrics.expansionRatio, 1 / 3);
+});
+
+test('re-analysis may deduplicate presentation labels without widening the technical service scope', () => {
+  const flows = [
+    flow('10.0.0.10', '10.0.1.10', 17, 3479, 'MMS'),
+    flow('10.0.0.10', '10.0.1.10', 17, 3481, 'MMS'),
+    flow('10.0.0.10', '10.0.1.10', 6, 53, 'DNS'),
+    flow('10.0.0.10', '10.0.1.10', 17, 53, 'DNS'),
+  ];
+  const config = {
+    addresses: {}, addressGroups: {}, customServices: {}, serviceGroups: {}, zones: {},
+    interfaces: { users: {}, servers: {} },
+  };
+  const engine = analyzer.buildPolicyEngineV2(flows, { profile: 'recommended', fortiConfig: config });
+  const analyzed = analyzePolicies(engine.policies, config, null);
+
+  assert.deepEqual(engine.policies[0].analysis.services.map(service => service.label).sort(), ['DNS', 'DNS', 'MMS', 'MMS']);
+  assert.deepEqual(analyzed[0].analysis.services.map(service => service.label).sort(), ['DNS', 'MMS']);
+  assert.equal(sameServiceLabelScope(engine.policies[0].analysis.services, analyzed[0].analysis.services), true);
+  assert.deepEqual(analyzed[0].analysis.services.find(service => service.label === 'MMS').udpPorts, [3479, 3481]);
+  assert.equal(preflightValidation(analyzed, config, flows, engine.atoms).ok, true);
 });
 
 test('service normalization prefers exact existing objects and classifies predefined, rare and dynamic ports', () => {
