@@ -20,6 +20,12 @@ const { buildHostPairCoverage, buildPolicyOrderIssues }  = require('./lib/covera
 const { getCaptureDeploymentBlockers }                    = require('./lib/deploy-safety');
 
 const app   = express();
+const TRUST_PROXY = (process.env.FORTIFLOW_TRUST_PROXY || '').trim();
+// Ne faire confiance à X-Forwarded-For que lorsque l’adresse du proxy est
+// explicitement configurée (IP ou CIDR). Sans cette liste, un client direct
+// ne peut pas usurper son adresse et les proxys non déclarés restent un seul
+// compartiment, ce qui est le comportement sûr par défaut.
+app.set('trust proxy', TRUST_PROXY || false);
 // Le port interne reste 3737. FORTIFLOW_HTTPS_PORT pilote uniquement
 // le port publié par Docker/Portainer (443 en production).
 const PORT  = process.env.PORT || 3737;
@@ -149,6 +155,46 @@ app.use((_req, res, next) => {
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
   next();
 });
+
+// ─── Rate limiter ─────────────────────────────────────────────────────────────
+
+// Simple fixed-window limiter — no external dependency. It is deliberately
+// registered before static files, JSON parsing, multer and all route handlers
+// so rejected requests do not trigger body parsing, disk writes or analysis.
+function createRateLimiter(maxRequests = 20, windowMs = 60000) {
+  const buckets = new Map();
+  setInterval(() => {
+    const cutoff = Date.now() - windowMs;
+    for (const [key, bucket] of buckets) {
+      if (bucket.lastRefill < cutoff) buckets.delete(key);
+    }
+  }, 5 * 60 * 1000).unref();
+  return (req, res, next) => {
+    const key = req.ip || req.socket.remoteAddress || 'unknown';
+    const now = Date.now();
+    let bucket = buckets.get(key);
+    if (!bucket || now - bucket.lastRefill > windowMs) {
+      bucket = { tokens: maxRequests, lastRefill: now };
+      buckets.set(key, bucket);
+    }
+    if (bucket.tokens <= 0) {
+      return res.status(429).json({ error: 'Trop de requêtes. Réessayez dans une minute.' });
+    }
+    bucket.tokens--;
+    next();
+  };
+}
+
+const sessionLimiter = createRateLimiter(20, 60000);
+app.use([
+  '/api/upload',
+  '/api/admin',
+  '/api/import/workspace',
+  '/api/import/policies-xlsx',
+  '/api/deploy/config-upload',
+  '/api/deploy/dynamic-routes',
+], sessionLimiter);
+
 app.use(express.static(path.join(__dirname, 'public'), {
   setHeaders(res, filePath) {
     if (filePath.endsWith('.js') || filePath.endsWith('.css')) {
@@ -2153,39 +2199,6 @@ if (TLS_ENABLED) {
   attachWss(server);
   setupGracefulShutdown(server);
 }
-
-// ─── Rate limiter (session endpoints only) ─────────────────────────────────
-
-// Simple token-bucket rate limiter — no external dependency.
-// Protects session creation and admin endpoints in local deployments.
-function createRateLimiter(maxRequests = 20, windowMs = 60000) {
-  const buckets = new Map();
-  // Cleanup stale buckets every 5 minutes
-  setInterval(() => {
-    const cutoff = Date.now() - windowMs;
-    for (const [key, bucket] of buckets) {
-      if (bucket.lastRefill < cutoff) buckets.delete(key);
-    }
-  }, 5 * 60 * 1000).unref();
-  return (req, res, next) => {
-    const key = req.ip || req.socket.remoteAddress || 'unknown';
-    const now = Date.now();
-    let bucket = buckets.get(key);
-    if (!bucket || now - bucket.lastRefill > windowMs) {
-      bucket = { tokens: maxRequests, lastRefill: now };
-      buckets.set(key, bucket);
-    }
-    if (bucket.tokens <= 0) {
-      return res.status(429).json({ error: 'Trop de requêtes. Réessayez dans une minute.' });
-    }
-    bucket.tokens--;
-    next();
-  };
-}
-
-const sessionLimiter = createRateLimiter(20, 60000);
-app.use('/api/upload', sessionLimiter);
-app.use('/api/admin',   sessionLimiter);
 
 // ─── Graceful shutdown ─────────────────────────────────────────────────────
 

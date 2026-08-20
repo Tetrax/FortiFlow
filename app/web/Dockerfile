@@ -1,4 +1,4 @@
-FROM node:22-alpine
+FROM node:26.7.0-alpine3.24@sha256:aadf416b2cdce311a8811ba3f0608a61b77dbf997500e2eafe781b51f6a0b019
 
 # Runtime TLS tooling: OpenSSL validates/imports PFX and Python runs certctl.
 RUN apk add --no-cache openssl python3 su-exec

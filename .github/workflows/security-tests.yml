@@ -23,6 +23,8 @@ jobs:
           node-version: 22
       - name: Install dependencies
         run: npm ci
+      - name: Audit production dependencies (CRITICAL blocking, HIGH/MODERATE informative)
+        run: npm audit --omit=dev --audit-level=critical
       - name: Check JavaScript syntax
         run: |
           node --check server.js
@@ -69,19 +71,27 @@ jobs:
 
   security-scan:
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - name: Checkout
         uses: actions/checkout@v5
       - name: Build image for scanning
         run: docker compose build
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@v0.36.0
+      - name: Trivy gate for fixable CRITICAL vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: fortiflow-fortiflow:latest
+          format: table
+          exit-code: 1
+          ignore-unfixed: true
+          severity: CRITICAL
+      - name: Trivy report for HIGH vulnerabilities (informational)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        continue-on-error: true
         with:
           image-ref: fortiflow-fortiflow:latest
           format: table
           exit-code: 0
-          severity: CRITICAL,HIGH
+          severity: HIGH
 
   publish-ghcr:
     needs: [node-tests, docker-build, security-scan]
