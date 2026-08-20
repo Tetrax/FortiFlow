@@ -23,16 +23,25 @@ function canonicalService(flow) {
   const protocol = normalizeProtocol(flow.proto);
   const observedLabel = String(flow.service || '').trim().toUpperCase();
   const icmp = protocol === 'ICMP' ? observedLabel.match(/^ICMP\/(\d+)\/(\d+)$/) : null;
-  const icmpType = icmp ? Number(icmp[1]) : null;
-  const icmpCode = icmp ? Number(icmp[2]) : null;
+  const explicitIcmp = protocol === 'ICMP'
+    && Number.isInteger(flow.icmpType)
+    && Number.isInteger(flow.icmpCode);
+  const namedIcmp = protocol === 'ICMP'
+    && observedLabel
+    && observedLabel !== 'ICMP'
+    && !icmp
+    && !explicitIcmp;
+  const icmpType = explicitIcmp ? flow.icmpType : icmp ? Number(icmp[1]) : null;
+  const icmpCode = explicitIcmp ? flow.icmpCode : icmp ? Number(icmp[2]) : null;
   const parsedPort = Number(flow.dstport);
   const port = ['TCP', 'UDP'].includes(protocol)
     && Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65535
     ? parsedPort
     : null;
   const invalidPort = ['TCP', 'UDP'].includes(protocol) && port === null;
-  const key = icmp
+  const key = explicitIcmp || icmp
     ? `${protocol}:${icmpType}:${icmpCode}`
+    : namedIcmp ? `${protocol}:NAME:${observedLabel}`
     : port === null ? protocol : `${protocol}:${port}`;
   const label = observedLabel || (port === null ? protocol : `${protocol}/${port}`);
   return { key, protocol, port, label, icmpType, icmpCode, invalidPort };
@@ -167,6 +176,16 @@ function exactExistingService(service, customServices) {
       .filter(candidate => candidate.proto === 'ICMP'
         && candidate.icmptype === service.icmpType
         && candidate.icmpcode === service.icmpCode)
+      .map(candidate => candidate.name)
+      .filter(Boolean)
+      .sort()[0] || null;
+  }
+  if (service.protocol === 'ICMP'
+    && service.label
+    && !['ICMP', 'ALL_ICMP', 'ALL_ICMP6'].includes(service.label)) {
+    return Object.values(customServices || {})
+      .filter(candidate => candidate.proto === 'ICMP'
+        && String(candidate.name || '').toUpperCase() === service.label)
       .map(candidate => candidate.name)
       .filter(Boolean)
       .sort()[0] || null;

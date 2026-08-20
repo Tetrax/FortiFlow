@@ -2,9 +2,11 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { Readable } = require('node:stream');
 
 const analyzer = require('../lib/analyzer');
 const { analyzePolicies, preflightValidation, generateConfig } = require('../lib/forticonfig');
+const { parseStream } = require('../lib/parser');
 
 test('Policy Engine V2 exposes a pure deterministic build entry point', () => {
   assert.equal(typeof analyzer.buildPolicyEngineV2, 'function');
@@ -516,4 +518,59 @@ test('synthetic never reuses an existing network object broader than the measure
   assert.equal(result.policies[0].srcSubnet, '10.0.0.0/30');
   assert.equal(analyzed[0].analysis.srcAddr.found, false);
   assert.notEqual(analyzed[0].analysis.srcAddr.name, 'BROAD');
+});
+
+test('a named ICMP service is reusable when the selected FortiGate config defines the same protocol object', () => {
+  const config = {
+    addresses: {}, addressGroups: {}, serviceGroups: {}, zones: {},
+    interfaces: { users: {}, servers: {} },
+    customServices: {
+      PING: { name: 'PING', proto: 'ICMP', tcpPorts: [], udpPorts: [], icmptype: 8, icmpcode: null },
+    },
+  };
+  const flows = [flow('10.0.0.10', '10.0.1.10', 1, '', 'PING')];
+  const result = analyzer.buildPolicyEngineV2(flows, { profile: 'recommended', fortiConfig: config });
+  assert.equal(result.atoms[0].service.key, 'ICMP:NAME:PING');
+  assert.equal(result.serviceInventory[0].classification, 'existing');
+  assert.equal(result.serviceInventory[0].selectedObject, 'PING');
+  assert.equal(result.blockers.length, 0);
+  const analyzed = analyzePolicies(result.policies, config, null);
+  assert.equal(preflightValidation(analyzed, config, flows).ok, true);
+});
+
+test('different named ICMP services never collapse when type and code are absent', () => {
+  const config = {
+    addresses: {}, addressGroups: {}, serviceGroups: {}, zones: {},
+    interfaces: { users: {}, servers: {} },
+    customServices: {
+      PING: { name: 'PING', proto: 'ICMP', tcpPorts: [], udpPorts: [], icmptype: 8, icmpcode: null },
+    },
+  };
+  const flows = [
+    flow('10.0.0.10', '10.0.1.10', 1, '', 'PING'),
+    flow('10.0.0.10', '10.0.1.10', 1, '', 'GOOGLE-ICMP'),
+  ];
+  const result = analyzer.buildPolicyEngineV2(flows, { profile: 'recommended', fortiConfig: config });
+  assert.deepEqual(result.atoms.map(atom => atom.service.key), ['ICMP:NAME:GOOGLE-ICMP', 'ICMP:NAME:PING']);
+  assert.equal(result.metrics.observedRequiredTuples, 2);
+  assert.equal(result.metrics.missingRequiredTuples, 0);
+  assert.equal(result.metrics.unexpectedAllowedTuples, 0);
+  assert.equal(result.metrics.blockedRequiredTuples, 1);
+  assert.deepEqual(result.blockers.map(blocker => blocker.serviceKey), ['ICMP:NAME:GOOGLE-ICMP']);
+});
+
+test('parser preserves ICMP type/code and keeps different portless ICMP service identities separate', async () => {
+  const common = 'date=2026-08-20 time=10:00:00 type=traffic subtype=forward devname=FGT-A devid=FGT-A vd=root srcip=10.0.0.10 dstip=10.0.1.10 proto=1 action=accept srcintf=users dstintf=servers policyid=1 sentbyte=1 rcvdbyte=1';
+  const parsed = await parseStream(Readable.from([[
+    `${common} service=PING icmptype=8 icmpcode=0`,
+    `${common} service=GOOGLE-ICMP`,
+  ].join('\n')]));
+  const flows = [...parsed.flowMap.values()].sort((a, b) => a.service.localeCompare(b.service));
+  assert.equal(flows.length, 2);
+  assert.deepEqual(flows.map(item => ({ service: item.service, icmpType: item.icmpType, icmpCode: item.icmpCode })), [
+    { service: 'GOOGLE-ICMP', icmpType: null, icmpCode: null },
+    { service: 'PING', icmpType: 8, icmpCode: 0 },
+  ]);
+  const result = analyzer.buildPolicyEngineV2(flows, { profile: 'recommended' });
+  assert.deepEqual(result.atoms.map(atom => atom.service.key), ['ICMP:8:0', 'ICMP:NAME:GOOGLE-ICMP']);
 });

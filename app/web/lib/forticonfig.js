@@ -1205,7 +1205,14 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
         }));
 
         const customCandidate = customServices[svc];
-        const customMatch = customCandidate && (!relevantTuples.length || relevantTuples.every(t => {
+        // Pour ICMP sans type/code brut, le nom de service FortiGate observé
+        // peut être réutilisé uniquement si la configuration sélectionnée
+        // contient exactement le même objet ICMP dans le même scope/VDOM.
+        const icmpCustomMatch = customCandidate
+          && customCandidate.proto === 'ICMP'
+          && relevantTuples.length > 0
+          && relevantTuples.every(t => /^(1|icmp)$/i.test(String(t.proto)));
+        const customMatch = icmpCustomMatch ? customCandidate : customCandidate && (!relevantTuples.length || relevantTuples.every(t => {
           const port = Number(t.port);
           const isUdpTuple = /^(17|udp)$/i.test(String(t.proto));
           const set = isUdpTuple ? customCandidate._udpSet : customCandidate._tcpSet;
@@ -1286,7 +1293,7 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
         // Réutiliser un objet uniquement si son périmètre protocole/port est
         // exactement égal aux tuples observés. Un simple sous-ensemble ouvrirait
         // silencieusement des ports supplémentaires.
-        const exactExisting = !!icmpMatch || (
+        const exactExisting = !!icmpMatch || !!icmpCustomMatch || (
           candidateFound
           && relevantTuples.length > 0
           && observedTransport.size === relevantTuples.length
@@ -2071,8 +2078,13 @@ function segmentationFlowTechnicalKey(flow) {
       : /^(1|icmp)$/i.test(rawProto) ? 'ICMP'
         : rawProto ? `PROTO-${rawProto}` : 'PROTO-UNKNOWN';
   if (proto === 'ICMP') {
-    const icmp = String(flow?.service || '').trim().toUpperCase().match(/^ICMP\/(\d+)\/(\d+)$/);
+    if (Number.isInteger(flow?.icmpType) && Number.isInteger(flow?.icmpCode)) {
+      return `ICMP:${flow.icmpType}:${flow.icmpCode}`;
+    }
+    const label = String(flow?.service || '').trim().toUpperCase();
+    const icmp = label.match(/^ICMP\/(\d+)\/(\d+)$/);
     if (icmp) return `ICMP:${Number(icmp[1])}:${Number(icmp[2])}`;
+    if (label && !['ICMP', 'ALL_ICMP', 'ALL_ICMP6'].includes(label)) return `ICMP:NAME:${label}`;
   }
   return ['TCP', 'UDP'].includes(proto) && Number.isInteger(port) && port >= 1
     ? `${proto}:${port}`

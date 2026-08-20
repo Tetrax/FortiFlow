@@ -146,12 +146,12 @@ Allowed tuples                  7 230
 Unexpected allowed tuples           0
 Coverage                       100 %
 Expansion                        0 %
-Blocked required tuples           104
-Deployable required tuples      7 126
+Blocked required tuples             7
+Deployable required tuples      7 223
 Temps moteur                  ~1,60 s
 ```
 
-Les 104 tuples bloqués sont deux signatures ICMP non résolues avec assez de précision pour produire automatiquement un objet FortiGate. Ils restent visibles, sont désélectionnés par défaut et rendent le preflight global `rejected` (`17` erreurs, `42` warnings). Le runtime principal ne peut donc pas être remplacé sur la base de ce dataset sans résolution ou acceptation explicite de cette limite.
+La correction ciblée ICMP rend 97 des 104 tuples initiaux constructibles en préservant les identités de services nommées et en réutilisant l'objet FortiGate `PING`. Les 7 tuples restants sont deux signatures ICMP sans type/code prouvable. Ils restent visibles, sont désélectionnés par défaut et rendent le preflight global `rejected` (`4` erreurs, `42` warnings). Le détail est dans `docs/ICMP_BLOCKER_ANALYSIS.md`.
 
 ### Performance
 
@@ -170,7 +170,7 @@ Une seule passe a été exécutée avec le provider DeepSeek ; Hermes a normalis
 
 Traitement autonome des findings :
 
-- **H1 ICMP** — validé partiellement et corrigé : type/code explicites deviennent une clé distincte, un objet ICMP exact peut être réutilisé, et les signatures non constructibles restent bloquées et comptées séparément. La limite réelle de 104 tuples demeure honnêtement visible.
+- **H1 ICMP** — validé et corrigé génériquement : type/code explicites et services ICMP nommés deviennent des clés distinctes, le parser conserve les champs ICMP et les objets exacts sont réutilisables. 97 tuples `PING` sont débloqués ; 7 restent honnêtement bloqués faute de preuve.
 - **H2 objet réseau synthetic plus large** — hypothèse rejetée après lecture et test : `findAddress()` ne réutilise qu'un CIDR strictement égal ; un `/29` existant n'est pas réutilisé pour un `/30` mesuré.
 - **M1 port destination illisible** — validé et corrigé : classification `unresolved-port`, blocker `MISSING_DSTPORT`, compteur de tuples bloqués.
 - **M2 fusions legacy visibles** — validé et corrigé : bouton de groupe, colonne de sélection et fusion manuelle legacy retirés du DOM V2.
@@ -180,6 +180,6 @@ Traitement autonome des findings :
 
 ## Limitations restantes
 
-- Les services ICMP dont le log ne prouve pas un type/code exploitable ne sont jamais élargis silencieusement vers `ALL_ICMP`.
+- Les 7 tuples ICMP dont le log ne prouve pas un type/code ou un objet exact ne sont jamais élargis silencieusement vers `ALL_ICMP`.
 - Le nombre de 388 policies reste supérieur à la cible indicative d'environ 60, mais il est obtenu sans overfitting et sans permission supplémentaire. Une réduction supplémentaire nécessite une généralisation réseau explicitement mesurée.
 - L'UI a été validée dans Chromium headless sur un parcours réel API → analyse → Déployer → drawer. La validation humaine sur le navigateur de travail reste utile avant une release générale.
