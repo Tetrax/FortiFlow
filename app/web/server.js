@@ -6,7 +6,7 @@ const path             = require('path');
 const fs               = require('fs');
 const { WebSocketServer } = require('ws');
 
-const { buildAnalysis, consolidatePolicies, flowDecision, isExpectedOneWayFlow } = require('./lib/analyzer');
+const { buildAnalysis, consolidatePolicies, flowDecision, isExpectedOneWayFlow, buildPolicyEngineV2 } = require('./lib/analyzer');
 const { AnalysisPool }                                     = require('./lib/analysis-pool');
 const { createSession, getSession, setSessionData, setFortiConfig,
         setSessionError, deleteSession, getSessionCachePath,
@@ -594,6 +594,69 @@ app.get('/api/hosts', (req, res) => {
     }));
 
   res.json(result);
+});
+
+// GET /api/policy-engine/v2 — safe-by-default canonical policy generation
+app.get('/api/policy-engine/v2', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const s = requireSession(req, res);
+  if (!s) return;
+  if (!Array.isArray(s.data?.flows)) {
+    return res.status(410).json({ error: 'Flows indisponibles pour Policy Engine V2' });
+  }
+  const profile = String(req.query.profile || 'recommended');
+  if (!['recommended', 'strict', 'synthetic', 'expert'].includes(profile)) {
+    return res.status(400).json({ error: 'Profil Policy Engine V2 invalide' });
+  }
+  try {
+    const result = buildPolicyEngineV2(s.data.flows, {
+      profile,
+      fortiConfig: s.fortiConfig || {},
+    });
+    const captureBlockers = getCaptureDeploymentBlockers(s.data, s.fortiConfig || {});
+    const quality = {
+      captureStart: s.data.stats?.captureStart ?? null,
+      captureEnd: s.data.stats?.captureEnd ?? null,
+      captureActiveDays: s.data.stats?.captureActiveDays ?? 0,
+      captureSpanDays: s.data.stats?.captureSpanDays ?? 0,
+      captureCoverageRatio: s.data.stats?.captureCoverageRatio ?? null,
+      temporalDataAvailable: !!s.data.stats?.temporalDataAvailable,
+      deploymentBlockers: {
+        ...captureBlockers,
+        blocked: captureBlockers.blocked || result.blockers.length > 0,
+        policyEngine: result.blockers,
+      },
+    };
+    const includeFullTrace = req.query.include_trace === '1';
+    const policies = includeFullTrace ? result.policies : result.policies.map(policy => {
+      const atomIds = policy.trace?.atomIds || [];
+      return {
+        ...policy,
+        trace: policy.trace ? {
+          ...policy.trace,
+          atomIds: atomIds.slice(0, 100),
+          atomCount: atomIds.length,
+          truncated: atomIds.length > 100,
+        } : policy.trace,
+      };
+    });
+    const response = {
+      profile: result.profile,
+      atomCount: result.atoms.length,
+      policies,
+      metrics: result.metrics,
+      serviceInventory: result.serviceInventory,
+      affinityViews: result.affinityViews,
+      blockers: result.blockers,
+      inputSummary: result.inputSummary,
+      expertParameters: result.expertParameters,
+      quality,
+    };
+    if (req.query.include_atoms === '1') response.atoms = result.atoms;
+    return res.json(response);
+  } catch (error) {
+    return res.status(422).json({ error: error.message });
+  }
 });
 
 // GET /api/policies — suggested firewall policies

@@ -20,10 +20,15 @@ test('server imports every analyzer function used by deployment re-analysis', ()
       .filter(Boolean),
   );
 
-  for (const requiredName of ['buildAnalysis', 'consolidatePolicies', 'flowDecision']) {
+  for (const requiredName of ['buildAnalysis', 'consolidatePolicies', 'flowDecision', 'buildPolicyEngineV2']) {
     assert.ok(
       importedNames.has(requiredName),
       `${requiredName} is used by server.js but is missing from the analyzer import`,
     );
   }
+});
+
+test('server exposes the Policy Engine V2 endpoint', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(source, /app\.get\(['"]\/api\/policy-engine\/v2['"]/);
 });
