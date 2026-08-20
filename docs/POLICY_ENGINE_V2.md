@@ -52,9 +52,11 @@ Le mode recommandé suit un algorithme borné :
    - candidat orienté source : sources ayant exactement le même voisinage destination ;
    - candidat orienté destination : destinations ayant exactement le même voisinage source ;
    - retenir le candidat produisant le moins de policies, avec tie-break stable ;
-6. trier les membres, services et policies avec des clés canoniques ;
-7. calculer les métriques depuis la sémantique cartésienne réelle de chaque policy ;
-8. refuser le résultat recommandé si un tuple requis manque ou si un tuple inattendu apparaît.
+6. appliquer une passe finale de fusion des sources uniquement entre policies ayant même partition, destinations et `serviceKeys`, puis prouver chaque tuple du rectangle candidat ;
+7. réutiliser un objet source FortiGate existant seulement si son CIDR représente exactement toutes les sources de la policy, sans adresse supplémentaire ;
+8. trier les membres, services et policies avec des clés canoniques ;
+9. calculer les métriques depuis la sémantique cartésienne réelle de chaque policy ;
+10. refuser le résultat recommandé si un tuple requis manque ou si un tuple inattendu apparaît.
 
 Cette méthode n'essaie pas de résoudre une couverture minimale NP-difficile. Elle est déterministe, explicable, linéaire après tri par rapport au nombre de tuples canoniques, et conserve les intersections/résidus attendus.
 
@@ -93,7 +95,20 @@ Le moteur expose globalement et par policy :
 - `blockedRequiredTuples` et `deployableRequiredTuples` afin de ne pas présenter un tuple non constructible comme déployable ;
 - raison du regroupement et nombre d'atomes sources.
 
+Le bloc `optimization` expose en plus :
+
+- `before.policyCount` et toutes les métriques de sécurité avant la passe de sources ;
+- `after.policyCount` et les mêmes métriques après optimisation ;
+- `sourcePoliciesMerged` ;
+- `sourceObjectsReused`.
+
 Une policy est interprétée comme le produit cartésien `sources × destinations × services`. La matrice destination × service affichée par l'UI est dérivée des atomes justificateurs, pas de l'union de présentation.
+
+### Agrégation sûre des sources
+
+Le libellé affiché n'est jamais une identité de fusion : deux policies `DNS` basées respectivement sur `TCP:53` et `UDP:53` restent incompatibles. La passe de sources compare la partition complète, les destinations exactes et les `serviceKeys` techniques. Une fusion n'est appliquée qu'après vérification de chaque tuple source × destination × service dans les FlowAtoms.
+
+Un objet CIDR existant est réutilisable en Recommandé uniquement lorsque sa cardinalité est égale au nombre de sources distinctes et que toutes les sources appartiennent à ce CIDR. Une simple inclusion ou densité ne suffit pas. Ainsi, 59 hôtes observés dans un `/23` de 512 adresses ne justifient jamais la réutilisation de cet objet avec expansion zéro.
 
 ## Agrégation réseau
 

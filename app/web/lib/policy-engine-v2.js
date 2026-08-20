@@ -649,6 +649,123 @@ function permissionKey(partitionKey, source, destination, serviceKey) {
   return [partitionKey, source, destination, serviceKey].join('||');
 }
 
+function applySafeSourceAggregation(policies, atoms) {
+  const observed = new Set((atoms || []).map(atom =>
+    permissionKey(atom.partitionKey, atom.source, atom.destination, atom.service.key)
+  ));
+  const groups = new Map();
+  for (const policy of (policies || [])) {
+    const key = [
+      policy.partitionKey,
+      policy.dstType,
+      [...policy.destinations].sort().join(','),
+      [...policy.serviceKeys].sort().join(','),
+    ].join('||');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(policy);
+  }
+
+  const merged = [];
+  for (const group of groups.values()) {
+    if (group.length === 1) {
+      merged.push(group[0]);
+      continue;
+    }
+    const base = group[0];
+    const sources = [...new Set(group.flatMap(policy => policy.sources))].sort();
+    const safe = sources.every(source =>
+      base.destinations.every(destination =>
+        base.serviceKeys.every(serviceKey =>
+          observed.has(permissionKey(base.partitionKey, source, destination, serviceKey))
+        )
+      )
+    );
+    if (!safe) {
+      merged.push(...group);
+      continue;
+    }
+
+    const tupleByKey = new Map();
+    for (const tuple of group.flatMap(policy => policy.serviceTuples || [])) {
+      const key = `${tuple.proto}|${tuple.port}|${tuple.service}|${tuple.icmpType ?? ''}|${tuple.icmpCode ?? ''}`;
+      if (!tupleByKey.has(key)) tupleByKey.set(key, { ...tuple, sessions: 0 });
+      tupleByKey.get(key).sessions += Number(tuple.sessions || 0);
+    }
+    const firstSeen = group.map(policy => policy.firstSeen).filter(value => value != null);
+    const lastSeen = group.map(policy => policy.lastSeen).filter(value => value != null);
+    merged.push({
+      ...base,
+      sources,
+      srcHosts: sources,
+      srcSubnet: `${sources[0]}/32`,
+      srcSubnets: sources.map(source => `${source}/32`),
+      _use32Src: true,
+      _srcMode: 'hosts',
+      _useSrcGroup: sources.length > 1,
+      _multiSrcSubnets: sources.length > 1
+        ? sources.map(source => ({ subnet: `${source}/32`, hosts: [source], useSubnet: false, addrFound: false, addrName: '' }))
+        : null,
+      serviceTuples: [...tupleByKey.values()].sort((a, b) =>
+        `${a.proto}|${a.port}|${a.service}`.localeCompare(`${b.proto}|${b.port}|${b.service}`)
+      ),
+      sessions: group.reduce((sum, policy) => sum + Number(policy.sessions || 0), 0),
+      sentBytes: group.reduce((sum, policy) => sum + Number(policy.sentBytes || 0), 0),
+      rcvdBytes: group.reduce((sum, policy) => sum + Number(policy.rcvdBytes || 0), 0),
+      firstSeen: firstSeen.length ? Math.min(...firstSeen) : null,
+      lastSeen: lastSeen.length ? Math.max(...lastSeen) : null,
+      days: [...new Set(group.flatMap(policy => policy.days || []))].sort(),
+      confidence: group.every(policy => policy.confidence === base.confidence) ? base.confidence : 'mixed',
+      trace: {
+        atomIds: [...new Set(group.flatMap(policy => policy.trace?.atomIds || []))].sort(),
+        reason: 'Sources fusionnées avec destinations, services techniques et partition identiques; rectangle complet observé',
+        orientation: 'source-aggregation',
+      },
+    });
+  }
+  return merged.sort((a, b) => policySortKey(a).localeCompare(policySortKey(b)));
+}
+
+function exactExistingSourceObject(sources, addresses, maxAddresses = 4096) {
+  const sourceSet = new Set((sources || []).map(String));
+  if (sourceSet.size < 2 || sourceSet.size !== (sources || []).length) return null;
+  const candidates = [];
+  for (const [name, address] of Object.entries(addresses || {})) {
+    const parsed = parseCidr(address?.cidr);
+    if (!parsed || parsed.prefix === 32 || parsed.size > maxAddresses || parsed.size !== sourceSet.size) continue;
+    if (![...sourceSet].every(source => parsed.contains(source))) continue;
+    candidates.push({ name, ...parsed });
+  }
+  return candidates.sort((a, b) => a.cidr.localeCompare(b.cidr) || a.name.localeCompare(b.name))[0] || null;
+}
+
+function applyExactExistingSourceObjects(policies, fortiConfig) {
+  return (policies || []).map(policy => {
+    const candidate = exactExistingSourceObject(policy.sources, fortiConfig?.addresses || {});
+    if (!candidate) return policy;
+    return {
+      ...policy,
+      allowedSources: [...policy.sources],
+      srcSubnet: candidate.cidr,
+      srcSubnets: [candidate.cidr],
+      _srcAddrName: candidate.name,
+      _use32Src: false,
+      _srcMode: 'subnet',
+      _useSrcGroup: false,
+      _multiSrcSubnets: null,
+      _segmentationPlan: { ...policy._segmentationPlan, source: 'network' },
+      sourceObjectReuse: {
+        name: candidate.name,
+        cidr: candidate.cidr,
+        addressCount: candidate.size,
+      },
+      trace: {
+        ...policy.trace,
+        reason: `${policy.trace?.reason || 'Policy exacte'}; objet source FortiGate strictement équivalent réutilisé`,
+      },
+    };
+  });
+}
+
 function evaluatePolicies(atoms, policies) {
   const observed = new Set(atoms.map(atom => permissionKey(atom.partitionKey, atom.source, atom.destination, atom.service.key)));
   const allowed = new Set();
@@ -819,7 +936,19 @@ function buildPolicyEngineV2(flows, options = {}) {
     ...atom,
     service: { ...atom.service, ...serviceByKey.get(atom.service.key) },
   }));
-  const exactPolicies = profile === 'strict' ? buildStrictPolicies(atoms) : buildRecommendedPolicies(atoms);
+  const beforeOptimizationPolicies = profile === 'strict' ? buildStrictPolicies(atoms) : buildRecommendedPolicies(atoms);
+  const sourceAggregatedPolicies = profile === 'strict'
+    ? beforeOptimizationPolicies
+    : applySafeSourceAggregation(beforeOptimizationPolicies, atoms)
+      .map((policy, index) => ({
+        ...policy,
+        id: `P-${String(index + 1).padStart(5, '0')}`,
+        name: `FFV2-${String(index + 1).padStart(5, '0')}`,
+      }));
+  const exactPolicies = ['recommended', 'expert'].includes(profile)
+    ? applyExactExistingSourceObjects(sourceAggregatedPolicies, options.fortiConfig || {})
+    : sourceAggregatedPolicies;
+  const beforeOptimizationMetrics = evaluatePolicies(atoms, beforeOptimizationPolicies);
   const policies = profile === 'synthetic'
     ? applySyntheticAggregation(exactPolicies, options)
     : exactPolicies.map(policy => ({
@@ -839,6 +968,12 @@ function buildPolicyEngineV2(flows, options = {}) {
     policy.metrics = evaluatePolicy(observedTupleSet, policy);
   }
   const metrics = evaluatePolicies(atoms, policies);
+  const optimization = {
+    before: { policyCount: beforeOptimizationPolicies.length, ...beforeOptimizationMetrics },
+    after: { policyCount: policies.length, ...metrics },
+    sourcePoliciesMerged: beforeOptimizationPolicies.length - sourceAggregatedPolicies.length,
+    sourceObjectsReused: policies.filter(policy => policy.sourceObjectReuse).length,
+  };
   const affinityViews = buildAffinityViews(policies);
   const blockers = serviceInventory
     .filter(service => service.deploymentBlocked)
@@ -865,11 +1000,12 @@ function buildPolicyEngineV2(flows, options = {}) {
     allowImplicitExpansion: false,
     networkAggregation: false,
   } : undefined;
-  return { profile, atoms, policies, metrics, serviceInventory, affinityViews, blockers, inputSummary, expertParameters };
+  return { profile, atoms, policies, metrics, optimization, serviceInventory, affinityViews, blockers, inputSummary, expertParameters };
 }
 
 module.exports = {
   buildPolicyEngineV2,
+  applySafeSourceAggregation,
   canonicalizeFlows,
   evaluatePolicies,
   normalizeProtocol,

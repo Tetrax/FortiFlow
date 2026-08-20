@@ -1,6 +1,6 @@
 {
   "name": "fortiflow",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "FortiGate/FortiAnalyzer traffic log analyzer for network segmentation",
   "main": "server.js",
   "scripts": {

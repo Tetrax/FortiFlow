@@ -712,6 +712,7 @@ app.get('/api/policy-engine/v2', (req, res) => {
       atomCount: result.atoms.length,
       policies,
       metrics: result.metrics,
+      optimization: result.optimization,
       serviceInventory: result.serviceInventory,
       affinityViews: result.affinityViews,
       blockers: result.blockers,

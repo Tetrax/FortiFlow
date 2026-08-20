@@ -2140,6 +2140,7 @@ const deployState = {
   segmentationCustomOpen: false,
   policyEngineProfile: 'recommended',
   policyEngineMetrics: null,
+  policyEngineOptimization: null,
   policyEngineQuality: null,
   policyEngineBlockers: [],
   policyEngineAtomCount: 0,
@@ -2307,6 +2308,7 @@ async function exportSession() {
         segmentationPreset:    deployState.segmentationPreset,
         policyEngineProfile:    deployState.policyEngineProfile,
         policyEngineMetrics:    deployState.policyEngineMetrics,
+        policyEngineOptimization: deployState.policyEngineOptimization,
         policyEngineQuality:    deployState.policyEngineQuality,
         policyEngineBlockers:   deployState.policyEngineBlockers,
         policyEngineAtomCount:  deployState.policyEngineAtomCount,
@@ -2385,6 +2387,7 @@ function importSession(file) {
           deployState.segmentationPreset    = ds.segmentationPreset || window.FortiFlowSegmentation?.inferPreset(deployState.segmentationPlan) || 'wide';
           deployState.policyEngineProfile   = ds.policyEngineProfile || 'recommended';
           deployState.policyEngineMetrics   = ds.policyEngineMetrics || null;
+          deployState.policyEngineOptimization = ds.policyEngineOptimization || null;
           deployState.policyEngineQuality   = ds.policyEngineQuality || null;
           deployState.policyEngineBlockers  = ds.policyEngineBlockers || [];
           deployState.policyEngineAtomCount = ds.policyEngineAtomCount || 0;
@@ -6673,6 +6676,7 @@ async function analyzeDeployPolicies() {
     rawPolicies = polData.policies || polData;
     deployState.policyEngineProfile = polData.profile || profile;
     deployState.policyEngineMetrics = polData.metrics || null;
+    deployState.policyEngineOptimization = polData.optimization || null;
     deployState.policyEngineQuality = polData.quality || null;
     deployState.policyEngineBlockers = polData.blockers || [];
     deployState.policyEngineAtomCount = polData.atomCount || 0;
@@ -8047,6 +8051,7 @@ function _granularityBar() {
     </button>
   `).join('');
   const metrics = deployState.policyEngineMetrics || {};
+  const optimization = deployState.policyEngineOptimization || {};
   const quality = deployState.policyEngineQuality || {};
   const blockers = quality.deploymentBlockers || deployState.deploymentBlockers || {};
   const engineBlockers = deployState.policyEngineBlockers || [];
@@ -8072,7 +8077,8 @@ function _granularityBar() {
     ${safetyNotice}
     <div class="seg-profile-grid">${profiles}</div>
     <div class="pe-metrics" role="status">
-      <div><strong>${fmtNum((deployState.analyzed || []).length)}</strong><span>Policies</span></div>
+      <div><strong>${fmtNum(optimization.before?.policyCount ?? (deployState.analyzed || []).length)}</strong><span>Avant optimisation</span></div>
+      <div><strong>${fmtNum(optimization.after?.policyCount ?? (deployState.analyzed || []).length)}</strong><span>Après optimisation</span></div>
       <div><strong>${fmtNum(metrics.observedRequiredTuples || 0)}</strong><span>Tuples requis</span></div>
       <div><strong>${coveragePct.toFixed(2)} %</strong><span>Couverture</span></div>
       <div class="${Number(metrics.missingRequiredTuples || 0) ? 'is-danger' : 'is-safe'}"><strong>${fmtNum(metrics.missingRequiredTuples || 0)}</strong><span>Manquants</span></div>
@@ -8083,6 +8089,7 @@ function _granularityBar() {
     <div class="seg-plan-summary">
       <span><b>Services</b> ${reusedServices} réutilisés · ${createdServices} à créer${blockedServices ? ` · <strong style="color:var(--danger)">${blockedServices} bloqué(s)</strong>` : ''}</span>
       <span><b>Flow atoms</b> ${fmtNum(deployState.policyEngineAtomCount || 0)}</span>
+      <span><b>Sources</b> ${fmtNum(optimization.sourcePoliciesMerged || 0)} policy(s) fusionnée(s) · ${fmtNum(optimization.sourceObjectsReused || 0)} objet(s) existant(s) réutilisé(s)</span>
       <small>Ouvre le détail d’une policy pour voir la matrice destination × service et la justification de la fusion.</small>
       <small>Métriques calculées sur le résultat V2 initial ; toute exclusion ou règle deny ajoutée manuellement reste soumise au preflight final.</small>
     </div>
