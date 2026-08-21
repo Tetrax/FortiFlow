@@ -21,6 +21,7 @@ function _save(id) {
       id, createdAt: s.createdAt, lastAccess: s.lastAccess, status: s.status,
       data:        s.data        || null,
       fortiConfig: s.fortiConfig || null,
+      networkDecisions: s.networkDecisions || {},
     });
     const tmp = _cachePath(id) + '.' + Date.now() + '.tmp';
     fs.writeFile(tmp, payload, 'utf8', (err) => {
@@ -54,6 +55,7 @@ function _loadAll() {
           status:      payload.status,
           data:        payload.data,
           fortiConfig: payload.fortiConfig,
+          networkDecisions: payload.networkDecisions || {},
           error:       null,
           emitter:     new EventEmitter(),
           progress:    { lines: 0, linesPerSec: 0, eta: null },
@@ -86,6 +88,7 @@ function createSession() {
     lastAccess:  Date.now(),
     status:      'parsing',
     data:        null,
+    networkDecisions: {},
     error:       null,
     emitter:     new EventEmitter(),
     progress:    { lines: 0, linesPerSec: 0, eta: null },
@@ -118,6 +121,14 @@ function setFortiConfig(id, fortiConfig) {
   if (s) { s.fortiConfig = fortiConfig; _save(id); }
 }
 
+function setNetworkDecisions(id, networkDecisions) {
+  const s = sessions.get(id);
+  if (s) {
+    s.networkDecisions = structuredClone(networkDecisions || {});
+    _save(id);
+  }
+}
+
 function setSessionError(id, error) {
   const s = sessions.get(id);
   if (s) { s.error = error; s.status = 'error'; }
@@ -129,6 +140,7 @@ function deleteSession(id) {
     s.emitter.removeAllListeners();
     s.data = null;
     s.fortiConfig = null;
+    s.networkDecisions = null;
     sessions.delete(id);
   }
   try { fs.unlink(_cachePath(id), () => {}); } catch { /* ignore */ }
@@ -144,18 +156,20 @@ function getStats() {
 }
 
 // ─── Periodic purge ───────────────────────────────────────────────────────────
-setInterval(() => {
+const purgeTimer = setInterval(() => {
   const cutoff = Date.now() - SESSION_TTL_MS;
   for (const [id, s] of sessions) {
     if (s.lastAccess < cutoff) {
       s.emitter.removeAllListeners();
       s.data = null;
       s.fortiConfig = null;
+      s.networkDecisions = null;
       sessions.delete(id);
       try { fs.unlink(_cachePath(id), () => {}); } catch { /* ignore */ }
     }
   }
 }, PURGE_INTERVAL);
+purgeTimer.unref();
 
 // ─── Load persisted sessions on startup ───────────────────────────────────────
 _loadAll();
@@ -177,6 +191,7 @@ module.exports = {
   getSession,
   setSessionData,
   setFortiConfig,
+  setNetworkDecisions,
   setSessionError,
   deleteSession,
   getSessionCachePath,

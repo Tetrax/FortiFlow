@@ -9,7 +9,7 @@ const { WebSocketServer } = require('ws');
 const { buildAnalysis, consolidatePolicies, flowDecision, isExpectedOneWayFlow, buildPolicyEngineV2 } = require('./lib/analyzer');
 const { AnalysisPool }                                     = require('./lib/analysis-pool');
 const { createSession, getSession, setSessionData, setFortiConfig,
-        setSessionError, deleteSession, getSessionCachePath,
+        setNetworkDecisions, setSessionError, deleteSession, getSessionCachePath,
         getStats, listSessions } = require('./lib/store');
 const { parseFortiConfig, analyzePolicies,
         generateConfig, validateAgainstExisting,
@@ -20,6 +20,11 @@ const { buildHostPairCoverage, buildPolicyOrderIssues }  = require('./lib/covera
 const { getCaptureDeploymentBlockers }                    = require('./lib/deploy-safety');
 const { parseTrafficScopeQuery, trafficScopeKey }          = require('./lib/traffic-scope');
 const { buildPolicyRepresentationCandidates }              = require('./lib/network-representation-integration');
+const {
+  applyNetworkRepresentationDecision,
+  networkDecisionKey,
+  revalidateNetworkUserDecision,
+} = require('./lib/network-representation-decision');
 
 const app   = express();
 const TRUST_PROXY = (process.env.FORTIFLOW_TRUST_PROXY || '').trim();
@@ -340,6 +345,13 @@ function validateWorkspaceBody(body) {
   }
   if (body.fortiConfig != null && (typeof body.fortiConfig !== 'object' || Array.isArray(body.fortiConfig))) {
     throw new Error('Configuration FortiGate invalide dans le workspace');
+  }
+  if (body.networkDecisions != null
+    && (typeof body.networkDecisions !== 'object' || Array.isArray(body.networkDecisions))) {
+    throw new Error('Décisions réseau invalides dans le workspace');
+  }
+  if (Object.keys(body.networkDecisions || {}).length > 10000) {
+    throw new Error('Workspace invalide : trop de décisions réseau');
   }
   return body;
 }
@@ -716,6 +728,99 @@ app.get('/api/policy-engine/v2/representations', (req, res) => {
   } catch (error) {
     const status = /^Policy V2 introuvable/.test(error.message) ? 404 : 422;
     return res.status(status).json({ error: error.message });
+  }
+});
+
+// POST /api/policy-engine/v2/representations/decisions — validate, apply on a copy and persist
+app.post('/api/policy-engine/v2/representations/decisions', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const s = requireSession(req, res);
+  if (!s) return;
+  if (!s.fortiConfig) return res.status(404).json({ error: 'Aucune config FortiGate chargée' });
+  if (!Array.isArray(s.data?.flows)) {
+    return res.status(410).json({ error: 'Flows indisponibles pour Policy Engine V2' });
+  }
+  const profile = String(req.query.profile || 'recommended');
+  if (!['recommended', 'strict', 'expert'].includes(profile)) {
+    return res.status(400).json({ error: 'Profil exact Policy Engine V2 requis' });
+  }
+  let trafficScope;
+  try {
+    trafficScope = parseTrafficScopeQuery(req.query);
+  } catch (error) {
+    return res.status(400).json({ error: error.message });
+  }
+  const { policyId, side, candidateId, resolverInputHash } = req.body || {};
+  if (!policyId || !['source', 'destination'].includes(side) || !candidateId || !resolverInputHash) {
+    return res.status(400).json({ error: 'policyId, side, candidateId et resolverInputHash requis' });
+  }
+  try {
+    const engineResult = getPolicyEngineResult(s, profile, s.fortiConfig, trafficScope);
+    const outcome = applyNetworkRepresentationDecision({
+      engineResult,
+      fortiConfig: s.fortiConfig,
+      observedFlows: s.data.flows,
+      policyId,
+      side,
+      candidateId,
+      resolverInputHash,
+    });
+    const decisions = { ...(s.networkDecisions || {}) };
+    decisions[networkDecisionKey(policyId, side)] = outcome.decision;
+    setNetworkDecisions(s.id, decisions);
+    return res.status(201).json(outcome);
+  } catch (error) {
+    const status = Number(error.statusCode || 500);
+    return res.status(status).json({
+      error: error.message,
+      code: error.code || 'NETWORK_DECISION_FAILED',
+      details: error.details || null,
+    });
+  }
+});
+
+// GET /api/policy-engine/v2/representations/decisions — read and revalidate persisted decision
+app.get('/api/policy-engine/v2/representations/decisions', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const s = requireSession(req, res);
+  if (!s) return;
+  if (!s.fortiConfig) return res.status(404).json({ error: 'Aucune config FortiGate chargée' });
+  const policyId = String(req.query.policy_id || '');
+  const side = String(req.query.side || '');
+  if (!policyId || !['source', 'destination'].includes(side)) {
+    return res.status(400).json({ error: 'policy_id et side requis' });
+  }
+  const key = networkDecisionKey(policyId, side);
+  const stored = s.networkDecisions?.[key];
+  if (!stored) return res.status(404).json({ error: 'Décision réseau introuvable' });
+  const profile = String(req.query.profile || 'recommended');
+  if (!['recommended', 'strict', 'expert'].includes(profile)) {
+    return res.status(400).json({ error: 'Profil exact Policy Engine V2 requis' });
+  }
+  let trafficScope;
+  try {
+    trafficScope = parseTrafficScopeQuery(req.query);
+  } catch (error) {
+    return res.status(400).json({ error: error.message });
+  }
+  try {
+    const engineResult = getPolicyEngineResult(s, profile, s.fortiConfig, trafficScope);
+    const validation = revalidateNetworkUserDecision({
+      decision: stored,
+      engineResult,
+      fortiConfig: s.fortiConfig,
+    });
+    if (!validation.valid) {
+      const decisions = { ...(s.networkDecisions || {}), [key]: validation.decision };
+      setNetworkDecisions(s.id, decisions);
+    }
+    return res.json({
+      valid: validation.valid,
+      reasons: validation.reasons,
+      decision: validation.decision,
+    });
+  } catch (error) {
+    return res.status(422).json({ error: error.message, code: error.code || 'NETWORK_DECISION_VALIDATION_FAILED' });
   }
 });
 
@@ -1367,6 +1472,7 @@ app.get('/api/export/workspace', (req, res) => {
     exportedAt:  new Date().toISOString(),
     data:        exportData,
     fortiConfig: s.fortiConfig || null,
+    networkDecisions: s.networkDecisions || {},
   });
 });
 
@@ -1392,6 +1498,7 @@ app.post('/api/import/workspace', express.raw({ type: ['application/octet-stream
     const id = createSession();
     setSessionData(id, body.data);
     if (body.fortiConfig) setFortiConfig(id, body.fortiConfig);
+    if (body.networkDecisions) setNetworkDecisions(id, body.networkDecisions);
     res.json({ sessionId: id });
   } catch (err) {
     res.status(400).json({ error: 'Fichier corrompu ou illisible : ' + err.message });
@@ -1425,6 +1532,7 @@ app.post('/api/workspaces', express.json({ limit: '10kb' }), async (req, res) =>
     exportedAt: new Date().toISOString(),
     data: exportData,
     fortiConfig: s.fortiConfig || null,
+    networkDecisions: s.networkDecisions || {},
   });
 
   const id = require('crypto').randomBytes(8).toString('hex');
@@ -1459,6 +1567,7 @@ app.get('/api/workspaces/:id', async (req, res) => {
     const newId = createSession();
     setSessionData(newId, body.data);
     if (body.fortiConfig) setFortiConfig(newId, body.fortiConfig);
+    if (body.networkDecisions) setNetworkDecisions(newId, body.networkDecisions);
     res.json({ sessionId: newId, name: entry.name, hasFortiConfig: !!body.fortiConfig });
   } catch (err) {
     res.status(500).json({ error: err.message });

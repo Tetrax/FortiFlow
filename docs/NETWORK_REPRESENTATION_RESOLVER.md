@@ -137,7 +137,7 @@ Pour un candidat destination :
 sources × representedDestinations × serviceKeys
 ```
 
-Le resolver ne présente pas ces métriques comme un preflight final. Une future phase `UserDecision` devra reconstruire une copie de policy, appeler `evaluatePolicies()`, puis exécuter le preflight serveur avant toute persistance ou génération.
+Le resolver ne présente pas ses métriques preview comme un preflight final. Le workflow de décision Phase 4 reconstruit donc une copie de policy, appelle `evaluatePolicies()`, puis exécute l'analyse FortiGate et le preflight avant d'indiquer si une génération serait possible.
 
 ## Intégration backend Phase 3
 
@@ -185,6 +185,47 @@ Missing / Unexpected / Expansion     0 / 0 / 0 %
 Champs décision/application exposés  0
 ```
 
+## Workflow contrôlé Phase 4
+
+Le module `app/web/lib/network-representation-decision.js` implémente le contrat `UserDecision` et l'application sur copie :
+
+```text
+candidat courant
+→ validation resolverInputHash / config / scope / policy / version
+→ création UserDecision
+→ clone de la policy
+→ application de la représentation au clone
+→ evaluatePolicies sur l'ensemble des policies
+→ refus si missing ou unexpected non nul
+→ analyzePolicies
+→ preflightValidation
+→ generationEligible (booléen seulement)
+```
+
+Types applicables : objet exact, groupe existant exact, nouveau groupe exact, host-list et CIDR. Un CIDR n'est accepté que si son expansion recalculée est nulle ; les CIDR sparse sont rejetés avec les métriques de dérive.
+
+Une décision stocke au minimum :
+
+- policy/candidate/side/profile ;
+- `resolverInputHash` ;
+- policy et config fingerprints ;
+- Traffic Scope key ;
+- métriques attendues ;
+- statut et horodatage.
+
+Une décision invalidée ne peut jamais redevenir valide. Les décisions sont persistées dans le cache session et dans les exports/workspaces `.ffws`.
+
+API :
+
+```text
+POST /api/policy-engine/v2/representations/decisions
+GET  /api/policy-engine/v2/representations/decisions
+```
+
+Le POST exige `policyId`, `side`, `candidateId` et `resolverInputHash`, retourne la policy appliquée/analysée, les métriques recalculées, le preflight et `generationEligible`. Le GET relit puis revalide la décision contre le contexte courant ; une dérive la fait passer à `invalidated` avec ses raisons.
+
+Le workflow ne persiste jamais une décision refusée pour hash périmé, candidat absent, ambiguïté ou expansion. Il ne modifie pas la policy source et n'appelle jamais `generateConfig`.
+
 ## Tests Phase 2
 
 La suite dédiée couvre :
@@ -216,13 +257,11 @@ Missing / Unexpected / Expansion   0 / 0 / 0 %
 
 `autoApplicable` reste une propriété mathématique du candidat ; aucune des suggestions ci-dessus n'a été appliquée au moteur.
 
-## Hors scope Phase 3
+## Hors scope Phase 4
 
 Non implémentés volontairement :
 
-- persistance `UserDecision` ;
-- application d'un candidat ;
-- recalcul final via `evaluatePolicies()` ;
-- preflight ;
-- génération d'objets/CLI ;
-- UI.
+- appel à `generateConfig` depuis le workflow de décision ;
+- génération automatique ;
+- UI complète ;
+- déploiement.

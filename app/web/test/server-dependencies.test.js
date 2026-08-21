@@ -48,9 +48,29 @@ test('server exposes a read-only network representation candidates endpoint', ()
   assert.match(source, /app\.get\(['"]\/api\/policy-engine\/v2\/representations['"]/);
   assert.match(source, /buildPolicyRepresentationCandidates\(result,\s*s\.fortiConfig\s*\|\|\s*\{\},\s*policyId\)/);
   const routeStart = source.indexOf("app.get('/api/policy-engine/v2/representations'");
-  const routeEnd = source.indexOf("app.get('/api/policy-engine/v2'", routeStart);
+  const routeEnd = source.indexOf("app.post('/api/policy-engine/v2/representations/decisions'", routeStart);
   const routeSource = source.slice(routeStart, routeEnd);
   assert.doesNotMatch(routeSource, /preflightValidation|generateConfig|analyzePolicies|UserDecision/);
+});
+
+test('server exposes persisted network decisions without invoking CLI generation', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(source, /app\.post\(['"]\/api\/policy-engine\/v2\/representations\/decisions['"]/);
+  assert.match(source, /app\.get\(['"]\/api\/policy-engine\/v2\/representations\/decisions['"]/);
+  assert.match(source, /setNetworkDecisions\(s\.id,\s*decisions\)/);
+  assert.match(source, /applyNetworkRepresentationDecision\(/);
+  const routeStart = source.indexOf("app.post('/api/policy-engine/v2/representations/decisions'");
+  const routeEnd = source.indexOf("// GET /api/policy-engine/v2", routeStart);
+  const routeSource = source.slice(routeStart, routeEnd);
+  assert.doesNotMatch(routeSource, /generateConfig|\/api\/deploy\/generate/);
+});
+
+test('workspace export and import preserve persisted network decisions', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const exports = source.match(/networkDecisions:\s*s\.networkDecisions\s*\|\|\s*\{\}/g) || [];
+  const imports = source.match(/setNetworkDecisions\([^,]+,\s*body\.networkDecisions\)/g) || [];
+  assert.equal(exports.length, 2);
+  assert.equal(imports.length, 2);
 });
 
 test('deployment preflight receives the complete V2 atom set after user selection', () => {
