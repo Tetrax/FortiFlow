@@ -1113,6 +1113,39 @@ test('applique les sélections d’adresse locales sans modifier la configuratio
   assert.equal(applied._use32Dst, false);
 });
 
+test('applique aussi les sélections d’adresse aux policies Policy Engine V2', () => {
+  const policy = {
+    id: 'P-V2',
+    _policyEngineV2: { profile: 'recommended', safeExact: true },
+    srcSubnet: '10.0.0.10/32',
+    srcHosts: ['10.0.0.10'],
+    dstTarget: '10.0.1.20/32',
+    dstHosts: ['10.0.1.20'],
+    analysis: {
+      addressChoices: {
+        source: {
+          existingObjects: [{ name: 'USERS', cidr: '10.0.0.0/24', unobservedIpCount: 255 }],
+        },
+      },
+      srcAddr: { found: false, cidr: '10.0.0.10/32' },
+      dstAddr: { found: false, cidr: '10.0.1.20/32' },
+      services: [],
+    },
+  };
+  const selected = [{
+    ...policy,
+    addressSelections: {
+      source: { mode: 'existing-object', objectName: 'USERS', confirmed: true },
+    },
+  }];
+  const applied = applyPolicyAddressSelections([policy], selected)[0];
+  assert.equal(applied.analysis.srcAddr.name, 'USERS');
+  assert.equal(applied.analysis.srcAddr.cidr, '10.0.0.0/24');
+  assert.equal(applied._srcMode, 'subnet');
+  assert.equal(applied._segmentationPlan.source, 'network');
+  assert.equal(applied._policyEngineV2.safeExact, false);
+});
+
 
 test('les données non interprétables bloquent le CLI tandis que les échecs connus restent informatifs', () => {
   const sessionData = {

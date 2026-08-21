@@ -21,6 +21,7 @@ const { getCaptureDeploymentBlockers }                    = require('./lib/deplo
 const { parseTrafficScopeQuery, trafficScopeKey }          = require('./lib/traffic-scope');
 const {
   validateConfigTelemetryConsistency,
+  selectTelemetryVdom,
   CONFIG_TELEMETRY_MISMATCH,
   CONFIG_TELEMETRY_MISMATCH_MESSAGE,
 } = require('./lib/config-consistency');
@@ -1775,7 +1776,12 @@ app.post('/api/deploy/config-upload', upload.single('conffile'), async (req, res
 
   try {
     const text = await fs.promises.readFile(req.file.path, 'utf8');
-    const fortiConfig = parseFortiConfig(text);
+    const initialConfig = parseFortiConfig(text);
+    const telemetryVdom = selectTelemetryVdom(
+      s.originalFlows || s.data?.flows || [],
+      initialConfig.vdomList,
+    );
+    const fortiConfig = telemetryVdom ? parseFortiConfig(text, telemetryVdom) : initialConfig;
     const consistency = assertConfigTelemetry(s, fortiConfig);
     if (!consistency.ok) return sendConfigTelemetryMismatch(res, consistency);
 

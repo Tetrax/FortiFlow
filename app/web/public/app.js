@@ -3065,9 +3065,13 @@ function buildSimpleAddressChoiceHtml(policy, side) {
       ? `<div class="address-choice-calculated"><code>${escHtml(calculated.cidr)}</code><span>${fmtNum(observedCount)} hôtes observés · ${fmtNum(calculated.unobservedIpCount)} IP non observées</span></div>`
       : '';
     const pending = selection && selection.confirmed !== true;
-    const selectedSummary = pending
-      ? `<div class="address-choice-pending">Choix : <strong>${selectedMode === 'hosts' ? 'hôtes /32' : `subnet ${escHtml(selection.cidr || '')}`}</strong> — confirmez pour continuer.</div>
-         <button type="button" class="btn-sm btn-accent address-choice-action" data-address-side="${side}" data-address-mode="${selectedMode}" data-address-action="confirm">Confirmer</button>`
+    const selectedSummary = selection
+      ? pending
+        ? `<div class="address-choice-pending">Choix : <strong>${selectedMode === 'hosts' ? 'hôtes /32' : `subnet ${escHtml(selection.cidr || '')}`}</strong> — confirmez pour continuer.</div>
+           <button type="button" class="btn-sm btn-accent address-choice-action" data-address-side="${side}" data-address-mode="${selectedMode}" data-address-action="confirm">Confirmer</button>`
+        : `<div class="address-choice-selected">✓ ${selectedMode === 'hosts'
+          ? `Hôtes /32 choisis : ${fmtNum(observedCount)} hôtes`
+          : `Subnet choisi : ${escHtml(selection.cidr || calculated?.cidr || '')}`}</div>`
       : '';
     body = `${calculatedRow}
       <div class="address-choice-actions">
@@ -3234,7 +3238,7 @@ function mountDrawer() {
         selection = {
           mode,
           ips: simpleChoiceObservedIps(choice),
-          confirmed: false,
+          confirmed: true,
         };
       }
       applySimpleAddressSelection(p, side, selection);
@@ -3765,7 +3769,13 @@ function populateDrawer(idx) {
   let srcSection = '';
   const simpleSourceChoice = buildSimpleAddressChoiceHtml(p, 'source');
   const simpleSourceMode = Boolean(simpleSourceChoice);
-  if (p._multiSrcSubnets?.length) {
+  if (p._multiSrcSubnets?.length && simpleSourceMode) {
+    srcSection = `<div class="drawer-section drawer-section-source">
+      <div class="drawer-section-title">Source</div>
+      ${simpleSourceChoice}
+      <div class="drawer-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-srcintf">${ifOpts}</select></div>
+    </div>`;
+  } else if (p._multiSrcSubnets?.length) {
     // ── Multi-src : several source subnets ──
     const srcSubs = p._multiSrcSubnets;
     const srcSubRows = srcSubs.map((s, si) => {
@@ -3867,7 +3877,13 @@ function populateDrawer(idx) {
   let dstSection = '';
   const simpleDestinationChoice = buildSimpleAddressChoiceHtml(p, 'destination');
   const simpleDestinationMode = Boolean(simpleDestinationChoice);
-  if (p._isMultiDst && p._multiDstSubnets?.length) {
+  if (p._isMultiDst && p._multiDstSubnets?.length && simpleDestinationMode) {
+    dstSection = `<div class="drawer-section drawer-section-destination">
+      <div class="drawer-section-title">Destination</div>
+      ${simpleDestinationChoice}
+      <div class="drawer-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-dstintf">${ifOptsDst}</select></div>
+    </div>`;
+  } else if (p._isMultiDst && p._multiDstSubnets?.length) {
     const subs = p._multiDstSubnets;
     const subRows = subs.map((s, si) => {
       const isSubnet = s.useSubnet !== false;
@@ -3962,10 +3978,10 @@ function populateDrawer(idx) {
     dstSection = `<div class="drawer-section drawer-section-destination">
       <div class="drawer-section-title">Destination</div>
       ${simpleDestinationChoice}
-      <div class="drawer-field">
+      ${!simpleDestinationMode ? `<div class="drawer-field">
         <span class="drawer-field-label">Target</span>
         <span class="drawer-field-value">${escHtml(p.dstTarget || '—')}</span>
-      </div>
+      </div>` : ''}
       ${isWan && !simpleDestinationMode ? `<div class="drawer-toggle-row">
         <span style="font-size:11px;color:var(--text2)">Mode :</span>
         <button class="drawer-toggle-btn drawer-dstall-btn ${dstUseAll ? 'active' : ''}" data-val="true">all</button>
@@ -4081,14 +4097,14 @@ function populateDrawer(idx) {
   </div>` : '';
 
   const body = document.getElementById('drawer-body');
+  const simpleAddressMode = simpleSourceMode || simpleDestinationMode;
   body.innerHTML = `
-    ${p._policyEngineV2 ? '<div class="seg-safety-warning"><strong>Périmètre V2 verrouillé</strong><span>Sources, destinations et services sont issus des tuples mesurés. Changez de profil pour recalculer la stratégie.</span></div>' : ''}
     <div class="drawer-section drawer-section-general">
       <div class="drawer-section-title">Général</div>
       <div class="drawer-field"><span class="drawer-field-label">Direction</span><span class="drawer-field-value">${p._isWan ? '<span class="dir-badge wan">WAN</span>' : '<span class="dir-badge lan">LAN</span>'}</span></div>
       <div class="drawer-field"><span class="drawer-field-label">Policy IDs</span><span class="drawer-field-value">${(p.policyIds||[]).join(', ') || '—'}</span></div>
       <div class="drawer-field"><span class="drawer-field-label">Sessions</span><span class="drawer-field-value">${fmtNum(p.sessions||0)}</span></div>
-      ${p.metrics ? `<div class="drawer-field"><span class="drawer-field-label">Tuples</span><span class="drawer-field-value">${fmtNum(p.metrics.observedTuples)} observés · ${fmtNum(p.metrics.allowedTuples)} autorisés</span></div>
+      ${!simpleAddressMode && p.metrics ? `<div class="drawer-field"><span class="drawer-field-label">Tuples</span><span class="drawer-field-value">${fmtNum(p.metrics.observedTuples)} observés · ${fmtNum(p.metrics.allowedTuples)} autorisés</span></div>
       <div class="drawer-field"><span class="drawer-field-label">Expansion</span><span class="drawer-field-value" style="color:${p.metrics.unexpectedAllowedTuples ? 'var(--warn)' : 'var(--success)'}">${fmtNum(p.metrics.unexpectedAllowedTuples)} inattendus · ${(Number(p.metrics.expansionRatio || 0) * 100).toFixed(2)} %</span></div>` : ''}
       <div class="drawer-field"><span class="drawer-field-label">Action</span>
         <div style="display:flex;gap:4px">
@@ -4111,7 +4127,7 @@ function populateDrawer(idx) {
     </div>
     ${srcSection}
     ${dstSection}
-    ${buildPolicyAffinityHtml(p)}
+    ${!simpleAddressMode ? buildPolicyAffinityHtml(p) : ''}
     <div class="drawer-section drawer-section-interfaces">
       <div class="drawer-section-title">Interface de destination</div>
       <div class="drawer-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-dstintf">${ifOptsDst}</select></div>

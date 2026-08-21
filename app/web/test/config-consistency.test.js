@@ -127,3 +127,24 @@ end
   assert.equal(parsed.hostname, 'FW-AVR-01');
   assert.equal(parsed.identity.devid, null);
 });
+
+test('agrège les diagnostics interface sans matérialiser un contrôle par flow', () => {
+  const repeated = Array.from({ length: 5000 }, () => flow());
+  const result = consistency.validateConfigTelemetryConsistency(repeated, config());
+  assert.equal(result.ok, true);
+  assert.ok(result.interfaceChecks.length <= 4);
+  assert.equal(result.interfaceChecks.reduce((sum, check) => sum + check.flowCount, 0), 10000);
+});
+
+test('sélectionne automatiquement le VDOM unique prouvé par la télémétrie', () => {
+  assert.equal(typeof consistency.selectTelemetryVdom, 'function');
+  assert.equal(
+    consistency.selectTelemetryVdom([flow({ vdom: 'root' })], ['root', 'tenant-b']),
+    'root',
+  );
+  assert.equal(
+    consistency.selectTelemetryVdom([flow({ vdom: 'root' }), flow({ vdom: 'tenant-b' })], ['root', 'tenant-b']),
+    null,
+  );
+  assert.equal(consistency.selectTelemetryVdom([flow({ vdom: 'missing' })], ['root']), null);
+});

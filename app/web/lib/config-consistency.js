@@ -111,6 +111,13 @@ function collectTelemetryIdentity(flows) {
   };
 }
 
+function selectTelemetryVdom(flows, vdomList) {
+  const available = new Set(unique(Array.isArray(vdomList) ? vdomList : []));
+  const observed = collectTelemetryIdentity(flows).vdoms;
+  if (observed.length !== 1 || !available.has(observed[0])) return null;
+  return observed[0];
+}
+
 function parseCidr(value) {
   const raw = text(value);
   if (!raw) return null;
@@ -258,16 +265,23 @@ function validateConfigTelemetryConsistency(flows, fortiConfig = {}) {
     warn('VDOM_IDENTITY_UNKNOWN', 'VDOM absent d’une des sources : aucune portée VDOM n’est inventée.');
   }
 
-  const interfaceChecks = [];
+  const interfaceSummary = new Map();
   for (const flow of normalizeTelemetryFlows(flows)) {
     for (const side of ['src', 'dst']) {
       const check = checkInterfaceEndpoint(flow, side, fortiConfig);
       if (!check) continue;
-      interfaceChecks.push(check);
-      if (check.ok === false) mismatch(`${side} ${check.interface} ${check.ip} hors ${check.configuredCidrs.join(', ')}`);
+      const key = [check.side, check.interface, String(check.ok), check.reason, ...check.configuredCidrs].join('|');
+      if (!interfaceSummary.has(key)) {
+        interfaceSummary.set(key, { ...check, flowCount: 0, sampleIps: [] });
+      }
+      const summary = interfaceSummary.get(key);
+      summary.flowCount++;
+      if (summary.sampleIps.length < 3 && !summary.sampleIps.includes(check.ip)) summary.sampleIps.push(check.ip);
+      if (check.ok === false) mismatch(`${side} ${check.interface}: IP observées hors ${check.configuredCidrs.join(', ')}`);
       if (check.ok === null) warn('INTERFACE_NETWORK_UNKNOWN', `Réseau de l’interface ${check.interface} non prouvé pour ${check.ip}.`);
     }
   }
+  const interfaceChecks = [...interfaceSummary.values()];
 
   const errors = mismatchDetails.length > 0
     ? [{
@@ -294,4 +308,5 @@ module.exports = {
   validateConfigTelemetryConsistency,
   normalizeConfigIdentity,
   collectTelemetryIdentity,
+  selectTelemetryVdom,
 };

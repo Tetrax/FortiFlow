@@ -1293,9 +1293,15 @@ function selectionModeForPolicy(selection) {
 function applyPolicyAddressSelections(analyzedPolicies, selectedPolicies) {
   return (analyzedPolicies || []).map((policy, index) => {
     const requested = selectedPolicies?.[index]?.addressSelections || selectedPolicies?.[index]?._addressSelections;
-    if (!requested || policy?._policyEngineV2) return policy;
+    if (!requested) return policy;
     const next = {
       ...policy,
+      _policyEngineV2: policy._policyEngineV2 ? { ...policy._policyEngineV2 } : policy._policyEngineV2,
+      _segmentationPlan: {
+        source: policy._segmentationPlan?.source || (policy._use32Src ? 'host' : 'network'),
+        destination: policy._segmentationPlan?.destination || (policy._use32Dst ? 'host' : 'network'),
+        services: policy._segmentationPlan?.services || 'separate',
+      },
       analysis: {
         ...(policy.analysis || {}),
         srcAddr: { ...(policy.analysis?.srcAddr || {}) },
@@ -1315,6 +1321,8 @@ function applyPolicyAddressSelections(analyzedPolicies, selectedPolicies) {
         delete next[`_${prefix}CidrOverride`];
         next[`_use32${prefix === 'src' ? 'Src' : 'Dst'}`] = false;
         next[`_${prefix}Mode`] = 'subnet';
+        next._segmentationPlan[side] = 'network';
+        if (next._policyEngineV2) next._policyEngineV2.safeExact = false;
         next.analysis[`${prefix}Addr`] = {
           ...next.analysis[`${prefix}Addr`], found: true, name: object.name, cidr: object.cidr, source: 'config',
         };
@@ -1322,6 +1330,8 @@ function applyPolicyAddressSelections(analyzedPolicies, selectedPolicies) {
         next[`_${prefix}CidrOverride`] = selection.cidr;
         next[`_use32${prefix === 'src' ? 'Src' : 'Dst'}`] = false;
         next[`_${prefix}Mode`] = 'subnet';
+        next._segmentationPlan[side] = 'network';
+        if (next._policyEngineV2) next._policyEngineV2.safeExact = false;
         next.analysis[`${prefix}Addr`] = {
           ...next.analysis[`${prefix}Addr`], found: false, cidr: selection.cidr,
         };
@@ -1329,6 +1339,7 @@ function applyPolicyAddressSelections(analyzedPolicies, selectedPolicies) {
         delete next[`_${prefix}CidrOverride`];
         next[`_use32${prefix === 'src' ? 'Src' : 'Dst'}`] = true;
         next[`_${prefix}Mode`] = 'hosts';
+        next._segmentationPlan[side] = 'host';
       }
     }
     return next;
