@@ -9,6 +9,7 @@ const { buildAnalysis, flowDecision, consolidatePolicies } = require('../lib/ana
 const {
   parseFortiConfig,
   analyzePolicies,
+  applyPolicyAddressSelections,
   generateConfig,
   preflightValidation,
   findAddress,
@@ -814,6 +815,111 @@ test('les profils réseau sont explicitement classés comme généralisation', (
   assert.ok(result.issues.some(issue => issue.code === 'GENERALIZED_SCOPE'));
 });
 
+test('le preflight et le générateur refusent un override CIDR sans sélection confirmée', () => {
+  const policy = {
+    srcintf: 'lan',
+    dstintf: 'servers',
+    srcSubnet: '10.0.0.0/24',
+    srcHosts: ['10.0.0.10'],
+    dstTarget: '10.0.1.20/32',
+    dstHosts: ['10.0.1.20'],
+    dstType: 'private',
+    _srcCidrOverride: '10.0.0.0/8',
+    _use32Src: false,
+    _use32Dst: true,
+    _segmentationPlan: { source: 'network', destination: 'host', services: 'separate' },
+    services: ['HTTPS'],
+    serviceTuples: [{ proto: '6', port: '443', service: 'HTTPS' }],
+    action: 'accept',
+    log: 'all',
+    analysis: {
+      srcAddr: { found: false, cidr: '10.0.0.0/24' },
+      dstAddr: { found: false, cidr: '10.0.1.20/32' },
+      services: [{ label: 'HTTPS', found: true, name: 'HTTPS' }],
+    },
+  };
+  const config = {
+    addresses: {},
+    addressGroups: {},
+    customServices: {},
+    serviceGroups: {},
+    interfaces: { lan: {}, servers: {} },
+    zones: {},
+  };
+  const preflight = preflightValidation([policy], config, [aggregate()]);
+  assert.equal(preflight.ok, false);
+  assert.ok(preflight.issues.some(issue => issue.code === 'ADDRESS_SELECTION_INVALID'));
+  assert.throws(
+    () => generateConfig([policy], config),
+    /sélection d’adresse/i,
+  );
+});
+
+test('la génération WAN utilise l’objet destination explicitement sélectionné', () => {
+  const config = {
+    addresses: { PUBLIC_NET: { name: 'PUBLIC_NET', cidr: '203.0.113.0/24' } },
+    addressGroups: {},
+    customServices: {},
+    serviceGroups: {},
+    interfaces: { lan: {}, wan1: { name: 'wan1', isWan: true } },
+    zones: {},
+  };
+  const policy = wanPolicy({
+    dstTarget: '203.0.113.10',
+    services: ['HTTPS'],
+    serviceTuples: [{ proto: '6', port: '443', service: 'HTTPS' }],
+    analysis: {
+      srcAddr: { found: false, cidr: '10.0.0.0/24' },
+      dstAddr: { found: false, cidr: '203.0.113.10/32' },
+      services: [{ label: 'HTTPS', found: true, name: 'HTTPS' }],
+    },
+  });
+  const analyzed = analyzePolicies([policy], config, null);
+  const selected = [{
+    ...analyzed[0],
+    addressSelections: {
+      destination: { mode: 'existing-object', objectName: 'PUBLIC_NET', confirmed: true },
+    },
+  }];
+  const applied = applyPolicyAddressSelections(analyzed, selected);
+  const cli = generateConfig(applied, config);
+  assert.match(cli, /set dstaddr "PUBLIC_NET"/);
+  assert.doesNotMatch(cli, /FF_HOST_203_0_113_10/);
+});
+
+test('la génération WAN utilise aussi le CIDR subnet explicitement sélectionné', () => {
+  const config = {
+    addresses: {},
+    addressGroups: {},
+    customServices: {},
+    serviceGroups: {},
+    interfaces: { lan: {}, wan1: { name: 'wan1', isWan: true } },
+    zones: {},
+  };
+  const policy = wanPolicy({
+    dstTarget: '203.0.113.10',
+    services: ['HTTPS'],
+    serviceTuples: [{ proto: '6', port: '443', service: 'HTTPS' }],
+    analysis: {
+      srcAddr: { found: false, cidr: '10.0.0.0/24' },
+      dstAddr: { found: false, cidr: '203.0.113.10/32' },
+      services: [{ label: 'HTTPS', found: true, name: 'HTTPS' }],
+    },
+  });
+  const analyzed = analyzePolicies([policy], config, null);
+  const selected = [{
+    ...analyzed[0],
+    addressSelections: {
+      destination: { mode: 'subnet', cidr: '203.0.113.0/25', confirmed: true },
+    },
+  }];
+  const applied = applyPolicyAddressSelections(analyzed, selected);
+  const cli = generateConfig(applied, config);
+  assert.match(cli, /edit "FF_203_0_113_0_25"/);
+  assert.match(cli, /set subnet 203\.0\.113\.0 255\.255\.255\.128/);
+  assert.doesNotMatch(cli, /FF_HOST_203_0_113_10/);
+});
+
 test('les collisions d’objets générés sont refusées au lieu de produire une CLI incohérente', () => {
   const first = wanPolicy({
     srcAddrName: 'SRC-A',
@@ -971,6 +1077,178 @@ test('la chaîne plan → ré-analyse → CLI conserve une règle par service', 
   assert.ok(serviceLines.every(line => /"FF_SVC_/.test(line)));
   assert.match(cli, /set tcp-portrange 443/);
   assert.match(cli, /set udp-portrange 53/);
+});
+
+
+test('l’analyse expose les choix d’adresse simples sans choisir implicitement un subnet calculé', () => {
+  const policy = {
+    srcSubnet: '10.0.0.0/24',
+    srcHosts: ['10.0.0.10', '10.0.0.20'],
+    flowSrcintf: 'lan',
+    dstTarget: '10.1.1.0/24',
+    dstHosts: ['10.1.1.10', '10.1.1.20'],
+    dstType: 'private',
+    services: ['HTTPS'],
+    ports: [443],
+    protos: ['TCP'],
+    serviceTuples: [{ proto: '6', port: '443', service: 'HTTPS', sessions: 1 }],
+  };
+  const fortiConfig = {
+    addresses: {
+      USERS_WIDE: { name: 'USERS_WIDE', cidr: '10.0.0.0/16' },
+    },
+    customServices: {},
+    interfaces: {
+      lan: { name: 'lan', cidr: '10.0.0.1/24' },
+      servers: { name: 'servers', cidr: '10.1.1.1/24' },
+    },
+    zones: {},
+    fullRoutes: [],
+    staticRoutes: [],
+    sdwanEnabled: false,
+    sdwanMembers: [],
+  };
+
+  const analyzed = analyzePolicies([policy], fortiConfig)[0];
+  assert.equal(analyzed.analysis.srcAddr.found, true);
+  assert.equal(analyzed.analysis.srcAddr.name, 'USERS_WIDE');
+  assert.equal(analyzed.analysis.srcAddr.cidr, '10.0.0.0/16');
+  assert.deepEqual(analyzed.analysis.addressChoices.source.existingObjects, [{
+    name: 'USERS_WIDE', cidr: '10.0.0.0/16', unobservedIpCount: 65534,
+  }]);
+  assert.equal(analyzed.analysis.addressChoices.destination.existingObjects.length, 0);
+  assert.equal(analyzed.analysis.addressChoices.destination.calculatedSubnet.cidr, '10.1.1.0/27');
+  assert.equal(analyzed.analysis.addressChoices.destination.calculatedSubnet.unobservedIpCount, 30);
+});
+
+test('le preflight revalide les choix d’adresse stateless et refuse toute dérive', () => {
+  const config = {
+    addresses: { USERS: { name: 'USERS', cidr: '10.0.0.0/24' } },
+    addressGroups: {},
+    interfaces: { lan: {}, servers: {} },
+    zones: {},
+  };
+  const base = {
+    srcintf: 'lan',
+    dstintf: 'servers',
+    srcSubnet: '10.0.0.0/24',
+    srcHosts: ['10.0.0.10'],
+    dstTarget: '10.0.1.0/24',
+    dstHosts: ['10.0.1.20'],
+    dstType: 'private',
+    addressSelections: {
+      source: { mode: 'existing-object', objectName: 'USERS', confirmed: true },
+      destination: { mode: 'hosts', ips: ['10.0.1.20'], confirmed: true },
+    },
+    action: 'accept',
+    analysis: {
+      srcAddr: { found: false, cidr: '10.0.0.0/24' },
+      dstAddr: { found: false, cidr: '10.0.1.0/24' },
+      srcIface: 'lan',
+      dstIface: 'servers',
+      services: [{ label: 'HTTPS', name: 'HTTPS', found: true }],
+    },
+  };
+
+  assert.equal(preflightValidation([base], config).ok, true);
+
+  const stale = preflightValidation([{
+    ...base,
+    addressSelections: {
+      ...base.addressSelections,
+      source: { mode: 'existing-object', objectName: 'REMOVED', confirmed: true },
+    },
+  }], config);
+  assert.equal(stale.ok, false);
+  assert.ok(stale.issues.some(issue => issue.code === 'ADDRESS_SELECTION_INVALID'));
+
+  const excluded = preflightValidation([{
+    ...base,
+    addressSelections: {
+      ...base.addressSelections,
+      destination: { mode: 'subnet', cidr: '10.0.1.0/28', confirmed: true },
+    },
+  }], config);
+  assert.equal(excluded.ok, false);
+  assert.ok(excluded.issues.some(issue => /ne contient pas/i.test(issue.msg)));
+
+  const unconfirmed = preflightValidation([{
+    ...base,
+    addressSelections: {
+      ...base.addressSelections,
+      source: { mode: 'existing-object', objectName: 'USERS', confirmed: false },
+    },
+  }], config);
+  assert.equal(unconfirmed.ok, false);
+  assert.ok(unconfirmed.issues.some(issue => /confirmation/i.test(issue.msg)));
+});
+
+
+test('applique les sélections d’adresse locales sans modifier la configuration de session', () => {
+  const policy = {
+    srcSubnet: '10.0.0.0/24',
+    srcHosts: ['10.0.0.10'],
+    dstTarget: '10.0.1.0/24',
+    dstHosts: ['10.0.1.20'],
+    dstType: 'private',
+    flowSrcintf: 'lan',
+    services: ['HTTPS'],
+    ports: [443],
+    protos: ['TCP'],
+    serviceTuples: [{ proto: '6', port: '443', service: 'HTTPS', sessions: 1 }],
+  };
+  const config = {
+    addresses: { USERS: { name: 'USERS', cidr: '10.0.0.0/24' } },
+    customServices: {},
+    interfaces: { lan: { cidr: '10.0.0.1/24' }, servers: { cidr: '10.0.1.1/24' } },
+    zones: {}, fullRoutes: [], staticRoutes: [], sdwanEnabled: false, sdwanMembers: [],
+  };
+  const analyzed = analyzePolicies([policy], config);
+  const selected = [{
+    ...analyzed[0],
+    addressSelections: {
+      source: { mode: 'existing-object', objectName: 'USERS', confirmed: true },
+      destination: { mode: 'subnet', cidr: '10.0.1.0/27', confirmed: true },
+    },
+  }];
+  const applied = applyPolicyAddressSelections(analyzed, selected)[0];
+  assert.equal(applied.analysis.srcAddr.name, 'USERS');
+  assert.equal(applied.analysis.srcAddr.found, true);
+  assert.equal(applied._dstCidrOverride, '10.0.1.0/27');
+  assert.equal(applied._use32Dst, false);
+});
+
+test('applique aussi les sélections d’adresse aux policies Policy Engine V2', () => {
+  const policy = {
+    id: 'P-V2',
+    _policyEngineV2: { profile: 'recommended', safeExact: true },
+    srcSubnet: '10.0.0.10/32',
+    srcHosts: ['10.0.0.10'],
+    dstTarget: '10.0.1.20/32',
+    dstHosts: ['10.0.1.20'],
+    analysis: {
+      addressChoices: {
+        source: {
+          existingObjects: [{ name: 'USERS', cidr: '10.0.0.0/24', unobservedIpCount: 255 }],
+        },
+      },
+      srcAddr: { found: false, cidr: '10.0.0.10/32' },
+      dstAddr: { found: false, cidr: '10.0.1.20/32' },
+      services: [],
+    },
+  };
+  const selected = [{
+    ...policy,
+    addressSelections: {
+      source: { mode: 'existing-object', objectName: 'USERS', confirmed: true },
+    },
+  }];
+  const applied = applyPolicyAddressSelections([policy], selected)[0];
+  assert.equal(applied.analysis.srcAddr.name, 'USERS');
+  assert.equal(applied.analysis.srcAddr.cidr, '10.0.0.0/24');
+  assert.equal(applied._srcMode, 'subnet');
+  assert.equal(applied._segmentationPlan.source, 'network');
+  assert.equal(applied._policyEngineV2.safeExact, false);
 });
 
 

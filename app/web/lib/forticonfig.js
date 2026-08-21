@@ -1,5 +1,7 @@
 'use strict';
 
+const { buildAddressChoices, validateAddressSelection } = require('./address-selection');
+
 // ─── FortiGate config section parser ─────────────────────────────────────────
 // Extrait les blocs : config X / edit "name" / set key val / next / end
 // Gère la profondeur pour ignorer les sections imbriquées sans les parser.
@@ -328,6 +330,84 @@ function extractVdomLines(lines, vdomName) {
   return result;
 }
 
+// ─── Config identity ──────────────────────────────────────────────────────────
+
+function unquoteConfigValue(value) {
+  return String(value || '').trim().replace(/^"|"$/g, '');
+}
+
+// Read top-level `set` directives from a non-edit FortiOS config section.
+// This deliberately ignores nested config blocks so a child setting cannot
+// masquerade as the device/global identity of the selected scope.
+function extractTopLevelSettings(lines, sectionName) {
+  const settings = {};
+  let inSection = false;
+  let depth = 0;
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    if (!inSection) {
+      if (line === `config ${sectionName}`) {
+        inSection = true;
+        depth = 1;
+      }
+      continue;
+    }
+    if (line.startsWith('config ')) {
+      depth++;
+      continue;
+    }
+    if (line === 'end') {
+      depth--;
+      if (depth === 0) break;
+      continue;
+    }
+    if (depth !== 1 || !line.startsWith('set ')) continue;
+    const rest = line.slice(4).trim();
+    const split = rest.indexOf(' ');
+    if (split <= 0) {
+      settings[rest] = '';
+      continue;
+    }
+    settings[rest.slice(0, split)] = unquoteConfigValue(rest.slice(split + 1));
+  }
+  return settings;
+}
+
+function parseConfigIdentity(lines, vdomList, selectedVdom, activeVdom) {
+  const global = extractTopLevelSettings(lines, 'system global');
+  const haSettings = extractTopLevelSettings(lines, 'system ha');
+  const firstNonEmpty = (...values) => values
+    .map(value => unquoteConfigValue(value))
+    .find(value => value !== '') || null;
+  const hostname = firstNonEmpty(global.hostname);
+  // FortiOS backups do not normally expose the appliance serial. Preserve an
+  // explicitly exported value when present, but never infer it from hostname.
+  const devid = firstNonEmpty(
+    global.devid,
+    global['device-id'],
+    global['serial-number'],
+    global.serial,
+  );
+  const selectionExplicit = vdomList.length <= 1 || Boolean(selectedVdom);
+  return {
+    hostname,
+    devid,
+    serial: devid,
+    vdom: activeVdom || null,
+    selectedVdom: activeVdom || null,
+    vdomList: [...vdomList],
+    vdomSelectionExplicit: selectionExplicit,
+    vdomSelectionRequired: vdomList.length > 1 && !selectionExplicit,
+    ha: {
+      enabled: Object.keys(haSettings).length > 0,
+      groupName: firstNonEmpty(haSettings['group-name']),
+      groupId: firstNonEmpty(haSettings['group-id']),
+      memberDeviceIds: [],
+    },
+  };
+}
+
 // ─── Main config parser ───────────────────────────────────────────────────────
 
 function parseFortiConfig(text, selectedVdom = null) {
@@ -335,6 +415,9 @@ function parseFortiConfig(text, selectedVdom = null) {
 
   // ── Multi-VDOM: if present, extract the target VDOM block and parse it ──
   const vdomList = extractVdomNames(lines);
+  if (selectedVdom && !vdomList.includes(selectedVdom)) {
+    throw new Error(`VDOM ${selectedVdom} introuvable dans la configuration`);
+  }
   let parseLines = lines;
   let parseText  = text;
   let activeVdom = null;
@@ -344,6 +427,7 @@ function parseFortiConfig(text, selectedVdom = null) {
     parseText  = parseLines.join('\n');
   }
 
+  const identity = parseConfigIdentity(lines, vdomList, selectedVdom, activeVdom);
   // ── Raw section extraction — single pass for all sections ──
   const _sections     = extractSections(parseLines, [
     'firewall address',
@@ -523,8 +607,9 @@ function parseFortiConfig(text, selectedVdom = null) {
     // WAN : priorité au set role (lan/dmz/undefined = LAN, wan = WAN)
     // puis mode dhcp/pppoe (route par défaut dynamique = WAN)
     // sinon détection par IP (fallback)
-    const roleLan  = props.role === 'lan' || props.role === 'dmz';
-    const roleWan  = props.role === 'wan';
+    const role = String(props.role || '').replace(/^"|"$/g, '').toLowerCase();
+    const roleLan  = role === 'lan' || role === 'dmz';
+    const roleWan  = role === 'wan';
     const modeDhcp = props.mode === 'dhcp' || props.mode === 'pppoe';
     const isWan = !isTunnel && (roleWan || (!roleLan && (modeDhcp || (!isPrivateIP(props.ip?.split(' ')[0] || '') && !!props.ip))));
     interfaces[name] = {
@@ -534,6 +619,7 @@ function parseFortiConfig(text, selectedVdom = null) {
       prefix,
       alias:    props.alias || name,
       type:     props.type  || 'physical',
+      role:     role || null,
       isWan,
       _roleWan: roleWan,
       isTunnel,
@@ -634,7 +720,7 @@ function parseFortiConfig(text, selectedVdom = null) {
     profileGroup: Object.keys(_sections['firewall profile-group'] || {}),
   };
 
-  return { addresses, addressGroups, customServices, serviceGroups, interfaces, zones, sdwanMembers, sdwanZoneNames, sdwanEnabled, sdwanIntfName, vdomList, selectedVdom: activeVdom, hasVdom: vdomList.length > 0, staticRoutes, fullRoutes, hasBgp, hasOspf, hasNonDefaultVrf, hasPolicyRoutes, hasSdwanRules, existingPolicies, securityProfiles };
+  return { addresses, addressGroups, customServices, serviceGroups, interfaces, zones, sdwanMembers, sdwanZoneNames, sdwanEnabled, sdwanIntfName, vdomList, selectedVdom: activeVdom, hasVdom: vdomList.length > 0, identity, hostname: identity.hostname, devid: identity.devid, serial: identity.serial, vdomSelectionRequired: identity.vdomSelectionRequired, staticRoutes, fullRoutes, hasBgp, hasOspf, hasNonDefaultVrf, hasPolicyRoutes, hasSdwanRules, existingPolicies, securityProfiles };
 }
 
 // ─── Static routes + BGP parser ──────────────────────────────────────────────
@@ -1162,12 +1248,140 @@ function suggestAddrName(cidr, prefix = 'FF') {
   return prefix + '_' + (cidr || '').replace(/\//g, '_').replace(/\./g, '_');
 }
 
+function policyObservedIps(policy, side) {
+  const hosts = side === 'src' ? policy?.srcHosts : policy?.dstHosts;
+  if (Array.isArray(hosts) && hosts.length > 0) return [...new Set(hosts.filter(Boolean))];
+  const target = side === 'src' ? policy?.srcSubnet : policy?.dstTarget;
+  if (!target) return [];
+  const value = String(target).trim();
+  if (/^\d{1,3}(?:\.\d{1,3}){3}(?:\/32)?$/.test(value)) return [value.replace(/\/32$/, '')];
+  return [];
+}
+
+function buildPolicyAddressChoices(policy, fortiConfig) {
+  const sourceIps = policyObservedIps(policy, 'src');
+  const destinationIps = policyObservedIps(policy, 'dst');
+  return {
+    source: sourceIps.length ? buildAddressChoices(sourceIps, fortiConfig) : null,
+    destination: destinationIps.length ? buildAddressChoices(destinationIps, fortiConfig) : null,
+  };
+}
+
+function validatePolicyAddressSelections(selectedPolicies, fortiConfig) {
+  const issues = [];
+  for (let index = 0; index < (selectedPolicies || []).length; index++) {
+    const policy = selectedPolicies[index] || {};
+    const selections = policy.addressSelections || policy._addressSelections || {};
+    for (const [side, selection] of [['source', selections.source || selections.src], ['destination', selections.destination || selections.dst]]) {
+      const prefix = side === 'source' ? 'src' : 'dst';
+      if (!selection) {
+        if (policy[`_${prefix}CidrOverride`] && policy._serverPolicyBinding !== true) {
+          issues.push({
+            level: 'error',
+            code: 'ADDRESS_SELECTION_INVALID',
+            msg: `Policy #${index + 1}: l’override CIDR ${side} exige un choix d’adresse confirmé`,
+          });
+        }
+        continue;
+      }
+      const observed = policyObservedIps(policy, side === 'source' ? 'src' : 'dst');
+      const result = validateAddressSelection(observed, selection, fortiConfig || {});
+      if (!result.ok) {
+        issues.push({
+          level: 'error',
+          code: 'ADDRESS_SELECTION_INVALID',
+          msg: `Policy #${index + 1}: choix d’adresse ${side} invalide — ${result.errors.join('; ')}`,
+        });
+      }
+    }
+  }
+  return { ok: issues.length === 0, issues };
+}
+
+function selectionModeForPolicy(selection) {
+  return String(selection?.mode || selection?.type || '').trim().toLowerCase().replace(/[_ ]/g, '-');
+}
+
+function applyPolicyAddressSelections(analyzedPolicies, selectedPolicies) {
+  return (analyzedPolicies || []).map((policy, index) => {
+    const requested = selectedPolicies?.[index]?.addressSelections || selectedPolicies?.[index]?._addressSelections;
+    if (!requested) return policy;
+    const next = {
+      ...policy,
+      addressSelections: requested,
+      _policyEngineV2: policy._policyEngineV2 ? { ...policy._policyEngineV2 } : policy._policyEngineV2,
+      _segmentationPlan: {
+        source: policy._segmentationPlan?.source || (policy._use32Src ? 'host' : 'network'),
+        destination: policy._segmentationPlan?.destination || (policy._use32Dst ? 'host' : 'network'),
+        services: policy._segmentationPlan?.services || 'separate',
+      },
+      analysis: {
+        ...(policy.analysis || {}),
+        srcAddr: { ...(policy.analysis?.srcAddr || {}) },
+        dstAddr: { ...(policy.analysis?.dstAddr || {}) },
+      },
+    };
+    for (const [side, selection] of [['source', requested.source || requested.src], ['destination', requested.destination || requested.dst]]) {
+      if (!selection) continue;
+      const prefix = side === 'source' ? 'src' : 'dst';
+      const mode = selectionModeForPolicy(selection);
+      const choice = policy.analysis?.addressChoices?.[side];
+      if (mode === 'existing' || mode === 'object' || mode === 'existing-object' || mode === 'fortigate-object') {
+        const objectName = String(selection.objectName || selection.name || '').trim();
+        const object = choice?.existingObjects?.find(candidate => candidate.name === objectName);
+        if (!object) continue; // server validation is authoritative; never guess a name here.
+        next[`_${prefix}AddrName`] = object.name;
+        delete next[`_${prefix}CidrOverride`];
+        next[`_use32${prefix === 'src' ? 'Src' : 'Dst'}`] = false;
+        next[`_${prefix}Mode`] = 'subnet';
+        next._segmentationPlan[side] = 'network';
+        if (next._policyEngineV2) next._policyEngineV2.safeExact = false;
+        next.analysis[`${prefix}Addr`] = {
+          ...next.analysis[`${prefix}Addr`], found: true, name: object.name, cidr: object.cidr, source: 'config',
+        };
+      } else if (mode === 'subnet' || mode === 'create-subnet') {
+        next[`_${prefix}CidrOverride`] = selection.cidr;
+        next[`_use32${prefix === 'src' ? 'Src' : 'Dst'}`] = false;
+        next[`_${prefix}Mode`] = 'subnet';
+        next._segmentationPlan[side] = 'network';
+        if (next._policyEngineV2) next._policyEngineV2.safeExact = false;
+        next.analysis[`${prefix}Addr`] = {
+          ...next.analysis[`${prefix}Addr`], found: false, cidr: selection.cidr,
+        };
+      } else if (mode === 'hosts' || mode === 'host' || mode === 'create-hosts' || mode === 'host-32') {
+        delete next[`_${prefix}CidrOverride`];
+        next[`_use32${prefix === 'src' ? 'Src' : 'Dst'}`] = true;
+        next[`_${prefix}Mode`] = 'hosts';
+        next._segmentationPlan[side] = 'host';
+      }
+    }
+    return next;
+  });
+}
+
+function addressMatchFromChoices(match, choices) {
+  if (!choices?.existingObjects?.length) return match;
+  const preferred = choices.existingObjects[0];
+  return {
+    ...match,
+    found: true,
+    name: preferred.name,
+    cidr: preferred.cidr,
+    source: 'config',
+    allMatches: choices.existingObjects,
+  };
+}
+
 function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
   const { addresses, customServices, interfaces, zones } = fortiConfig;
 
   return policies.map(p => {
     // Source address
-    const srcAddrMatch = findAddress(p.srcSubnet, addresses);
+    const addressChoices = buildPolicyAddressChoices(p, fortiConfig);
+    const srcAddrMatch = addressMatchFromChoices(
+      findAddress(p.srcSubnet, addresses),
+      p._policyEngineV2 ? null : addressChoices.source,
+    );
     // Destination address
     let dstAddrMatch;
     if (p.dstType === 'public') {
@@ -1178,6 +1392,10 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
     } else {
       dstAddrMatch = findAddress(p.dstTarget, addresses);
     }
+    dstAddrMatch = addressMatchFromChoices(
+      dstAddrMatch,
+      p._policyEngineV2 ? null : addressChoices.destination,
+    );
 
     // Services
     const protoLabel = p.protos?.[0] || 'TCP';
@@ -1489,8 +1707,9 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
       _srcHostsFound: srcHostsFound.size ? [...srcHostsFound] : (p._srcHostsFound || undefined),
       _dstHostsFound: dstHostsFound.size ? [...dstHostsFound] : (p._dstHostsFound || undefined),
       analysis: {
-        srcAddr:    { ...srcAddrMatch,  cidr: p.srcSubnet, suggestedName: suggestAddrName(p.srcSubnet) },
-        dstAddr:    { ...dstAddrMatch,  cidr: p.dstTarget, suggestedName: suggestAddrName(p.dstTarget) },
+        addressChoices,
+        srcAddr:    { ...srcAddrMatch,  cidr: srcAddrMatch.cidr || p.srcSubnet, suggestedName: suggestAddrName(p.srcSubnet) },
+        dstAddr:    { ...dstAddrMatch,  cidr: dstAddrMatch.cidr || p.dstTarget, suggestedName: suggestAddrName(p.dstTarget) },
         services:   serviceItems,
         srcIface:       srcIfaceName   || null,
         srcIfaceSource: srcIfaceSource,
@@ -1623,6 +1842,12 @@ function generateConfig(selectedPolicies, opts = {}) {
 
   for (const p of selectedPolicies) {
     const { analysis } = p;
+    const selections = p.addressSelections || p._addressSelections || {};
+    if (p._serverPolicyBinding !== true
+      && ((p._srcCidrOverride && !(selections.source || selections.src))
+        || (p._dstCidrOverride && !(selections.destination || selections.dst)))) {
+      throw new Error(`Policy "${p.policyName || p.name || p.id || '?'}" : override CIDR sans sélection d’adresse confirmée`);
+    }
     if (!analysis || !Array.isArray(analysis.services)) {
       throw new Error(`Policy "${p.policyName || p.name || p.id || '?'}" sans analyse de services — génération refusée`);
     }
@@ -1719,6 +1944,20 @@ function generateConfig(selectedPolicies, opts = {}) {
     // ── WAN policy : "all" uniquement sur choix explicite ──
     } else if ((p._isWan || p.dstType === 'public') && p._dstUseAll === true) {
       dstAddrName = 'all';
+    } else if ((p._isWan || p.dstType === 'public')
+        && !p._use32Dst
+        && (p._dstCidrOverride || p._dstAddrName || (p._dstMode === 'subnet' && p.analysis?.dstAddr?.found))) {
+      // A confirmed WAN subnet/object selection is server-applied before generation.
+      if (p._dstAddrName && p.analysis?.dstAddr?.found) {
+        dstAddrName = p._dstAddrName;
+      } else if (p._dstCidrOverride) {
+        const cidr = p._dstCidrOverride;
+        const name = p._dstAddrName || p.dstAddrName || suggestAddrName(cidr, NP);
+        registerGeneratedAddress(cidr, name);
+        dstAddrName = name;
+      } else {
+        throw new Error(`Policy WAN "${p.policyName || p.name || p.id || '?'}" sans destination réseau sélectionnée`);
+      }
     } else if (p._isWan || p.dstType === 'public') {
       // Mode sûr par défaut : conserver exactement les destinations WAN observées.
       if (p._isMultiDst && p._multiDstSubnets?.length > 0) {
@@ -2200,6 +2439,8 @@ function preflightValidation(selectedPolicies, config, observedFlows = null, req
   let generalizedPolicies = 0;
   let unclassifiedPolicies = 0;
   const routingContextUnproven = Boolean(config.hasPolicyRoutes || config.hasSdwanRules);
+  const addressSelectionValidation = validatePolicyAddressSelections(selectedPolicies, config);
+  issues.push(...addressSelectionValidation.issues);
 
   if (config.hasNonDefaultVrf) {
     issues.push({
@@ -2560,6 +2801,8 @@ module.exports = {
   findPredefinedService,
   parseFortiConfig,
   analyzePolicies,
+  validatePolicyAddressSelections,
+  applyPolicyAddressSelections,
   generateConfig,
   validateAgainstExisting,
   preflightValidation,

@@ -36,6 +36,21 @@ Un `FlowAtom` agrège uniquement des événements décrivant la même permission
 
 La clé de permission est déterminée par les dimensions qui changent réellement ce qu'une policy autorise. Le libellé FortiOS n'est jamais utilisé seul comme identité de service : la clé technique protocole/port reste autoritative.
 
+### TrafficScope
+
+Le `TrafficScope` filtre les flows **avant** `canonicalizeFlows()` ; aucun flow exclu ne devient donc un `FlowAtom`. Les modes backend sont `all`, `lan-lan`, `lan-internet`, `internet-lan`, `lan-dmz`, `dmz-lan` et `custom`.
+
+La classification suit uniquement des preuves techniques, dans cet ordre : overrides DMZ explicites, `set role dmz`, interfaces/zones WAN, réseaux connectés configurés, adressage IPv4 privé/public, puis `unknown`. Les noms d'interfaces, zones et objets n'ont aucune sémantique. Le parseur conserve maintenant le rôle FortiGate des interfaces ; une zone n'hérite d'une classe que si tous ses membres sont connus et compatibles.
+
+Le résultat expose séparément :
+
+- `inputFlows` / `inputSessions` du dataset fourni ;
+- `retainedFlows` / `retainedSessions` avant canonicalisation ;
+- `excludedFlows` / `excludedSessions` hors scope ;
+- `inputSummary`, qui continue de détailler l'éligibilité au déploiement dans le sous-ensemble retenu.
+
+Le scope normalisé possède une clé déterministe incluse dans le cache du moteur et dans les métadonnées des policies. Le preflight reconstruit les atoms avec ce même scope et refuse une sélection mélangeant des scopes ou portant une clé altérée. L'API accepte `traffic_scope=<preset>` ou un objet JSON encodé dans ce paramètre ; un `custom` vide ou une classe inconnue est refusé.
+
 ### ServiceSignature
 
 Pour un service canonique, sa signature comportementale est l'ensemble trié des arêtes `(source, destination)` observées dans un même scope et une même paire d'interfaces. Plusieurs services peuvent partager une policy uniquement si leurs signatures sont identiques.
@@ -119,6 +134,19 @@ Un objet CIDR existant est réutilisable en Recommandé uniquement lorsque sa ca
 
 Les objets existants sont préférés lorsqu'ils correspondent exactement aux membres ou au CIDR retenu. Une simple présence d'objet ne justifie jamais son périmètre.
 
+## Frontière moteur exact / choix d’adresse
+
+Policy Engine V2 reste l’autorité des tuples `(source, destination, service)`, de l’affinité d’interface/VDOM et des métriques `missing/unexpected`. Le choix d’adresse est une étape de présentation et de génération, traitée dans le drawer historique Source/Destination ; il ne réécrit pas les FlowAtoms et ne persiste aucune décision.
+
+Pour une policy, `app/web/lib/address-selection.js` :
+
+- réutilise uniquement les objets subnet FortiGate contenant toutes les IP observées, en LPM puis nom stable ;
+- ne calcule un subnet minimal que si aucun objet ne correspond ; le nombre d’IP non observées est arithmétique ;
+- propose sinon un subnet confirmé ou les hôtes exacts `/32`, en réutilisant les `/32` présents ;
+- ignore les noms comme preuve technique et n’énumère jamais un `/16` ou plus large.
+
+Le serveur revalide le choix courant avant preflight et génération. Une sélection périmée, une couverture incomplète ou une confirmation absente bloque la CLI. Pour toute policy V2 soumise, le serveur réobtient le résultat depuis le profil, le `TrafficScope` et l’identifiant stable validés ; les interfaces, partition, tuples protocole/port, CIDR bruts et `_mergedServices` du client ne sont jamais la source technique. Seuls la sélection d’adresse validée et les champs opératoires autorisés sont conservés. Le gate identité/télémétrie est exécuté avant la mutation de configuration et avant les chemins d’analyse, workspace, preflight et génération ; son message contractuel est `La télémétrie et la configuration FortiGate ne correspondent pas.` Les détails opérationnels sont dans `docs/ADDRESS_SELECTION.md`.
+
 ## Normalisation des services
 
 Chaque service est classé comme : prédéfini exact, objet existant exact, custom stable, port applicatif spécifique, rare, dynamique, candidat RPC, port destination illisible ou protocole non résolu. La priorité est : objet existant exact, prédéfini exact, custom exact et stable, objet custom dédié. Un objet ICMP type/code exact peut être réutilisé ; un libellé ICMP ne portant pas une preuve suffisante reste bloquant.
@@ -179,6 +207,17 @@ Pipeline streaming synthétique, résultat recommandé sans tuple manquant/inatt
 
 Le profil strict sur le dataset réel produit 7 230 policies en environ 1,7 s. La réponse API tronque par défaut les listes d'atomes de traçabilité par policy à 100 entrées ; `include_trace=1` conserve la preuve complète à la demande.
 
+Validation représentative de la phase Traffic Scope sur un cache réel local de 7 268 flows agrégés, profil Recommandé :
+
+| Scope | Retenus | Exclus | Atomes | Policies | Missing | Unexpected | Expansion |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| all | 7 268 | 0 | 7 021 | 403 | 0 | 0 | 0 % |
+| LAN → LAN | 931 | 6 337 | 834 | 49 | 0 | 0 | 0 % |
+| LAN → Internet | 5 875 | 1 393 | 5 755 | 302 | 0 | 0 | 0 % |
+| Internet → LAN | 462 | 6 806 | 432 | 52 | 0 | 0 | 0 % |
+
+Ces nombres qualifient le filtrage de phase 1 et ne remplacent pas le benchmark canonique ci-dessus. Les scopes DMZ dépendent de rôles FortiGate ou d'overrides explicites ; aucun nom n'est interprété.
+
 Benchmark de régression de la matrice d'affinité, topologie clairsemée d'une source avec une destination et un service distincts par policy :
 
 | Policies | Temps après indexation |
@@ -187,7 +226,7 @@ Benchmark de régression de la matrice d'affinité, topologie clairsemée d'une 
 | 500 | 54 ms |
 | 1 000 | 207 ms |
 
-Avant correction, le cas 1 000 policies dépassait 5 secondes. L'endpoint est également placé derrière le rate limiter des routes coûteuses et met en cache le résultat par session, profil, flux et configuration.
+Avant correction, le cas 1 000 policies dépassait 5 secondes. L'endpoint est également placé derrière le rate limiter des routes coûteuses et met en cache le résultat par session, profil, Traffic Scope, flux et configuration.
 
 ## Review contradictoire DeepSeek
 

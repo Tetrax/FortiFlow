@@ -13,11 +13,19 @@ const { createSession, getSession, setSessionData, setFortiConfig,
         getStats, listSessions } = require('./lib/store');
 const { parseFortiConfig, analyzePolicies,
         generateConfig, validateAgainstExisting,
-        preflightValidation, sameServiceLabelScope,
+        preflightValidation, validatePolicyAddressSelections, applyPolicyAddressSelections, sameServiceLabelScope,
         parseFullRoutingTable, parseOspfRoutingTable, parseBgpNetworkTable,
         sortRoutes, formatExistingPolicies }             = require('./lib/forticonfig');
 const { buildHostPairCoverage, buildPolicyOrderIssues }  = require('./lib/coverage');
 const { getCaptureDeploymentBlockers }                    = require('./lib/deploy-safety');
+const { parseTrafficScopeQuery, trafficScopeKey }          = require('./lib/traffic-scope');
+const { bindPolicyEngineV2Selections }                     = require('./lib/policy-binding');
+const {
+  validateConfigTelemetryConsistency,
+  selectTelemetryVdom,
+  CONFIG_TELEMETRY_MISMATCH,
+  CONFIG_TELEMETRY_MISMATCH_MESSAGE,
+} = require('./lib/config-consistency');
 
 const app   = express();
 const TRUST_PROXY = (process.env.FORTIFLOW_TRUST_PROXY || '').trim();
@@ -264,17 +272,78 @@ function flowsForFortiConfig(flows, fortiConfig) {
   return list.filter(flow => String(flow.vdom || '').trim() === selectedVdom);
 }
 
-function getPolicyEngineResult(session, profile = 'recommended', fortiConfig = session.fortiConfig || {}) {
+function validateConfigTelemetryForSession(session, fortiConfig = session?.fortiConfig) {
+  const sourceFlows = session?.originalFlows || session?.data?.flows || [];
+  const flows = flowsForFortiConfig(sourceFlows, fortiConfig || {});
+  return validateConfigTelemetryConsistency(flows, fortiConfig || {});
+}
+
+function sendConfigTelemetryMismatch(res, validation) {
+  return res.status(422).json({
+    error: CONFIG_TELEMETRY_MISMATCH_MESSAGE,
+    code: CONFIG_TELEMETRY_MISMATCH,
+    message: CONFIG_TELEMETRY_MISMATCH_MESSAGE,
+    details: validation.errors?.[0]?.details || [],
+    warnings: validation.warnings || [],
+  });
+}
+
+function assertConfigTelemetry(session, fortiConfig, res) {
+  const validation = validateConfigTelemetryForSession(session, fortiConfig);
+  if (!validation.ok && res) sendConfigTelemetryMismatch(res, validation);
+  return validation;
+}
+
+function assertAddressSelections(selectedPolicies, fortiConfig, res) {
+  const validation = validatePolicyAddressSelections(selectedPolicies, fortiConfig || {});
+  if (!validation.ok && res) {
+    res.status(422).json({
+      error: 'Choix d’adresse invalide : la sélection ne correspond plus aux flux ou à la configuration FortiGate.',
+      code: 'ADDRESS_SELECTION_INVALID',
+      issues: validation.issues,
+    });
+  }
+  return validation;
+}
+
+function bindSubmittedPolicies(session, selectedPolicies, fortiConfig) {
+  return bindPolicyEngineV2Selections(selectedPolicies, {
+    fortiConfig: fortiConfig || {},
+    getPolicyEngineResult: (profile, trafficScope) =>
+      getPolicyEngineResult(session, profile, fortiConfig || {}, trafficScope),
+  });
+}
+
+function sendPolicyBindingFailure(res, binding) {
+  return res.status(422).json({
+    error: 'Génération refusée : la provenance Policy Engine V2 est invalide ou inconnue',
+    code: 'POLICY_ENGINE_PROVENANCE_INVALID',
+    issues: binding.issues || [],
+  });
+}
+
+function validateWorkspaceConfigTelemetry(data, fortiConfig) {
+  return validateConfigTelemetryConsistency(data?.flows || [], fortiConfig || {});
+}
+
+function getPolicyEngineResult(session, profile = 'recommended', fortiConfig = session.fortiConfig || {}, trafficScope = { mode: 'all' }) {
   const flows = session.data?.flows || [];
-  const cached = session.policyEngineV2Cache;
+  const activeTrafficScopeKey = trafficScopeKey(trafficScope);
+  const cacheKey = `${profile}||${activeTrafficScopeKey}`;
+  if (!(session.policyEngineV2Cache instanceof Map)) session.policyEngineV2Cache = new Map();
+  const cached = session.policyEngineV2Cache.get(cacheKey);
   if (cached
-    && cached.profile === profile
     && cached.flows === flows
     && cached.fortiConfig === fortiConfig) {
     return cached.result;
   }
-  const result = buildPolicyEngineV2(flows, { profile, fortiConfig });
-  session.policyEngineV2Cache = { profile, flows, fortiConfig, result };
+  const result = buildPolicyEngineV2(flows, { profile, fortiConfig, trafficScope });
+  session.policyEngineV2Cache.set(cacheKey, {
+    profile, trafficScopeKey: activeTrafficScopeKey, trafficScope: result.trafficScope, flows, fortiConfig, result,
+  });
+  if (session.policyEngineV2Cache.size > 16) {
+    session.policyEngineV2Cache.delete(session.policyEngineV2Cache.keys().next().value);
+  }
   return result;
 }
 
@@ -284,7 +353,19 @@ function getRequiredPolicyEngineAtoms(session, selectedPolicies, fortiConfig) {
     .filter(Boolean))];
   if (profiles.length === 0) return null;
   if (profiles.length > 1) throw new Error('Plusieurs profils Policy Engine V2 sont mélangés dans la sélection');
-  return getPolicyEngineResult(session, profiles[0], fortiConfig).atoms;
+  const policyScopes = (selectedPolicies || [])
+    .filter(policy => policy?._policyEngineV2?.profile)
+    .map(policy => ({
+      key: policy._policyEngineV2.trafficScopeKey || trafficScopeKey({ mode: 'all' }),
+      scope: policy._policyEngineV2.trafficScope || { mode: 'all' },
+    }));
+  const scopeKeys = [...new Set(policyScopes.map(entry => entry.key))];
+  if (scopeKeys.length > 1) throw new Error('Plusieurs Traffic Scopes sont mélangés dans la sélection');
+  const trafficScope = policyScopes[0]?.scope || { mode: 'all' };
+  if (trafficScopeKey(trafficScope) !== (scopeKeys[0] || trafficScopeKey({ mode: 'all' }))) {
+    throw new Error('Traffic Scope de policy invalide ou altéré');
+  }
+  return getPolicyEngineResult(session, profiles[0], fortiConfig, trafficScope).atoms;
 }
 
 function requireSession(req, res) {
@@ -321,6 +402,13 @@ function validateWorkspaceBody(body) {
     throw new Error('Configuration FortiGate invalide dans le workspace');
   }
   return body;
+}
+
+function stripLegacyNetworkDecisions(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return data;
+  const sanitized = { ...data };
+  delete sanitized.networkDecisions;
+  return sanitized;
 }
 
 function augmentPreflightEvidence(result, sessionData, fortiConfig, policies) {
@@ -674,12 +762,20 @@ app.get('/api/policy-engine/v2', (req, res) => {
   if (!Array.isArray(s.data?.flows)) {
     return res.status(410).json({ error: 'Flows indisponibles pour Policy Engine V2' });
   }
+  const consistency = assertConfigTelemetry(s, s.fortiConfig || {}, res);
+  if (!consistency.ok) return;
   const profile = String(req.query.profile || 'recommended');
   if (!['recommended', 'strict', 'synthetic', 'expert'].includes(profile)) {
     return res.status(400).json({ error: 'Profil Policy Engine V2 invalide' });
   }
+  let trafficScope;
   try {
-    const result = getPolicyEngineResult(s, profile, s.fortiConfig || {});
+    trafficScope = parseTrafficScopeQuery(req.query);
+  } catch (error) {
+    return res.status(400).json({ error: error.message });
+  }
+  try {
+    const result = getPolicyEngineResult(s, profile, s.fortiConfig || {}, trafficScope);
     const captureBlockers = getCaptureDeploymentBlockers(s.data, s.fortiConfig || {});
     const quality = {
       captureStart: s.data.stats?.captureStart ?? null,
@@ -717,6 +813,7 @@ app.get('/api/policy-engine/v2', (req, res) => {
       affinityViews: result.affinityViews,
       blockers: result.blockers,
       inputSummary: result.inputSummary,
+      trafficScope: result.trafficScope,
       expertParameters: result.expertParameters,
       quality,
     };
@@ -1286,8 +1383,12 @@ app.get('/api/export/workspace', (req, res) => {
   const s = requireSession(req, res);
   if (!s) return;
   if (!s.data || s.status !== 'ready') return res.status(409).json({ error: 'Session non prête' });
+  if (s.fortiConfig) {
+    const consistency = assertConfigTelemetry(s, s.fortiConfig, res);
+    if (!consistency.ok) return;
+  }
 
-  // Si les flows ont été libérés en mémoire (après chargement conf FortiGate),
+  // Si les flows ont été libérés en mémoire (après chargement de la config FortiGate),
   // on les récupère depuis le cache disque qui a été écrit avant le free.
   let exportData = s.data;
   if (!exportData.flows) {
@@ -1329,8 +1430,13 @@ app.post('/api/import/workspace', express.raw({ type: ['application/octet-stream
       jsonText = buf.toString('utf8');
     }
     const body = validateWorkspaceBody(parseWorkspaceJson(jsonText));
+    const importedData = stripLegacyNetworkDecisions(body.data);
+    if (body.fortiConfig) {
+      const consistency = validateWorkspaceConfigTelemetry(importedData, body.fortiConfig);
+      if (!consistency.ok) return sendConfigTelemetryMismatch(res, consistency);
+    }
     const id = createSession();
-    setSessionData(id, body.data);
+    setSessionData(id, importedData);
     if (body.fortiConfig) setFortiConfig(id, body.fortiConfig);
     res.json({ sessionId: id });
   } catch (err) {
@@ -1347,6 +1453,10 @@ app.get('/api/workspaces', (req, res) => {
 app.post('/api/workspaces', express.json({ limit: '10kb' }), async (req, res) => {
   const s = requireSession(req, res);
   if (!s) return;
+  if (s.fortiConfig) {
+    const consistency = assertConfigTelemetry(s, s.fortiConfig, res);
+    if (!consistency.ok) return;
+  }
   const zlib = require('zlib');
   const name = (req.body?.name || '').trim().slice(0, 80) || 'Sans nom';
 
@@ -1396,8 +1506,13 @@ app.get('/api/workspaces/:id', async (req, res) => {
       )
     );
     const body = validateWorkspaceBody(parseWorkspaceJson(json));
+    const importedData = stripLegacyNetworkDecisions(body.data);
+    if (body.fortiConfig) {
+      const consistency = validateWorkspaceConfigTelemetry(importedData, body.fortiConfig);
+      if (!consistency.ok) return sendConfigTelemetryMismatch(res, consistency);
+    }
     const newId = createSession();
-    setSessionData(newId, body.data);
+    setSessionData(newId, importedData);
     if (body.fortiConfig) setFortiConfig(newId, body.fortiConfig);
     res.json({ sessionId: newId, name: entry.name, hasFortiConfig: !!body.fortiConfig });
   } catch (err) {
@@ -1683,7 +1798,15 @@ app.post('/api/deploy/config-upload', upload.single('conffile'), async (req, res
 
   try {
     const text = await fs.promises.readFile(req.file.path, 'utf8');
-    const fortiConfig = parseFortiConfig(text);
+    const initialConfig = parseFortiConfig(text);
+    const telemetryVdom = selectTelemetryVdom(
+      s.originalFlows || s.data?.flows || [],
+      initialConfig.vdomList,
+    );
+    const fortiConfig = telemetryVdom ? parseFortiConfig(text, telemetryVdom) : initialConfig;
+    const consistency = assertConfigTelemetry(s, fortiConfig);
+    if (!consistency.ok) return sendConfigTelemetryMismatch(res, consistency);
+
     s.fortiConfig = fortiConfig;
     s.fortiConfigRawText = text;
     setFortiConfig(s.id, fortiConfig);
@@ -1745,6 +1868,9 @@ app.post('/api/deploy/config-vdom', express.json(), (req, res) => {
 
   try {
     const fortiConfig = parseFortiConfig(s.fortiConfigRawText, vdom);
+    const consistency = assertConfigTelemetry(s, fortiConfig);
+    if (!consistency.ok) return sendConfigTelemetryMismatch(res, consistency);
+
     s.fortiConfig = fortiConfig;
     setFortiConfig(s.id, fortiConfig);
 
@@ -1814,6 +1940,8 @@ app.post('/api/deploy/dynamic-routes', (req, res) => {
   const s = requireSession(req, res);
   if (!s) return;
   if (!s.fortiConfig) return res.status(404).json({ error: 'Aucune config FortiGate chargée' });
+  const consistency = assertConfigTelemetry(s, s.fortiConfig, res);
+  if (!consistency.ok) return;
 
   const { protocol, cliOutput } = req.body || {};
   if (!cliOutput || !protocol) return res.status(400).json({ error: 'protocol et cliOutput requis' });
@@ -1870,13 +1998,21 @@ app.post('/api/deploy/preflight', (req, res) => {
   const s = requireSession(req, res);
   if (!s) return;
   if (!s.fortiConfig) return res.status(404).json({ error: 'Aucune config FortiGate chargée' });
+  const consistency = assertConfigTelemetry(s, s.fortiConfig, res);
+  if (!consistency.ok) return;
 
-  const { selectedPolicies } = req.body || {};
-  if (!Array.isArray(selectedPolicies) || selectedPolicies.length === 0) {
+  const { selectedPolicies: submittedPolicies } = req.body || {};
+  if (!Array.isArray(submittedPolicies) || submittedPolicies.length === 0) {
     return res.status(400).json({ error: 'selectedPolicies requis' });
   }
 
   try {
+    const binding = bindSubmittedPolicies(s, submittedPolicies, s.fortiConfig);
+    if (!binding.ok) return sendPolicyBindingFailure(res, binding);
+    const selectedPolicies = binding.policies;
+    const addressSelectionValidation = assertAddressSelections(selectedPolicies, s.fortiConfig, res);
+    if (!addressSelectionValidation.ok) return;
+
     const requiredPolicyEngineAtoms = getRequiredPolicyEngineAtoms(s, selectedPolicies, s.fortiConfig);
     const result = preflightValidation(selectedPolicies, s.fortiConfig, s.data?.flows || [], requiredPolicyEngineAtoms);
     const augmented = augmentPreflightEvidence(result, s.data, s.fortiConfig, selectedPolicies);
@@ -1900,9 +2036,11 @@ app.post('/api/deploy/generate', (req, res) => {
   const s = requireSession(req, res);
   if (!s) return;
   if (!s.fortiConfig) return res.status(404).json({ error: 'Aucune config FortiGate chargée' });
+  const consistency = assertConfigTelemetry(s, s.fortiConfig, res);
+  if (!consistency.ok) return;
 
-  const { selectedPolicies, opts } = req.body || {};
-  if (!Array.isArray(selectedPolicies) || selectedPolicies.length === 0) {
+  const { selectedPolicies: submittedPolicies, opts } = req.body || {};
+  if (!Array.isArray(submittedPolicies) || submittedPolicies.length === 0) {
     return res.status(400).json({ error: 'selectedPolicies requis' });
   }
 
@@ -1929,6 +2067,12 @@ app.post('/api/deploy/generate', (req, res) => {
       });
       configToUse = { ...s.fortiConfig, interfaces: patchedInterfaces };
     }
+
+    const binding = bindSubmittedPolicies(s, submittedPolicies, configToUse);
+    if (!binding.ok) return sendPolicyBindingFailure(res, binding);
+    const selectedPolicies = binding.policies;
+    const addressSelectionValidation = assertAddressSelections(selectedPolicies, configToUse, res);
+    if (!addressSelectionValidation.ok) return;
     const requiredPolicyEngineAtoms = getRequiredPolicyEngineAtoms(s, selectedPolicies, configToUse);
 
     // SD-WAN zone takes priority; if none, preferredWanIntf falls to null (detectWanCandidates handles it)
@@ -1944,7 +2088,10 @@ app.post('/api/deploy/generate', (req, res) => {
       }
     }
 
-    const analyzed = analyzePolicies(selectedPolicies, configToUse, o.preferredWanIntf || null);
+    let analyzed = applyPolicyAddressSelections(
+      analyzePolicies(selectedPolicies, configToUse, o.preferredWanIntf || null),
+      selectedPolicies,
+    );
 
     // Re-inject per-policy overrides from frontend (action, log, securityProfiles)
     for (let i = 0; i < analyzed.length; i++) {
