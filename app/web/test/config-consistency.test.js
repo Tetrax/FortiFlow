@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
 
 // Keep the first RED behavioral: an absent implementation is an assertion failure,
 // not a module-loading/setup failure.
@@ -147,4 +148,82 @@ test('sélectionne automatiquement le VDOM unique prouvé par la télémétrie',
     null,
   );
   assert.equal(consistency.selectTelemetryVdom([flow({ vdom: 'missing' })], ['root']), null);
+});
+
+test('refuse une capture sans aucune preuve positive de config ou de réseau', () => {
+  const result = consistency.validateConfigTelemetryConsistency(
+    [flow({ devname: '', devid: '', vdom: '' })],
+    config({
+      identity: { hostname: null, devid: null, selectedVdom: null },
+      selectedVdom: null,
+      interfaces: { lan: { name: 'lan' }, servers: { name: 'servers' } },
+    }),
+  );
+  assertMismatch(result);
+});
+
+test('ne masque pas les flux dont l’identité est incomplète lorsque d’autres sont complets', () => {
+  const result = consistency.validateConfigTelemetryConsistency(
+    [flow(), flow({ devname: '', devid: '', vdom: '' })],
+    config(),
+  );
+  assert.equal(result.ok, true);
+  assert.equal(result.telemetryIdentity.incompleteFlows, 1);
+  assert.ok(result.warnings.some(warning => warning.code === 'TELEMETRY_IDENTITY_INCOMPLETE'));
+});
+
+test('refuse le membre HA observé lorsque le membre technique sélectionné est différent', () => {
+  const result = consistency.validateConfigTelemetryConsistency(
+    [flow({ devid: 'HA-B' })],
+    config({
+      identity: {
+        hostname: 'FW-AVR-01',
+        devid: null,
+        ha: { enabled: true, selectedDeviceId: 'HA-A', memberDeviceIds: ['HA-A', 'HA-B'] },
+      },
+    }),
+  );
+  assertMismatch(result);
+});
+
+test('refuse un contexte HA ambigu lorsque aucun membre technique n’est sélectionné', () => {
+  const result = consistency.validateConfigTelemetryConsistency(
+    [flow({ devid: 'HA-B' })],
+    config({
+      identity: {
+        hostname: 'FW-AVR-01',
+        devid: null,
+        ha: { enabled: true, memberDeviceIds: ['HA-A', 'HA-B'] },
+      },
+    }),
+  );
+  assertMismatch(result);
+});
+
+test('accepte les réseaux IPv4 publics lorsqu’ils contiennent les IP observées', () => {
+  const result = consistency.validateConfigTelemetryConsistency(
+    [flow({ srcip: '198.51.100.10', dstip: '203.0.113.20' })],
+    config({
+      interfaces: {
+        lan: { name: 'lan', cidr: '198.51.100.0/24' },
+        servers: { name: 'servers', cidr: '203.0.113.0/24' },
+      },
+    }),
+  );
+  assert.equal(result.ok, true);
+  assert.equal(result.interfaceChecks.every(check => check.ok), true);
+});
+
+test('reste borné sous un budget mémoire réduit avec beaucoup de flows identiques', () => {
+  const modulePath = require.resolve('../lib/config-consistency');
+  const probe = `
+    const { validateConfigTelemetryConsistency } = require(${JSON.stringify(modulePath)});
+    const flow = { devname: 'FW', devid: 'FGT', vdom: 'root', srcip: '10.0.0.10', dstip: '10.0.1.20', srcintf: 'lan', dstintf: 'servers' };
+    const flows = Array(1200000).fill(flow);
+    const config = { identity: { hostname: 'FW', devid: 'FGT', selectedVdom: 'root' }, selectedVdom: 'root', interfaces: { lan: { cidr: '10.0.0.0/24' }, servers: { cidr: '10.0.1.0/24' } }, zones: {} };
+    const result = validateConfigTelemetryConsistency(flows, config);
+    if (!result.ok || result.interfaceChecks.length !== 2) process.exit(2);
+  `;
+  const child = spawnSync(process.execPath, ['--max-old-space-size=40', '-e', probe], { encoding: 'utf8', timeout: 30000 });
+  assert.equal(child.status, 0, child.stderr || child.stdout);
 });

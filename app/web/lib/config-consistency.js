@@ -89,25 +89,44 @@ function normalizeTelemetryFlows(flows) {
 }
 
 function collectTelemetryIdentity(flows) {
-  const devnames = [];
-  const devids = [];
-  const vdoms = [];
-  const deviceKeys = [];
+  const devnames = new Set();
+  const devids = new Set();
+  const vdoms = new Set();
+  const deviceKeys = new Set();
+  const maxDistinctValues = 256;
+  let flowCount = 0;
+  let incompleteFlows = 0;
+  let missingDevnameFlows = 0;
+  let missingDevidFlows = 0;
+  let missingVdomFlows = 0;
+  const addBounded = (set, value) => {
+    if (set.size < maxDistinctValues) set.add(value);
+  };
   for (const flow of normalizeTelemetryFlows(flows)) {
+    flowCount++;
     const scope = flow?.scope && typeof flow.scope === 'object' ? flow.scope : {};
     const devname = text(flow?.devname || scope.devname);
     const devid = text(flow?.devid || scope.devid);
     const vdom = text(flow?.vdom || flow?.vd || scope.vdom);
-    if (devname) devnames.push(devname);
-    if (devid) devids.push(devid);
-    if (vdom) vdoms.push(vdom);
-    if (devid || devname) deviceKeys.push(`${devid.toLowerCase()}::${devname.toLowerCase()}`);
+    if (devname) addBounded(devnames, devname);
+    else missingDevnameFlows++;
+    if (devid) addBounded(devids, devid);
+    else missingDevidFlows++;
+    if (vdom) addBounded(vdoms, vdom);
+    else missingVdomFlows++;
+    if (devid || devname) addBounded(deviceKeys, `${devid.toLowerCase()}::${devname.toLowerCase()}`);
+    if (!devname || !devid || !vdom) incompleteFlows++;
   }
   return {
-    devnames: unique(devnames),
-    devids: unique(devids),
-    vdoms: unique(vdoms),
-    deviceKeys: unique(deviceKeys),
+    devnames: unique([...devnames]),
+    devids: unique([...devids]),
+    vdoms: unique([...vdoms]),
+    deviceKeys: unique([...deviceKeys]),
+    flowCount,
+    incompleteFlows,
+    missingDevnameFlows,
+    missingDevidFlows,
+    missingVdomFlows,
   };
 }
 
@@ -197,7 +216,7 @@ function checkInterfaceEndpoint(flow, side, fortiConfig) {
   }
   const matches = knownNetworks.filter(candidate => {
     const mask = candidate.network.prefix === 0 ? 0 : (0xFFFFFFFF << (32 - candidate.network.prefix)) >>> 0;
-    return (ipInt & mask) === candidate.network.network;
+    return ((ipInt & mask) >>> 0) === candidate.network.network;
   });
   return {
     side,
@@ -214,6 +233,7 @@ function validateConfigTelemetryConsistency(flows, fortiConfig = {}) {
   const configIdentity = normalizeConfigIdentity(fortiConfig);
   const mismatchDetails = [];
   const warnings = [];
+  let positiveProof = false;
   const warn = (code, msg) => {
     if (!warnings.some(item => item.code === code && item.msg === msg)) warnings.push({ code, msg });
   };
@@ -227,6 +247,8 @@ function validateConfigTelemetryConsistency(flows, fortiConfig = {}) {
   if (configIdentity.hostname && telemetryIdentity.devnames.length > 0
       && !telemetryIdentity.devnames.some(name => name.toLowerCase() === configIdentity.hostname.toLowerCase())) {
     mismatch(`hostname config=${configIdentity.hostname}; télémétrie=${telemetryIdentity.devnames.join(', ')}`);
+  } else if (configIdentity.hostname && telemetryIdentity.devnames.length > 0) {
+    positiveProof = true;
   } else if (!configIdentity.hostname || telemetryIdentity.devnames.length === 0) {
     warn('TELEMETRY_IDENTITY_UNKNOWN', 'Hostname ou devname absent : la cohérence est établie par les invariants disponibles.');
   }
@@ -245,10 +267,22 @@ function validateConfigTelemetryConsistency(flows, fortiConfig = {}) {
   if (telemetryDeviceIds.length > 1) {
     if (!explicitHaSelection || telemetryDeviceIds.some(id => !configuredDeviceIds.has(id))) {
       mismatch(`serials télémétrie ambigus: ${telemetryIdentity.devids.join(', ')}`);
+    } else if (telemetryDeviceIds.includes(selectedDeviceId)) {
+      positiveProof = true;
     }
-  } else if (telemetryDeviceIds.length === 1 && configuredDeviceIds.size > 0
-      && !configuredDeviceIds.has(telemetryDeviceIds[0])) {
-    mismatch(`serial config=${[...configuredDeviceIds].join(', ')}; télémétrie=${telemetryIdentity.devids.join(', ')}`);
+  } else if (telemetryDeviceIds.length === 1) {
+    const observedDeviceId = telemetryDeviceIds[0];
+    const haSelectionRequired = configIdentity.ha.enabled
+      && configIdentity.ha.memberDeviceIds.length > 1;
+    if (haSelectionRequired && !selectedDeviceId) {
+      mismatch(`sélection HA absente parmi: ${configIdentity.ha.memberDeviceIds.join(', ')}`);
+    } else if (selectedDeviceId && (!explicitHaSelection || observedDeviceId !== selectedDeviceId)) {
+      mismatch(`serial sélectionné=${selectedDeviceId || '?'}; télémétrie=${telemetryIdentity.devids.join(', ')}`);
+    } else if (configuredDeviceIds.size > 0 && !configuredDeviceIds.has(observedDeviceId)) {
+      mismatch(`serial config=${[...configuredDeviceIds].join(', ')}; télémétrie=${telemetryIdentity.devids.join(', ')}`);
+    } else if (configuredDeviceIds.has(observedDeviceId)) {
+      positiveProof = true;
+    }
   } else if (telemetryDeviceIds.length === 0 || configuredDeviceIds.size === 0) {
     warn('DEVICE_SERIAL_UNKNOWN', 'Serial/devid absent d’une des sources : aucune identité inventée.');
   }
@@ -261,8 +295,19 @@ function validateConfigTelemetryConsistency(flows, fortiConfig = {}) {
   } else if (telemetryIdentity.vdoms.length === 1 && configIdentity.selectedVdom
       && telemetryIdentity.vdoms[0].toLowerCase() !== configIdentity.selectedVdom.toLowerCase()) {
     mismatch(`VDOM config=${configIdentity.selectedVdom}; télémétrie=${telemetryIdentity.vdoms[0]}`);
+  } else if (telemetryIdentity.vdoms.length === 1 && configIdentity.selectedVdom) {
+    positiveProof = true;
   } else if (telemetryIdentity.vdoms.length === 0 || !configIdentity.selectedVdom) {
     warn('VDOM_IDENTITY_UNKNOWN', 'VDOM absent d’une des sources : aucune portée VDOM n’est inventée.');
+  }
+
+  if (telemetryIdentity.incompleteFlows > 0) {
+    warn(
+      'TELEMETRY_IDENTITY_INCOMPLETE',
+      `${telemetryIdentity.incompleteFlows} flux ne portent pas une identité complète `
+        + `(devname=${telemetryIdentity.missingDevnameFlows}, devid=${telemetryIdentity.missingDevidFlows}, `
+        + `vdom=${telemetryIdentity.missingVdomFlows}).`,
+    );
   }
 
   const interfaceSummary = new Map();
@@ -282,6 +327,10 @@ function validateConfigTelemetryConsistency(flows, fortiConfig = {}) {
     }
   }
   const interfaceChecks = [...interfaceSummary.values()];
+  if (interfaceChecks.some(check => check.ok === true)) positiveProof = true;
+  if (!positiveProof) {
+    mismatch('aucune preuve positive d’identité ou de correspondance interface-réseau');
+  }
 
   const errors = mismatchDetails.length > 0
     ? [{
