@@ -385,6 +385,13 @@ function validateWorkspaceBody(body) {
   return body;
 }
 
+function stripLegacyNetworkDecisions(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return data;
+  const sanitized = { ...data };
+  delete sanitized.networkDecisions;
+  return sanitized;
+}
+
 function augmentPreflightEvidence(result, sessionData, fortiConfig, policies) {
   const deploymentBlockers = getCaptureDeploymentBlockers(sessionData, fortiConfig);
   const extraIssues = [];
@@ -1402,12 +1409,13 @@ app.post('/api/import/workspace', express.raw({ type: ['application/octet-stream
       jsonText = buf.toString('utf8');
     }
     const body = validateWorkspaceBody(parseWorkspaceJson(jsonText));
+    const importedData = stripLegacyNetworkDecisions(body.data);
     if (body.fortiConfig) {
-      const consistency = validateWorkspaceConfigTelemetry(body.data, body.fortiConfig);
+      const consistency = validateWorkspaceConfigTelemetry(importedData, body.fortiConfig);
       if (!consistency.ok) return sendConfigTelemetryMismatch(res, consistency);
     }
     const id = createSession();
-    setSessionData(id, body.data);
+    setSessionData(id, importedData);
     if (body.fortiConfig) setFortiConfig(id, body.fortiConfig);
     res.json({ sessionId: id });
   } catch (err) {
@@ -1475,12 +1483,13 @@ app.get('/api/workspaces/:id', async (req, res) => {
       )
     );
     const body = validateWorkspaceBody(parseWorkspaceJson(json));
+    const importedData = stripLegacyNetworkDecisions(body.data);
     if (body.fortiConfig) {
-      const consistency = validateWorkspaceConfigTelemetry(body.data, body.fortiConfig);
+      const consistency = validateWorkspaceConfigTelemetry(importedData, body.fortiConfig);
       if (!consistency.ok) return sendConfigTelemetryMismatch(res, consistency);
     }
     const newId = createSession();
-    setSessionData(newId, body.data);
+    setSessionData(newId, importedData);
     if (body.fortiConfig) setFortiConfig(newId, body.fortiConfig);
     res.json({ sessionId: newId, name: entry.name, hasFortiConfig: !!body.fortiConfig });
   } catch (err) {

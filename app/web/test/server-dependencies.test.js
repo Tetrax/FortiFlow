@@ -94,6 +94,19 @@ test('le serveur valide les sélections d’adresse avant le preflight et la gé
     assert.match(route, /assertAddressSelections|validatePolicyAddressSelections/);
   }
 });
+
+test('l’import workspace ignore networkDecisions avant la restauration de session', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(source, /stripLegacyNetworkDecisions/);
+  const importStart = source.indexOf("app.post('/api/import/workspace'");
+  const importEnd = source.indexOf("app.get('/api/workspaces'", importStart);
+  assert.ok(importStart >= 0 && importEnd > importStart);
+  const route = source.slice(importStart, importEnd);
+  assert.ok(route.indexOf('stripLegacyNetworkDecisions') < route.indexOf('setSessionData'));
+  const deleteIndex = source.indexOf('delete sanitized.networkDecisions');
+  assert.ok(deleteIndex >= 0 && deleteIndex < importStart);
+});
+
 test(
   'le reverse proxy écrase X-Forwarded-For avec l’adresse TCP réelle',
   {
