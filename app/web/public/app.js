@@ -37,6 +37,10 @@ function escHtml(s) {
   return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+function escAttr(s) {
+  return escHtml(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 const fmtNum = n => (n ?? 0).toLocaleString('fr-FR');
 const tsNow  = () => new Date().toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '-');
 
@@ -191,6 +195,7 @@ async function handleUpload(file) {
         ws.close();
         if (d.error) { reject(new Error(d.error)); return; }
         state.session = sessionId;
+        resetNetworkRepresentationStates();
         state.stats   = d.stats;
         state.meta    = d.meta;
         setProgressInfo({ lines: d.meta?.lineCount || 0, pct: 100, linesPerSec: 0 });
@@ -277,6 +282,7 @@ async function loadWsFromHistory(id) {
     if (!r.ok) { const e = await r.json().catch(() => ({})); alert(e.error || 'Erreur chargement'); return; }
     const { sessionId } = await r.json();
     state.session = sessionId;
+    resetNetworkRepresentationStates();
     try {
       const sr = await fetch(`/api/stats?session=${sessionId}`);
       if (sr.ok) { const d = await sr.json(); state.stats = d.stats; state.meta = d.meta; }
@@ -2147,6 +2153,7 @@ const deployState = {
   policyEngineInputSummary: null,
   serviceInventory: [],
   affinityViews: [],
+  networkRepresentationStates: Object.create(null),
   deploymentBlockers: { unsupportedIpv6: 0, unknownActionSessions: 0, failedConnectionSessions: 0, hasExcludedTraffic: false, blocked: false },
   _detailOriginal: null,           // M3: snapshot pré-détail (≠ _analyzedOriginal pré-fusion)
   captureWindow: null,             // #1: { start, end, days, available } — fenêtre d'observation
@@ -2361,6 +2368,7 @@ function importSession(file) {
         if (!r.ok) { const err = await r.json().catch(()=>({})); alert(err.error || 'Erreur import'); return; }
         const { sessionId } = await r.json();
         state.session = sessionId;
+        resetNetworkRepresentationStates();
 
         // Récupérer les stats depuis la session restaurée
         try {
@@ -3086,9 +3094,20 @@ function mountDrawer() {
     }
     syncRowStatus(_drawerIdx);
   });
-  drawer.addEventListener('click', e => {
+  drawer.addEventListener('click', async e => {
     const p = _drawerIdx !== null ? deployState.analyzed[_drawerIdx] : null;
     if (!p) return;
+    if (e.target.closest('.network-representation-retry')) {
+      await loadPolicyNetworkRepresentations(_drawerIdx, true);
+      return;
+    }
+    const networkAction = e.target.closest('.network-representation-use');
+    if (networkAction) {
+      await applyPolicyNetworkRepresentation(
+        _drawerIdx, networkAction.dataset.side, networkAction.dataset.candidateId,
+      );
+      return;
+    }
     const structuralControl = e.target.closest('.drawer-mode-btn, .drawer-dstall-btn, .drawer-multidst-mode, .drawer-multisrc-mode, .svc-do-merge');
     if (p._policyEngineV2 && structuralControl) {
       alert('Périmètre verrouillé par Policy Engine V2. Changez de profil puis relancez l’analyse au lieu d’élargir manuellement cette policy.');
@@ -3471,6 +3490,7 @@ function openDrawer(idx) {
   populateDrawer(idx);
   document.getElementById('drawer-overlay').classList.add('open');
   document.getElementById('policy-drawer').classList.add('open');
+  void loadPolicyNetworkRepresentations(idx);
   // Mark row
   document.querySelectorAll('.deploy-policy-row.selected-row').forEach(r => r.classList.remove('selected-row'));
   document.querySelector(`.deploy-policy-row[data-idx="${idx}"]`)?.classList.add('selected-row');
@@ -3576,6 +3596,313 @@ function buildPolicyAffinityHtml(policy) {
     ${residuals ? `<div class="affinity-summary"><strong>Résiduels :</strong><ul>${residuals}</ul></div>` : ''}
     ${truncated ? '<small>Matrice tronquée dans cette vue ; l’export conserve toutes les associations.</small>' : ''}
   </div>`;
+}
+
+let _networkRepresentationRequestSeq = 0;
+
+function resetNetworkRepresentationStates() {
+  deployState.networkRepresentationStates = Object.create(null);
+  _networkRepresentationRequestSeq += 1;
+}
+
+function networkRepresentationPolicyId(policy) {
+  return String(policy?.id || '');
+}
+
+function networkRepresentationKindLabel(kind) {
+  return ({
+    'existing-object': 'Objet FortiGate existant',
+    'existing-group': 'Groupe exact existant',
+    'new-exact-group': 'Nouveau groupe exact',
+    'cidr-suggestion': 'Subnet suggéré',
+    'host-list': 'Hosts /32',
+  })[kind] || kind;
+}
+
+function networkRepresentationOriginLabel(candidate) {
+  return candidate?.origin?.type === 'fortigate-config'
+    ? 'Configuration FortiGate'
+    : 'Analyse FortiFlow';
+}
+
+function networkRepresentationObjectText(value) {
+  if (typeof value === 'string') return value;
+  if (!value || typeof value !== 'object') return '';
+  return value.name || value.objectName || value.cidr || value.objectType || '';
+}
+
+function networkRepresentationObjectList(values, limit = 6) {
+  const names = (values || []).map(networkRepresentationObjectText).filter(Boolean);
+  if (names.length <= limit) return names.join(', ');
+  return `${names.slice(0, limit).join(', ')} +${names.length - limit} autres`;
+}
+
+function networkRepresentationSummary(candidate) {
+  if (!candidate) return 'Indisponible';
+  if (candidate.kind === 'existing-object') {
+    return (candidate.existingObjectMatch?.objectNames || candidate.representation?.objectNames || []).join(', ');
+  }
+  if (candidate.kind === 'existing-group') {
+    return (candidate.exactGroupCandidate?.groupNames || candidate.representation?.groupNames || []).join(', ');
+  }
+  if (candidate.kind === 'new-exact-group') {
+    return `${fmtNum(candidate.observedIpCount)} hosts /32 dans un groupe exact à créer`;
+  }
+  if (candidate.kind === 'cidr-suggestion') return candidate.cidrCandidate?.cidr || candidate.representedCidrs?.[0] || 'CIDR';
+  return `${fmtNum(candidate.observedIpCount)} hosts /32`;
+}
+
+function networkRepresentationMetricsHtml(metrics, compact = false) {
+  const coverage = Number(metrics?.coverageRatio || 0) * 100;
+  const expansion = Number(metrics?.expansionRatio || 0) * 100;
+  return `<div class="network-representation-metrics ${compact ? 'compact' : ''}">
+    <div><small>Coverage</small><strong>${coverage.toFixed(coverage % 1 ? 2 : 0)} %</strong></div>
+    <div><small>Expansion</small><strong class="${expansion > 0 ? 'metric-danger' : 'metric-safe'}">${expansion.toFixed(expansion % 1 ? 2 : 0)} %</strong></div>
+    <div><small>Missing</small><strong class="${metrics?.missingRequiredTuples ? 'metric-danger' : 'metric-safe'}">${fmtNum(metrics?.missingRequiredTuples)}</strong></div>
+    <div><small>Unexpected</small><strong class="${metrics?.unexpectedAllowedTuples ? 'metric-danger' : 'metric-safe'}">${fmtNum(metrics?.unexpectedAllowedTuples)}</strong></div>
+  </div>`;
+}
+
+function networkRepresentationCandidateHtml(candidate, resolution, side, networkState) {
+  const current = candidate.candidateId === resolution.currentCandidateId;
+  const recommended = candidate.candidateId === resolution.recommendedCandidateId;
+  const ambiguous = candidate.existingObjectMatch?.ambiguous || candidate.exactGroupCandidate?.ambiguous;
+  const safe = candidate.safetyState?.eligibility === 'safe-exact' && !ambiguous;
+  const profileAllowsDecision = deployState.policyEngineProfile !== 'synthetic';
+  const lockedByOtherSide = !!networkState?.outcome && networkState.selectedSide !== side;
+  const applying = networkState?.status === 'applying';
+  const enabled = safe && profileAllowsDecision && !lockedByOtherSide && !applying;
+  const existingObjects = (candidate.objects?.existing || []).map(networkRepresentationObjectText).filter(Boolean);
+  const createdObjects = (candidate.objects?.create || []).map(networkRepresentationObjectText).filter(Boolean);
+  const objectText = networkRepresentationObjectList([...existingObjects, ...createdObjects]) || 'Aucun objet nommé';
+  const cidrs = (candidate.representedCidrs || []).slice(0, 4);
+  const cidrText = cidrs.length
+    ? `${cidrs.join(', ')}${candidate.representedCidrs.length > cidrs.length ? ` +${candidate.representedCidrs.length - cidrs.length}` : ''}`
+    : '—';
+  const buttonLabel = current ? 'Conserver' : 'Utiliser cette représentation';
+  const disabledReason = applying
+    ? 'Validation UserDecision en cours.'
+    : lockedByOtherSide
+    ? 'Une décision est déjà validée sur l’autre côté. Relancez l’analyse avant de choisir une seconde représentation.'
+    : !profileAllowsDecision
+    ? 'Les décisions réseau exactes ne sont disponibles qu’en profils Recommandé, Strict ou Expert.'
+    : ambiguous
+      ? 'Plusieurs objets correspondent : choix non déterministe.'
+      : !safe
+        ? 'Cette suggestion introduit une expansion et ne peut pas être appliquée dans ce profil.'
+        : '';
+  return `<article class="network-representation-card ${current ? 'is-current' : ''} ${recommended ? 'is-recommended' : ''}" data-candidate-id="${escAttr(candidate.candidateId)}">
+    <div class="network-representation-card-head">
+      <div><strong>${escHtml(networkRepresentationKindLabel(candidate.kind))}</strong><small>${side === 'source' ? 'Source' : 'Destination'} · ${escHtml(networkRepresentationOriginLabel(candidate))}</small></div>
+      <span class="network-representation-safety ${safe ? 'safe' : 'expansion'}">${safe ? 'Exact' : 'Expansion'}</span>
+    </div>
+    <dl class="network-representation-facts">
+      <div><dt>Objet concerné</dt><dd>${escHtml(objectText)}</dd></div>
+      <div><dt>CIDR</dt><dd class="mono">${escHtml(cidrText)}</dd></div>
+      <div><dt>Hôtes observés</dt><dd>${fmtNum(candidate.observedIpCount)}</dd></div>
+      <div><dt>Représentation proposée</dt><dd>${escHtml(networkRepresentationSummary(candidate))}</dd></div>
+    </dl>
+    ${networkRepresentationMetricsHtml(candidate.previewMetrics, true)}
+    <div class="network-representation-why"><strong>Justification</strong><span>${escHtml(candidate.explanation || 'Suggestion calculée depuis les FlowAtoms et la configuration FortiGate.')}</span></div>
+    <button class="${current ? 'btn-sm' : 'btn-accent'} network-representation-use" data-side="${side}" data-candidate-id="${escAttr(candidate.candidateId)}" ${enabled ? '' : 'disabled'} title="${escAttr(disabledReason)}">${buttonLabel}</button>
+  </article>`;
+}
+
+function networkRepresentationResultHtml(networkState) {
+  const outcome = networkState.outcome;
+  const selected = networkState.selectedCandidate;
+  const before = networkState.beforeCandidate;
+  if (!outcome || !selected) return '';
+  const reused = networkRepresentationObjectList(selected.objects?.existing || []);
+  const created = networkRepresentationObjectList(selected.objects?.create || []);
+  const preflight = outcome.preflight || {};
+  const preflightLabel = preflight.ok
+    ? 'Conforme'
+    : `${fmtNum(preflight.errors)} erreur${preflight.errors === 1 ? '' : 's'}, ${fmtNum(preflight.warnings)} avertissement${preflight.warnings === 1 ? '' : 's'}`;
+  return `<div class="network-representation-result" role="status">
+    <div class="network-representation-result-title">Avant / Après</div>
+    <div class="network-representation-compare">
+      <div><small>Avant</small><strong>${escHtml(networkRepresentationSummary(before))}</strong></div>
+      <span aria-hidden="true">→</span>
+      <div><small>Après</small><strong>${escHtml(networkRepresentationSummary(selected))}</strong></div>
+    </div>
+    <div class="network-representation-result-objects"><span><strong>Objets réutilisés :</strong> ${reused ? escHtml(reused) : 'aucun'}</span><span><strong>Objets créés :</strong> ${created ? escHtml(created) : 'aucun'}</span></div>
+    ${networkRepresentationMetricsHtml(outcome.metrics)}
+    <div class="network-representation-preflight ${preflight.ok ? 'safe' : 'blocked'}"><strong>Statut preflight :</strong> ${escHtml(preflightLabel)} · ${escHtml(preflight.certification?.level || 'non certifié')}</div>
+    <small>Décision validée par le backend puis intégrée à la policy du workflow de génération actuel.</small>
+  </div>`;
+}
+
+function buildPolicyNetworkRepresentationHtml(policy) {
+  const policyId = networkRepresentationPolicyId(policy);
+  const networkState = deployState.networkRepresentationStates?.[policyId];
+  if (!policy?._policyEngineV2?.safeExact) {
+    return `<div class="drawer-section drawer-section-network-representation">
+      <div class="drawer-section-title">Représentation réseau</div>
+      <div class="network-representation-empty" role="status">Disponible uniquement pour une policy Policy Engine V2 exacte.</div>
+    </div>`;
+  }
+  if (!networkState || networkState.status === 'loading') {
+    return `<div class="drawer-section drawer-section-network-representation">
+      <div class="drawer-section-title">Représentation réseau</div>
+      <div class="network-representation-loading" role="status" aria-live="polite"><span></span>Calcul des objets, groupes et subnets candidats…</div>
+    </div>`;
+  }
+  if (networkState.status === 'error') {
+    return `<div class="drawer-section drawer-section-network-representation">
+      <div class="drawer-section-title">Représentation réseau</div>
+      <div class="alert alert-error" role="alert">${escHtml(networkState.error || 'Impossible de charger les suggestions.')}</div>
+      <button class="btn-sm network-representation-retry">Réessayer</button>
+    </div>`;
+  }
+  const data = networkState.data;
+  const currentRows = ['source', 'destination'].map(side => {
+    const resolution = data?.[side];
+    const candidate = resolution?.candidates?.find(item => item.candidateId === resolution.currentCandidateId);
+    return `<div><small>${side === 'source' ? 'Source' : 'Destination'}</small><strong>${escHtml(networkRepresentationSummary(candidate))}</strong><span>${fmtNum(candidate?.observedIpCount)} hosts observés</span></div>`;
+  }).join('');
+  const candidateSections = ['source', 'destination'].map(side => {
+    const resolution = data?.[side];
+    const candidates = resolution?.candidates || [];
+    const visible = candidates.slice(0, 4);
+    const hidden = candidates.slice(4);
+    return `<div class="network-representation-side">
+      <h4>${side === 'source' ? 'Source' : 'Destination'}</h4>
+      ${visible.map(candidate => networkRepresentationCandidateHtml(candidate, resolution, side, networkState)).join('')}
+      ${hidden.length ? `<details class="network-representation-more"><summary>Afficher ${hidden.length} autre${hidden.length > 1 ? 's' : ''} suggestion${hidden.length > 1 ? 's' : ''}</summary>${hidden.map(candidate => networkRepresentationCandidateHtml(candidate, resolution, side, networkState)).join('')}</details>` : ''}
+    </div>`;
+  }).join('');
+  return `<div class="drawer-section drawer-section-network-representation">
+    <div class="drawer-section-title">Représentation réseau</div>
+    <div class="network-representation-current"><h4>Représentation actuelle</h4>${currentRows}</div>
+    ${networkState.actionError ? `<div class="alert alert-error" role="alert">${escHtml(networkState.actionError)}</div>` : ''}
+    ${networkRepresentationResultHtml(networkState)}
+    <div class="network-representation-suggestions"><h4>Suggestions FortiFlow</h4>${candidateSections}</div>
+    ${networkState.status === 'applying' ? '<div class="network-representation-applying" role="status" aria-live="polite">Validation UserDecision, métriques et preflight en cours…</div>' : ''}
+  </div>`;
+}
+
+async function loadPolicyNetworkRepresentations(idx, force = false) {
+  const policy = deployState.analyzed?.[idx];
+  const policyId = networkRepresentationPolicyId(policy);
+  if (!policyId || !policy?._policyEngineV2?.safeExact) return;
+  if (!deployState.networkRepresentationStates) deployState.networkRepresentationStates = Object.create(null);
+  const current = deployState.networkRepresentationStates[policyId];
+  if (!force && current && ['loading', 'ready', 'applying'].includes(current.status)) return;
+  const requestId = ++_networkRepresentationRequestSeq;
+  deployState.networkRepresentationStates[policyId] = { status: 'loading', requestId };
+  if (_drawerIdx === idx) populateDrawer(idx);
+  try {
+    const profile = deployState.policyEngineProfile || 'recommended';
+    const data = await api(`/api/policy-engine/v2/representations?profile=${encodeURIComponent(profile)}&policy_id=${encodeURIComponent(policyId)}`);
+    if (deployState.networkRepresentationStates[policyId]?.requestId !== requestId) return;
+    deployState.networkRepresentationStates[policyId] = { status: 'ready', requestId, data };
+  } catch (error) {
+    if (deployState.networkRepresentationStates[policyId]?.requestId !== requestId) return;
+    deployState.networkRepresentationStates[policyId] = { status: 'error', requestId, error: error.message };
+  }
+  if (_drawerIdx === idx) populateDrawer(idx);
+}
+
+function validateNetworkDecisionOutcome(outcome, policyId) {
+  if (!outcome || typeof outcome !== 'object'
+      || !outcome.decision || outcome.decision.status !== 'accepted'
+      || !outcome.analyzedPolicy || typeof outcome.analyzedPolicy !== 'object') {
+    throw new Error('Réponse UserDecision incomplète ou invalide.');
+  }
+  if (String(outcome.analyzedPolicy.id || '') !== String(policyId)) {
+    throw new Error('La réponse UserDecision concerne une autre policy.');
+  }
+  const metricKeys = [
+    'observedRequiredTuples', 'coveredRequiredTuples', 'missingRequiredTuples',
+    'allowedTuples', 'unexpectedAllowedTuples', 'coverageRatio', 'expansionRatio',
+  ];
+  if (!outcome.metrics || !metricKeys.every(key => Number.isFinite(outcome.metrics[key]))) {
+    throw new Error('Réponse UserDecision sans métriques de sécurité valides.');
+  }
+  if (!outcome.preflight || typeof outcome.preflight.ok !== 'boolean'
+      || !Number.isFinite(outcome.preflight.errors) || !Number.isFinite(outcome.preflight.warnings)) {
+    throw new Error('Réponse UserDecision sans preflight valide.');
+  }
+  return outcome;
+}
+
+function resolveNetworkDecisionTarget(policies, policyId, expectedPolicy) {
+  const index = Array.isArray(policies)
+    ? policies.findIndex(item => String(item?.id || '') === String(policyId))
+    : -1;
+  if (index < 0) throw new Error('La policy n’existe plus dans le contexte Déployer courant.');
+  const policy = policies[index];
+  if (expectedPolicy && policy !== expectedPolicy) {
+    throw new Error('Le contexte de la policy a changé pendant la validation UserDecision.');
+  }
+  return { index, policy };
+}
+
+async function applyPolicyNetworkRepresentation(idx, side, candidateId) {
+  const policy = deployState.analyzed?.[idx];
+  const policyId = networkRepresentationPolicyId(policy);
+  const networkState = deployState.networkRepresentationStates?.[policyId];
+  const resolution = networkState?.data?.[side];
+  const candidate = resolution?.candidates?.find(item => item.candidateId === candidateId);
+  if (!policy || !networkState || !resolution || !candidate || networkState.status === 'applying') return;
+  const expectedPolicy = policy;
+  const beforeCandidate = resolution.candidates.find(item => item.candidateId === resolution.currentCandidateId);
+  networkState.status = 'applying';
+  networkState.actionError = null;
+  populateDrawer(idx);
+  try {
+    const profile = deployState.policyEngineProfile || 'recommended';
+    const response = await fetch(`/api/policy-engine/v2/representations/decisions?session=${encodeURIComponent(state.session)}&profile=${encodeURIComponent(profile)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        policyId,
+        side,
+        candidateId,
+        resolverInputHash: resolution.resolverInputHash,
+      }),
+    });
+    const outcome = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const backendError = new Error(outcome.error || outcome.code || `HTTP ${response.status}`);
+      backendError.code = outcome.code || null;
+      throw backendError;
+    }
+    validateNetworkDecisionOutcome(outcome, policyId);
+    if (deployState.networkRepresentationStates?.[policyId] !== networkState) {
+      throw new Error('Le contexte Déployer a été remplacé pendant la validation UserDecision.');
+    }
+    const target = resolveNetworkDecisionTarget(
+      deployState.analyzed, policyId, expectedPolicy,
+    );
+    const currentPolicy = target.policy;
+    const preservedKeys = ['_checked', '_disabled', '_policyName', '_nat', '_action', '_log', '_tags', '_secProfiles', '_srcintf', '_dstintf', '_srcIfaceSource', '_dstIfaceSource'];
+    const preserved = Object.fromEntries(preservedKeys
+      .filter(key => Object.prototype.hasOwnProperty.call(currentPolicy, key))
+      .map(key => [key, currentPolicy[key]]));
+    deployState.analyzed[target.index] = { ...currentPolicy, ...outcome.analyzedPolicy, ...preserved };
+    networkState.status = 'ready';
+    networkState.outcome = outcome;
+    networkState.beforeCandidate = beforeCandidate;
+    networkState.selectedCandidate = candidate;
+    networkState.selectedSide = side;
+    resolution.currentCandidateId = candidateId;
+    syncRowStatus(target.index);
+    renderDeployPolicies(filterDeployPolicies(), false);
+  } catch (error) {
+    if (deployState.networkRepresentationStates?.[policyId] === networkState) {
+      if (error.code === 'STALE_DECISION_CONTEXT') {
+        networkState.status = 'error';
+        networkState.error = `${error.message} Recalculez les suggestions.`;
+      } else {
+        networkState.status = 'ready';
+        networkState.actionError = error.message;
+      }
+    }
+  }
+  const drawerPolicyId = networkRepresentationPolicyId(deployState.analyzed?.[_drawerIdx]);
+  if (drawerPolicyId === policyId) populateDrawer(_drawerIdx);
 }
 
 function populateDrawer(idx) {
@@ -3957,6 +4284,7 @@ function populateDrawer(idx) {
         <button class="btn-sm" onclick="filterFlowsByPolicy(${idx})" style="width:100%;justify-content:center">→ Voir les flux</button>
       </div>
     </div>
+    ${buildPolicyNetworkRepresentationHtml(p)}
     ${srcSection}
     ${dstSection}
     ${buildPolicyAffinityHtml(p)}
@@ -4429,6 +4757,7 @@ async function deploy() {
       if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
       if (!deployState.dynRouteStatus) deployState.dynRouteStatus = {};
       deployState.dynRouteStatus[proto] = { added: data.added, total: data.total };
+      resetNetworkRepresentationStates();
       // Re-fetch interfaces : la table injectée peut avoir corrigé isWan/LAN
       if (proto === 'all') {
         const ir = await fetch(`/api/deploy/interfaces?session=${state.session}`);
@@ -4452,6 +4781,7 @@ async function deploy() {
 
   // Reload conf
   el('btn-reload-conf')?.addEventListener('click', () => {
+    resetNetworkRepresentationStates();
     deployState.fortiConfig = null;
     deployState.interfaces  = null;
     deployState.analyzed    = null;
@@ -4470,6 +4800,7 @@ async function deploy() {
       });
       const data = await r.json();
       if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+      resetNetworkRepresentationStates();
       deployState.fortiConfig = data;
       const ir = await fetch(`/api/deploy/interfaces?session=${state.session}`);
       if (ir.ok) deployState.interfaces = await ir.json();
@@ -5014,6 +5345,7 @@ async function uploadConf(file) {
       alert('Erreur upload : ' + msg);
       return;
     }
+    resetNetworkRepresentationStates();
     deployState.fortiConfig = await r.json();
 
     // Load interfaces
@@ -6656,6 +6988,7 @@ function applyMerge(scope, strategy) {
 // ─── Policy analysis ──────────────────────────────────────────────────────────
 
 async function analyzeDeployPolicies() {
+  resetNetworkRepresentationStates();
   // Show loading state
   const body = el('deploy-policy-body');
   const btn  = el('btn-analyze');
@@ -8658,6 +8991,7 @@ el('btn-clear-session')?.addEventListener('click', () => {
     fetch(`/api/session/${state.session}`, { method: 'DELETE' }).catch(() => {});
   }
   state.session = null;
+  resetNetworkRepresentationStates();
   state.stats   = null;
   state.meta    = null;
   el('sidebar-session').style.display = 'none';

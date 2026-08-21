@@ -246,6 +246,18 @@ Hash périmé refusé                           409
 
 Le finding immutabilité HIGH est clos. Le passage UI reste cependant bloqué par un manque d'évidence distinct : la configuration AVR réelle correspondante contient zéro groupe d'adresses et ne permet pas de tester `existing-group` sur télémétrie réelle.
 
+### Intégration UX dans Déployer
+
+La représentation réseau est intégrée au drawer existant de chaque policy V2, immédiatement après la section Général. Elle ne crée ni page, ni dashboard, ni workflow parallèle.
+
+Le drawer charge les candidates source/destination via l'endpoint de lecture, puis affiche : représentation actuelle, origine, objets/CIDR, hosts observés, représentation proposée, coverage, expansion, missing, unexpected et justification. Les propositions exactes offrent `Conserver` ou `Utiliser cette représentation`; une généralisation mesurée reste visible mais désactivée.
+
+Une action appelle exclusivement le workflow `UserDecision`. La policy du workflow de génération courant n'est remplacée par `outcome.analyzedPolicy` qu'après réponse backend réussie. Le drawer affiche alors Avant/Après, objets réutilisés/créés, métriques finales et statut preflight. Pour éviter une composition trompeuse non supportée par le backend actuel, une décision validée sur un côté verrouille les actions de l'autre côté jusqu'à une nouvelle analyse.
+
+Smoke Chromium isolé sur le slice AVR réel : 17 policies, 4 candidates dans la policy contrôlée, un POST UserDecision, résultat Avant/Après et preflight rendus, aucune erreur console et aucun appel de génération CLI. Les listes volumineuses d'objets sont bornées visuellement avec un compteur résiduel.
+
+La réconciliation client après le POST est fail-closed : le JSON 2xx doit contenir une décision acceptée, la même policy, les métriques complètes et un preflight valide. Après l'attente réseau, la policy est retrouvée par ID et doit être la même référence de contexte ; l'état candidates doit également être encore l'état courant. Une suppression, un réordonnancement, une nouvelle analyse ou un contexte remplacé ne peut donc pas appliquer l'outcome à une autre policy. Les candidates sont invalidées lors des changements de session, workspace, configuration, VDOM, routage ou analyse. Ces gardes sont couvertes par des tests exécutables ; suite complète `160/160` et smoke Chromium AVR post-correction vert.
+
 Smoke end-to-end Phase 4 sur image candidate, session synthétique isolée et redémarrage réel du conteneur :
 
 ```text
