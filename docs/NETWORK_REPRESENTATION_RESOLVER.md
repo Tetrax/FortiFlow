@@ -226,6 +226,24 @@ Le POST exige `policyId`, `side`, `candidateId` et `resolverInputHash`, retourne
 
 Le workflow ne persiste jamais une décision refusée pour hash périmé, candidat absent, ambiguïté ou expansion. Il ne modifie pas la policy source et n'appelle jamais `generateConfig`.
 
+Smoke end-to-end Phase 4 sur image candidate, session synthétique isolée et redémarrage réel du conteneur :
+
+```text
+POST décision objet exact               HTTP 201
+GET décision persistée                  HTTP 200 / valid=true
+Décision après redémarrage conteneur     HTTP 200 / accepted
+Coverage / Missing / Unexpected          100 % / 0 / 0
+Expansion                               0 %
+Preflight                               ok
+generationEligible                      true
+POST CIDR sparse                        HTTP 422
+Unexpected CIDR refusé                  254
+Policy et métriques moteur modifiées    non
+Appel generateConfig                    aucun
+```
+
+Le seul workspace réel encore présent localement contient 1 439 flows, mais aucune configuration FortiGate et aucun flow V2 déployable restaurable (`0` policy). Il ne permet donc pas une validation réelle du workflow décisionnel. Aucun chiffre réel n'est inventé ; la validation sur dataset réel + configuration reste un gate avant UI.
+
 ## Tests Phase 2
 
 La suite dédiée couvre :
