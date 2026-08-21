@@ -1382,8 +1382,10 @@ app.get('/api/export/workspace', (req, res) => {
   const s = requireSession(req, res);
   if (!s) return;
   if (!s.data || s.status !== 'ready') return res.status(409).json({ error: 'Session non prête' });
-  const consistency = assertConfigTelemetry(s, s.fortiConfig, res);
-  if (!consistency.ok) return;
+  if (s.fortiConfig) {
+    const consistency = assertConfigTelemetry(s, s.fortiConfig, res);
+    if (!consistency.ok) return;
+  }
 
   // Si les flows ont été libérés en mémoire (après chargement de la config FortiGate),
   // on les récupère depuis le cache disque qui a été écrit avant le free.
@@ -1450,8 +1452,10 @@ app.get('/api/workspaces', (req, res) => {
 app.post('/api/workspaces', express.json({ limit: '10kb' }), async (req, res) => {
   const s = requireSession(req, res);
   if (!s) return;
-  const consistency = assertConfigTelemetry(s, s.fortiConfig, res);
-  if (!consistency.ok) return;
+  if (s.fortiConfig) {
+    const consistency = assertConfigTelemetry(s, s.fortiConfig, res);
+    if (!consistency.ok) return;
+  }
   const zlib = require('zlib');
   const name = (req.body?.name || '').trim().slice(0, 80) || 'Sans nom';
 

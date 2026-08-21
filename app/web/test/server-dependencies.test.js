@@ -84,6 +84,16 @@ test('les chemins policy-engine, preflight, génération et workspace revalident
   }
 });
 
+test('la sauvegarde et l’export workspace restent possibles avant le chargement FortiGate', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  for (const marker of ["app.get('/api/export/workspace'", "app.post('/api/workspaces'"]) {
+    const start = source.indexOf(marker);
+    const end = source.indexOf('\n});', start);
+    const route = source.slice(start, end >= 0 ? end : source.length);
+    assert.match(route, /if \(s\.fortiConfig\)[\s\S]*assertConfigTelemetry/);
+  }
+});
+
 test('le serveur valide les sélections d’adresse avant le preflight et la génération', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(source, /validatePolicyAddressSelections/);

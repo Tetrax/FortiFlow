@@ -179,6 +179,41 @@ test('une valeur vdomSelectionRequired=false ne peut pas masquer une sélection 
   assertMismatch(result);
 });
 
+test('le premier VDOM parsé sans sélection explicite reste non déployable', () => {
+  const result = consistency.validateConfigTelemetryConsistency(
+    [flow({ vdom: '' })],
+    config({
+      identity: {
+        hostname: 'FW-AVR-01',
+        devid: 'FGT-AVR-01',
+        selectedVdom: 'root',
+        vdomList: ['root', 'tenant-b'],
+        vdomSelectionExplicit: false,
+        vdomSelectionRequired: true,
+      },
+      selectedVdom: 'root',
+    }),
+  );
+  assertMismatch(result);
+});
+
+test('refuse un selectedVdom de workspace absent de vdomList', () => {
+  const result = consistency.validateConfigTelemetryConsistency(
+    [flow({ vdom: '' })],
+    config({
+      identity: {
+        hostname: 'FW-AVR-01',
+        devid: 'FGT-AVR-01',
+        selectedVdom: 'missing',
+        vdomList: ['root', 'tenant-b'],
+        vdomSelectionExplicit: true,
+      },
+      selectedVdom: 'missing',
+    }),
+  );
+  assertMismatch(result);
+});
+
 test('refuse une capture sans aucune preuve positive de config ou de réseau', () => {
   const result = consistency.validateConfigTelemetryConsistency(
     [flow({ devname: '', devid: '', vdom: '' })],

@@ -29,6 +29,15 @@ function normalizeConfigIdentity(fortiConfig = {}) {
   const selectedVdom = firstDefined(configured, ['selectedVdom', 'vdom'])
     ?? firstDefined(fortiConfig, ['selectedVdom', 'vdom'])
     ?? null;
+  const selectedVdomText = text(selectedVdom) || null;
+  const explicitVdomMarker = firstDefined(configured, ['vdomSelectionExplicit'])
+    ?? firstDefined(fortiConfig, ['vdomSelectionExplicit']);
+  const vdomSelectionExplicit = explicitVdomMarker === undefined
+    ? Boolean(selectedVdomText)
+    : Boolean(explicitVdomMarker);
+  const vdomSelectionInvalid = Boolean(
+    selectedVdomText && vdomList.length > 0 && !vdomList.includes(selectedVdomText),
+  );
   const ha = {
     ...(fortiConfig.ha && typeof fortiConfig.ha === 'object' ? fortiConfig.ha : {}),
     ...(configured.ha && typeof configured.ha === 'object' ? configured.ha : {}),
@@ -60,15 +69,18 @@ function normalizeConfigIdentity(fortiConfig = {}) {
       || configured.selectedDevid
       || fortiConfig.selectedDeviceId,
   ) || null;
-  const vdomSelectionRequired = vdomList.length > 1 && !text(selectedVdom);
+  const vdomSelectionRequired = vdomList.length > 1
+    && (!vdomSelectionExplicit || !selectedVdomText || vdomSelectionInvalid);
 
   return {
     hostname: text(configured.hostname ?? fortiConfig.hostname) || null,
     devid: text(configured.devid ?? configured.deviceId ?? fortiConfig.devid ?? fortiConfig.deviceId) || null,
     serial: text(configured.serial ?? fortiConfig.serial) || null,
-    vdom: text(selectedVdom) || null,
-    selectedVdom: text(selectedVdom) || null,
+    vdom: selectedVdomText,
+    selectedVdom: selectedVdomText,
     vdomList,
+    vdomSelectionExplicit,
+    vdomSelectionInvalid,
     vdomSelectionRequired,
     ha: {
       enabled: Boolean(ha.enabled || authorizedDeviceIds.length > 1 || selectedDeviceId),
@@ -283,6 +295,9 @@ function validateConfigTelemetryConsistency(flows, fortiConfig = {}) {
     warn('DEVICE_SERIAL_UNKNOWN', 'Serial/devid absent d’une des sources : aucune identité inventée.');
   }
 
+  if (configIdentity.vdomSelectionInvalid) {
+    mismatch(`VDOM sélectionné absent de la configuration: ${configIdentity.selectedVdom}`);
+  }
   if (configIdentity.vdomSelectionRequired) {
     mismatch(`sélection VDOM absente parmi: ${configIdentity.vdomList.join(', ')}`);
   }
