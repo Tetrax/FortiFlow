@@ -137,7 +137,40 @@ Pour un candidat destination :
 sources × representedDestinations × serviceKeys
 ```
 
-Le resolver ne présente pas ces métriques comme un preflight final. L'intégration future devra reconstruire une copie de policy, appeler `evaluatePolicies()`, puis exécuter le preflight serveur avant toute persistance ou génération.
+Le resolver ne présente pas ces métriques comme un preflight final. Une future phase `UserDecision` devra reconstruire une copie de policy, appeler `evaluatePolicies()`, puis exécuter le preflight serveur avant toute persistance ou génération.
+
+## Intégration backend Phase 3
+
+La façade pure `app/web/lib/network-representation-integration.js` reçoit un résultat Policy Engine V2, une configuration FortiGate et un `policyId`. Elle :
+
+1. retrouve uniquement une policy V2 portant `safeExact=true` ;
+2. appelle le resolver séparément pour `source` et `destination` ;
+3. valide les deux `ResolutionResult` ;
+4. projette une réponse bornée sans les `representedIps` développées ;
+5. ne modifie ni la policy ni les métriques du moteur.
+
+Endpoint en lecture seule :
+
+```text
+GET /api/policy-engine/v2/representations
+  ?session=<session>
+  &profile=recommended
+  &traffic_scope=<scope>
+  &policy_id=P-00001
+```
+
+La réponse expose exclusivement :
+
+- candidates source et destination ;
+- représentation, origine et objets concernés ;
+- métriques preview ;
+- `reasonCodes` et explication ;
+- `safetyState = { eligibility, autoApplicable }` ;
+- hashes resolver/config/scope et diagnostics nécessaires à l'invalidation future.
+
+Elle n'expose aucun `UserDecision`, `finalMetrics` ni policy modifiée. Elle n'appelle jamais `evaluatePolicies`, `analyzePolicies`, `preflightValidation` ou `generateConfig`.
+
+Le `resolverInputHash` inclut la policy exacte, le côté résolu, la configuration technique, la version resolver et la clé Traffic Scope. Un changement de configuration ou de scope invalide donc les deux résolutions.
 
 ## Tests Phase 2
 
@@ -170,12 +203,10 @@ Missing / Unexpected / Expansion   0 / 0 / 0 %
 
 `autoApplicable` reste une propriété mathématique du candidat ; aucune des suggestions ci-dessus n'a été appliquée au moteur.
 
-## Hors scope Phase 2
+## Hors scope Phase 3
 
 Non implémentés volontairement :
 
-- import du resolver dans Policy Engine V2 ;
-- endpoint API ;
 - persistance `UserDecision` ;
 - application d'un candidat ;
 - recalcul final via `evaluatePolicies()` ;

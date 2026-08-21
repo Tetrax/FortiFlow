@@ -712,11 +712,14 @@ function resolveNetworkRepresentations(inputPolicy, fortiConfig = {}, options = 
       || (a.representedCidrs[0] || '').localeCompare(b.representedCidrs[0] || '')
       || a.candidateId.localeCompare(b.candidateId));
   const recommended = candidates.find(candidate => candidate.autoApplicable) || currentRepresentation;
+  const configuration = configurationIdentity(fortiConfig, options);
+  const trafficScopeKey = String(inputPolicy?._policyEngineV2?.trafficScopeKey || '');
   const technicalInput = {
     policyFingerprint: policy.fingerprint,
     side,
     resolverVersion: NETWORK_RESOLVER_VERSION,
-    configuration: configurationIdentity(fortiConfig, options),
+    trafficScopeKey,
+    configuration,
   };
   return {
     schemaVersion: NETWORK_REPRESENTATION_SCHEMA_VERSION,
@@ -737,8 +740,8 @@ function resolveNetworkRepresentations(inputPolicy, fortiConfig = {}, options = 
     blockers: exactGroup.blockers,
     trace: {
       flowAtomIds: policy.atomIds,
-      configFingerprint: stableId('CFG', technicalInput),
-      trafficScopeKey: String(inputPolicy?._policyEngineV2?.trafficScopeKey || ''),
+      configFingerprint: stableId('CFG', configuration),
+      trafficScopeKey,
     },
   };
 }

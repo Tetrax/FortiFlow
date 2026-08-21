@@ -19,6 +19,7 @@ const { parseFortiConfig, analyzePolicies,
 const { buildHostPairCoverage, buildPolicyOrderIssues }  = require('./lib/coverage');
 const { getCaptureDeploymentBlockers }                    = require('./lib/deploy-safety');
 const { parseTrafficScopeQuery, trafficScopeKey }          = require('./lib/traffic-scope');
+const { buildPolicyRepresentationCandidates }              = require('./lib/network-representation-integration');
 
 const app   = express();
 const TRUST_PROXY = (process.env.FORTIFLOW_TRUST_PROXY || '').trim();
@@ -684,6 +685,38 @@ app.get('/api/hosts', (req, res) => {
     }));
 
   res.json(result);
+});
+
+// GET /api/policy-engine/v2/representations — read-only network representation candidates
+app.get('/api/policy-engine/v2/representations', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const s = requireSession(req, res);
+  if (!s) return;
+  if (!Array.isArray(s.data?.flows)) {
+    return res.status(410).json({ error: 'Flows indisponibles pour Policy Engine V2' });
+  }
+  const profile = String(req.query.profile || 'recommended');
+  if (!['recommended', 'strict', 'synthetic', 'expert'].includes(profile)) {
+    return res.status(400).json({ error: 'Profil Policy Engine V2 invalide' });
+  }
+  if (!req.query.policy_id || Array.isArray(req.query.policy_id)) {
+    return res.status(400).json({ error: 'policy_id requis' });
+  }
+  const policyId = String(req.query.policy_id);
+  let trafficScope;
+  try {
+    trafficScope = parseTrafficScopeQuery(req.query);
+  } catch (error) {
+    return res.status(400).json({ error: error.message });
+  }
+  try {
+    const result = getPolicyEngineResult(s, profile, s.fortiConfig || {}, trafficScope);
+    const candidates = buildPolicyRepresentationCandidates(result, s.fortiConfig || {}, policyId);
+    return res.json(candidates);
+  } catch (error) {
+    const status = /^Policy V2 introuvable/.test(error.message) ? 404 : 422;
+    return res.status(status).json({ error: error.message });
+  }
 });
 
 // GET /api/policy-engine/v2 — safe-by-default canonical policy generation

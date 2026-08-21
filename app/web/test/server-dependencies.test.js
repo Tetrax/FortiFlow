@@ -42,6 +42,17 @@ test('Policy Engine V2 API parses Traffic Scope, keys the cache, and returns sco
   assert.match(source, /trafficScope:\s*result\.trafficScope/);
 });
 
+test('server exposes a read-only network representation candidates endpoint', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(source, /require\(['"]\.\/lib\/network-representation-integration['"]\)/);
+  assert.match(source, /app\.get\(['"]\/api\/policy-engine\/v2\/representations['"]/);
+  assert.match(source, /buildPolicyRepresentationCandidates\(result,\s*s\.fortiConfig\s*\|\|\s*\{\},\s*policyId\)/);
+  const routeStart = source.indexOf("app.get('/api/policy-engine/v2/representations'");
+  const routeEnd = source.indexOf("app.get('/api/policy-engine/v2'", routeStart);
+  const routeSource = source.slice(routeStart, routeEnd);
+  assert.doesNotMatch(routeSource, /preflightValidation|generateConfig|analyzePolicies|UserDecision/);
+});
+
 test('deployment preflight receives the complete V2 atom set after user selection', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   const wiredCalls = source.match(/preflightValidation\([^\n]+requiredPolicyEngineAtoms\)/g) || [];
