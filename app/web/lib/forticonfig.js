@@ -717,7 +717,7 @@ function parseFortiConfig(text, selectedVdom = null) {
     profileGroup: Object.keys(_sections['firewall profile-group'] || {}),
   };
 
-  return { addresses, addressGroups, customServices, serviceGroups, interfaces, zones, sdwanMembers, sdwanZoneNames, sdwanEnabled, sdwanIntfName, vdomList, selectedVdom: activeVdom, hasVdom: vdomList.length > 0, identity, vdomSelectionRequired: identity.vdomSelectionRequired, staticRoutes, fullRoutes, hasBgp, hasOspf, hasNonDefaultVrf, hasPolicyRoutes, hasSdwanRules, existingPolicies, securityProfiles };
+  return { addresses, addressGroups, customServices, serviceGroups, interfaces, zones, sdwanMembers, sdwanZoneNames, sdwanEnabled, sdwanIntfName, vdomList, selectedVdom: activeVdom, hasVdom: vdomList.length > 0, identity, hostname: identity.hostname, devid: identity.devid, serial: identity.serial, vdomSelectionRequired: identity.vdomSelectionRequired, staticRoutes, fullRoutes, hasBgp, hasOspf, hasNonDefaultVrf, hasPolicyRoutes, hasSdwanRules, existingPolicies, securityProfiles };
 }
 
 // ─── Static routes + BGP parser ──────────────────────────────────────────────

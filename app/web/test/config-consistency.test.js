@@ -124,5 +124,6 @@ config system global
 end
 `);
   assert.equal(parsed.identity.hostname, 'FW-AVR-01');
+  assert.equal(parsed.hostname, 'FW-AVR-01');
   assert.equal(parsed.identity.devid, null);
 });
