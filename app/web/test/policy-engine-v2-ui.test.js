@@ -36,3 +36,21 @@ test('Deploy exposes source optimization policy counts and safety metrics', () =
   assert.ok(appSource.includes('Après optimisation'));
   assert.ok(appSource.includes('sourceObjectsReused'));
 });
+
+test('le drawer historique propose uniquement les choix d’adresse simples', () => {
+  for (const label of ['Utiliser cet objet', 'Créer un subnet', 'Créer les hôtes /32', 'CIDR', 'hôtes observés', 'IP non observées', 'Confirmer']) {
+    assert.ok(appSource.includes(label), `libellé absent: ${label}`);
+  }
+  assert.match(appSource, /function buildSimpleAddressChoiceHtml\(/);
+  assert.ok(appSource.includes('addressSelections'));
+  assert.match(styleSource, /\.address-choice/);
+  for (const internalTerm of ['NetworkCandidate', 'UserDecision', 'networkDecisions']) {
+    assert.equal(appSource.includes(internalTerm), false, `terme interne exposé: ${internalTerm}`);
+  }
+});
+
+test('un mismatch de cohérence reste bloquant avant l’étape Règles', () => {
+  assert.ok(appSource.includes('CONFIG_TELEMETRY_MISMATCH'));
+  assert.ok(appSource.includes('addressSelectionMismatch'));
+  assert.ok(appSource.includes('Aucune règle ne peut être construite'));
+});

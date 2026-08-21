@@ -86,8 +86,27 @@ function badgeHtml(type) {
 async function api(path) {
   const sep = path.includes('?') ? '&' : '?';
   const r   = await fetch(`${path}${sep}session=${state.session}`);
-  if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || r.statusText); }
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}));
+    const error = new Error(e.error || r.statusText);
+    error.code = e.code;
+    error.details = e;
+    throw error;
+  }
   return r.json();
+}
+
+function setAddressSelectionMismatch(error) {
+  const code = error?.code || error?.details?.code;
+  const message = error?.message || error?.details?.error || '';
+  if (code !== 'CONFIG_TELEMETRY_MISMATCH' && code !== 'ADDRESS_SELECTION_INVALID'
+      && !/télémétrie.*configuration FortiGate|choix d’adresse invalide/i.test(message)) return false;
+  deployState.addressSelectionMismatch = {
+    code: code || 'CONFIG_TELEMETRY_MISMATCH',
+    message: message || 'La télémétrie et la configuration FortiGate ne correspondent pas.',
+  };
+  renderDeployPolicies([]);
+  return true;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -2154,6 +2173,7 @@ const deployState = {
   hostPairCoverage: {},            // #3: "srcip|dstip" → { verdict, ruleIds, blockIds }
   coverageAvailable: false,        // #3: une config FortiGate existante est-elle chargée ?
   coverageFilter: 'all',           // #3: 'all' | 'new' — filtrer le tableau
+  addressSelectionMismatch: null, // cohérence config/télémétrie ou sélection stateless
   riskPanelOpen: false,
   sortCol:       null,             // active sort column key
   sortDir:       'desc',           // 'asc' | 'desc'
@@ -2172,6 +2192,9 @@ function serializeAnalyzed(analyzed) {
     if (p._selectedSvcKeys  instanceof Set) out._selectedSvcKeys  = [...p._selectedSvcKeys];
     if (p._excludedSrcHosts instanceof Set) out._excludedSrcHosts = [...p._excludedSrcHosts];
     if (p._excludedDstHosts instanceof Set) out._excludedDstHosts = [...p._excludedDstHosts];
+    // Address choices are request-scoped confirmations, never durable workspace truth.
+    delete out.addressSelections;
+    delete out._addressSelections;
     return out;
   });
 }
@@ -2179,6 +2202,8 @@ function deserializeAnalyzed(analyzed) {
   if (!analyzed) return analyzed;
   return analyzed.map(p => {
     const out = { ...p };
+    delete out.addressSelections;
+    delete out._addressSelections;
     if (Array.isArray(p._selectedSvcKeys))  out._selectedSvcKeys  = new Set(p._selectedSvcKeys);
     if (Array.isArray(p._excludedSrcHosts)) out._excludedSrcHosts = new Set(p._excludedSrcHosts);
     if (Array.isArray(p._excludedDstHosts)) out._excludedDstHosts = new Set(p._excludedDstHosts);
@@ -2954,7 +2979,7 @@ function _snapDrawer(p) {
   const snap = {};
   const keys = ['_srcAddrName','_dstAddrName','_policyName','_srcMode','_dstMode',
     '_use32Src','_use32Dst','_srcHostNames','_dstHostNames','_useSrcGroup','_useDstGroup',
-    '_srcintf','_dstintf','_nat','_action','_log','_mergeMode','_mergedSvcName','_mergeRange'];
+    'addressSelections', '_srcintf','_dstintf','_nat','_action','_log','_mergeMode','_mergedSvcName','_mergeRange'];
   for (const k of keys) {
     if (!(k in p)) continue;
     const v = p[k];
@@ -2969,6 +2994,91 @@ function _snapDrawer(p) {
   snap._excludedDstHosts  = p._excludedDstHosts  ? new Set(p._excludedDstHosts) : undefined;
   if (_drawerHistory.length >= DRAWER_HISTORY_MAX) _drawerHistory.shift();
   _drawerHistory.push({ idx: _drawerIdx, snap });
+}
+
+function simpleChoiceObservedIps(choice) {
+  if (!choice) return [];
+  return [...new Set([
+    ...(choice.existingHosts || []).map(host => host.ip),
+    ...(choice.missingHosts || []),
+  ])].sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+}
+
+function simpleSelectionMode(selection) {
+  return String(selection?.mode || selection?.type || '').trim().toLowerCase().replace(/[_ ]/g, '-');
+}
+
+function applySimpleAddressSelection(policy, side, selection) {
+  if (!policy || !selection) return;
+  if (!policy.addressSelections) policy.addressSelections = {};
+  policy.addressSelections[side] = { ...selection };
+  const prefix = side === 'source' ? 'src' : 'dst';
+  const mode = simpleSelectionMode(selection);
+  const choice = policy.analysis?.addressChoices?.[side];
+  if (!policy.analysis) policy.analysis = {};
+  if (!policy.analysis[`${prefix}Addr`]) policy.analysis[`${prefix}Addr`] = {};
+  if (mode === 'existing-object' || mode === 'object' || mode === 'existing') {
+    const object = choice?.existingObjects?.find(item => item.name === selection.objectName);
+    if (!object) return;
+    policy[`_${prefix}AddrName`] = object.name;
+    delete policy[`_${prefix}CidrOverride`];
+    policy[`_${prefix}Mode`] = 'subnet';
+    policy[`_use32${prefix === 'src' ? 'Src' : 'Dst'}`] = false;
+    policy.analysis[`${prefix}Addr`] = {
+      ...policy.analysis[`${prefix}Addr`], found: true, name: object.name, cidr: object.cidr, source: 'config',
+    };
+  } else if (mode === 'subnet') {
+    policy[`_${prefix}CidrOverride`] = selection.cidr;
+    policy[`_${prefix}Mode`] = 'subnet';
+    policy[`_use32${prefix === 'src' ? 'Src' : 'Dst'}`] = false;
+    policy.analysis[`${prefix}Addr`] = {
+      ...policy.analysis[`${prefix}Addr`], found: false, cidr: selection.cidr,
+    };
+  } else if (mode === 'hosts' || mode === 'host') {
+    delete policy[`_${prefix}CidrOverride`];
+    policy[`_${prefix}Mode`] = 'hosts';
+    policy[`_use32${prefix === 'src' ? 'Src' : 'Dst'}`] = true;
+  }
+}
+
+function buildSimpleAddressChoiceHtml(policy, side) {
+  const choice = policy?.analysis?.addressChoices?.[side];
+  if (!choice) return '';
+  const label = side === 'source' ? 'Source' : 'Destination';
+  const selection = policy.addressSelections?.[side] || null;
+  const selectedMode = simpleSelectionMode(selection);
+  const observedIps = simpleChoiceObservedIps(choice);
+  const observedCount = choice.observedHostCount || observedIps.length;
+  const objectRows = (choice.existingObjects || []).map(object => {
+    const selected = selectedMode === 'existing-object' && selection.objectName === object.name && selection.confirmed === true;
+    return `<div class="address-choice-object ${selected ? 'selected' : ''}">
+      <span class="address-choice-cidr"><strong>${escHtml(object.name)}</strong> <code>${escHtml(object.cidr)}</code><small>${fmtNum(observedCount)} hôtes observés · ${fmtNum(object.unobservedIpCount)} IP non observées</small></span>
+      <button type="button" class="btn-sm address-choice-action" data-address-side="${side}" data-address-mode="existing-object" data-address-name="${escHtml(object.name)}">${selected ? '✓ Utilisé' : 'Utiliser cet objet'}</button>
+    </div>`;
+  }).join('');
+  let body;
+  if (objectRows) {
+    body = objectRows;
+  } else {
+    const calculated = choice.calculatedSubnet;
+    const calculatedRow = calculated
+      ? `<div class="address-choice-calculated"><code>${escHtml(calculated.cidr)}</code><span>${fmtNum(observedCount)} hôtes observés · ${fmtNum(calculated.unobservedIpCount)} IP non observées</span></div>`
+      : '';
+    const pending = selection && selection.confirmed !== true;
+    const selectedSummary = pending
+      ? `<div class="address-choice-pending">Choix : <strong>${selectedMode === 'hosts' ? 'hôtes /32' : `subnet ${escHtml(selection.cidr || '')}`}</strong> — confirmez pour continuer.</div>
+         <button type="button" class="btn-sm btn-accent address-choice-action" data-address-side="${side}" data-address-mode="${selectedMode}" data-address-action="confirm">Confirmer</button>`
+      : '';
+    body = `${calculatedRow}
+      <div class="address-choice-actions">
+        <button type="button" class="btn-sm address-choice-action" data-address-side="${side}" data-address-mode="subnet" data-address-cidr="${escHtml(calculated?.cidr || '')}">Créer un subnet</button>
+        <button type="button" class="btn-sm address-choice-action" data-address-side="${side}" data-address-mode="hosts">Créer les hôtes /32</button>
+      </div>${selectedSummary}`;
+  }
+  return `<div class="address-choice" data-address-side="${side}">
+    <div class="address-choice-title">Choix d’adresse ${label}<span>${fmtNum(observedCount)} hôtes observés</span></div>
+    ${body}
+  </div>`;
 }
 
 function mountDrawer() {
@@ -3099,6 +3209,40 @@ function mountDrawer() {
       const hint = document.getElementById('drawer-undo-hint');
       if (hint) hint.style.display = '';
     };
+    const addressAction = e.target.closest('.address-choice-action');
+    if (addressAction) {
+      _snapAndShow();
+      const side = addressAction.dataset.addressSide;
+      const mode = addressAction.dataset.addressMode;
+      const choice = p.analysis?.addressChoices?.[side];
+      let selection = p.addressSelections?.[side] || {};
+      if (addressAction.dataset.addressAction === 'confirm') {
+        selection = { ...selection, confirmed: true };
+      } else if (mode === 'existing-object') {
+        selection = {
+          mode,
+          objectName: addressAction.dataset.addressName,
+          confirmed: true,
+        };
+      } else if (mode === 'subnet') {
+        selection = {
+          mode,
+          cidr: addressAction.dataset.addressCidr || choice?.calculatedSubnet?.cidr,
+          confirmed: false,
+        };
+      } else if (mode === 'hosts') {
+        selection = {
+          mode,
+          ips: simpleChoiceObservedIps(choice),
+          confirmed: false,
+        };
+      }
+      applySimpleAddressSelection(p, side, selection);
+      populateDrawer(_drawerIdx);
+      syncRowStatus(_drawerIdx);
+      renderDeployPolicies(filterDeployPolicies(), false);
+      return;
+    }
     // Action toggle (accept / deny)
     if (e.target.matches('.drawer-action-btn')) {
       p._action = e.target.dataset.action;
@@ -3619,6 +3763,8 @@ function populateDrawer(idx) {
   };
 
   let srcSection = '';
+  const simpleSourceChoice = buildSimpleAddressChoiceHtml(p, 'source');
+  const simpleSourceMode = Boolean(simpleSourceChoice);
   if (p._multiSrcSubnets?.length) {
     // ── Multi-src : several source subnets ──
     const srcSubs = p._multiSrcSubnets;
@@ -3652,6 +3798,7 @@ function populateDrawer(idx) {
     }).join('');
     srcSection = `<div class="drawer-section drawer-section-source">
       <div class="drawer-section-title">Sources (${srcSubs.length} subnets)</div>
+      ${simpleSourceChoice}
       ${srcSubRows}
       <div class="drawer-toggle-row" style="margin-top:8px">
         <button class="drawer-toggle-btn drawer-grp-toggle ${p._useSrcGroup ? 'active' : ''}" data-type="src">Grouper (addrgrp)</button>
@@ -3693,23 +3840,24 @@ function populateDrawer(idx) {
     }
     srcSection = `<div class="drawer-section drawer-section-source">
       <div class="drawer-section-title">Source</div>
-      <div class="drawer-field"><span class="drawer-field-label">Subnet</span><span class="drawer-field-value">${escHtml(p.srcSubnet || '')}</span></div>
-      <div class="drawer-toggle-row">
+      ${simpleSourceChoice}
+      ${!simpleSourceMode ? `<div class="drawer-field"><span class="drawer-field-label">Subnet</span><span class="drawer-field-value">${escHtml(p.srcSubnet || '')}</span></div>` : ''}
+      ${!simpleSourceMode ? `<div class="drawer-toggle-row">
         <span style="font-size:11px;color:var(--text2)">Mode :</span>
         <button class="drawer-toggle-btn drawer-mode-btn ${srcMode==='subnet'?'active':''}" data-type="src" data-mode="subnet">/24 subnet</button>
         <button class="drawer-toggle-btn drawer-mode-btn ${srcMode==='hosts'?'active':''} ${srcHosts.length<1?'disabled':''}" data-type="src" data-mode="hosts">/32 hôtes (${srcHosts.length})</button>
-      </div>
-      ${srcMode === 'subnet' ? `<div class="drawer-field">
+      </div>` : ''}
+      ${!simpleSourceMode && srcMode === 'subnet' ? `<div class="drawer-field">
         <span class="drawer-field-label">Masque</span>
         <input class="drawer-input drawer-src-cidr" value="${escHtml(p._srcCidrOverride || p.srcSubnet || '')}" placeholder="${escHtml(p.srcSubnet || '')}" style="width:140px" title="CIDR custom (ex 10.1.6.0/25) ou raccourci /25. Vide = subnet détecté.">
         <span class="drawer-mask-guard" data-type="src">${maskGuardHtml(p._srcCidrOverride || p.srcSubnet, srcHosts)}</span>
       </div>` : ''}
-      ${srcMode === 'subnet' ? `<div class="drawer-field">
+      ${!simpleSourceMode && srcMode === 'subnet' ? `<div class="drawer-field">
         <span class="drawer-field-label">Objet addr</span>
         ${srcFound ? `<span class="drawer-field-value" style="color:var(--success)" title="${escHtml(a.srcAddr?.cidr || p.srcSubnet || '')}">&#10003; ${escHtml(srcAddrName)}${badgeHtml('config')}</span>`
           : `<input class="drawer-input drawer-src-name" value="${escHtml(inputVal(srcAddrName, a.srcAddr?.suggestedName || suggestAddrNameFE(p.srcSubnet)))}" placeholder="${escHtml(srcAddrName || 'FF_...')}">${badgeHtml('auto')}`}
       </div>` : ''}
-      ${srcHostsHtml}
+      ${!simpleSourceMode ? srcHostsHtml : ''}
       ${_addrBanner('src')}
       <div class="drawer-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-srcintf">${ifOpts}</select></div>
     </div>`;
@@ -3717,6 +3865,8 @@ function populateDrawer(idx) {
 
   // Dst section — depends on multi-dst or single
   let dstSection = '';
+  const simpleDestinationChoice = buildSimpleAddressChoiceHtml(p, 'destination');
+  const simpleDestinationMode = Boolean(simpleDestinationChoice);
   if (p._isMultiDst && p._multiDstSubnets?.length) {
     const subs = p._multiDstSubnets;
     const subRows = subs.map((s, si) => {
@@ -3751,6 +3901,7 @@ function populateDrawer(idx) {
     const dstUseAllMulti = p._dstUseAll === true;
     dstSection = `<div class="drawer-section drawer-section-destination">
       <div class="drawer-section-title">Destinations (${subs.length})</div>
+      ${simpleDestinationChoice}
       ${isMultiDstWan ? `<div class="drawer-toggle-row" style="margin-bottom:8px">
         <span style="font-size:11px;color:var(--text2)">Mode :</span>
         <button class="drawer-toggle-btn drawer-dstall-btn ${!dstUseAllMulti ? 'active' : ''}" data-val="false">IPs spécifiques (${subs.length})</button>
@@ -3810,11 +3961,12 @@ function populateDrawer(idx) {
     }
     dstSection = `<div class="drawer-section drawer-section-destination">
       <div class="drawer-section-title">Destination</div>
+      ${simpleDestinationChoice}
       <div class="drawer-field">
         <span class="drawer-field-label">Target</span>
         <span class="drawer-field-value">${escHtml(p.dstTarget || '—')}</span>
       </div>
-      ${isWan ? `<div class="drawer-toggle-row">
+      ${isWan && !simpleDestinationMode ? `<div class="drawer-toggle-row">
         <span style="font-size:11px;color:var(--text2)">Mode :</span>
         <button class="drawer-toggle-btn drawer-dstall-btn ${dstUseAll ? 'active' : ''}" data-val="true">all</button>
         <button class="drawer-toggle-btn drawer-dstall-btn ${!dstUseAll ? 'active' : ''}" data-val="false">IPs spécifiques${dstHosts.length > 0 ? ` (${dstHosts.length})` : ''}</button>
@@ -3823,23 +3975,23 @@ function populateDrawer(idx) {
         <span class="drawer-field-label">Objet addr</span>
         <span class="drawer-field-value" style="color:var(--success)">&#10003; all${badgeHtml('config')}</span>
       </div>` : dstWanSpecificHtml}
-      ` : `${p.dstType === 'private' ? `<div class="drawer-toggle-row">
+      ` : `${p.dstType === 'private' && !simpleDestinationMode ? `<div class="drawer-toggle-row">
         <span style="font-size:11px;color:var(--text2)">Mode :</span>
         <button class="drawer-toggle-btn drawer-mode-btn ${dstMode==='subnet'?'active':''}" data-type="dst" data-mode="subnet">/24 subnet</button>
         <button class="drawer-toggle-btn drawer-mode-btn ${dstMode==='hosts'?'active':''} ${dstHosts.length<1?'disabled':''}" data-type="dst" data-mode="hosts">/32 hôtes (${dstHosts.length})</button>
       </div>` : ''}
-      ${dstMode === 'subnet' && p.dstType === 'private' ? `<div class="drawer-field">
+      ${!simpleDestinationMode && dstMode === 'subnet' && p.dstType === 'private' ? `<div class="drawer-field">
         <span class="drawer-field-label">Masque</span>
         <input class="drawer-input drawer-dst-cidr" value="${escHtml(p._dstCidrOverride || p.dstTarget || '')}" placeholder="${escHtml(p.dstTarget || '')}" style="width:140px" title="CIDR custom (ex 10.2.0.0/26) ou raccourci /26. Vide = subnet détecté.">
         <span class="drawer-mask-guard" data-type="dst">${maskGuardHtml(p._dstCidrOverride || p.dstTarget, dstHosts)}</span>
       </div>` : ''}
-      ${dstMode === 'subnet' ? `<div class="drawer-field">
+      ${!simpleDestinationMode && dstMode === 'subnet' ? `<div class="drawer-field">
         <span class="drawer-field-label">Objet addr</span>
         ${dstFound ? `<span class="drawer-field-value" style="color:var(--success)" title="${escHtml(a.dstAddr?.cidr || p.dstTarget || '')}">&#10003; ${escHtml(dstAddrName)}${badgeHtml('config')}</span>`
           : `<input class="drawer-input drawer-dst-name" value="${escHtml(inputVal(dstAddrName, a.dstAddr?.suggestedName || suggestAddrNameFE(p.dstTarget)))}" placeholder="${escHtml(dstAddrName || 'FF_...')}">${badgeHtml('auto')}`}
       </div>` : ''}
       `}
-      ${dstHostsHtml}
+      ${!simpleDestinationMode ? dstHostsHtml : ''}
       ${_addrBanner('dst')}
     </div>`;
   }
@@ -6656,6 +6808,7 @@ function applyMerge(scope, strategy) {
 // ─── Policy analysis ──────────────────────────────────────────────────────────
 
 async function analyzeDeployPolicies() {
+  deployState.addressSelectionMismatch = null;
   // Show loading state
   const body = el('deploy-policy-body');
   const btn  = el('btn-analyze');
@@ -6697,7 +6850,12 @@ async function analyzeDeployPolicies() {
     }
     setLoadingText(`${rawPolicies.length} policies V2 sûres — analyse FortiGate en cours…`);
     setLoadingPct(30);
-  } catch (err) { resetAnalyzeBtn(); alert(err.message); return; }
+  } catch (err) {
+    resetAnalyzeBtn();
+    if (setAddressSelectionMismatch(err)) return;
+    alert(err.message);
+    return;
+  }
   if (!rawPolicies || rawPolicies.length === 0) {
     resetAnalyzeBtn();
     const total = Number(state.stats?.totalSessions || 0);
@@ -6738,9 +6896,14 @@ async function analyzeDeployPolicies() {
     });
     setLoadingPct(80);
     if (!r.ok) {
-      const text = await r.text();
-      const msg  = (() => { try { return JSON.parse(text).error; } catch { return `HTTP ${r.status}`; } })();
-      resetAnalyzeBtn(); alert('Erreur analyse : ' + msg); return;
+      const payload = await r.json().catch(() => ({}));
+      const error = new Error(payload.error || `HTTP ${r.status}`);
+      error.code = payload.code;
+      error.details = payload;
+      resetAnalyzeBtn();
+      if (setAddressSelectionMismatch(error)) return;
+      alert('Erreur analyse : ' + error.message);
+      return;
     }
     const respData = await r.json();
     analyzed = respData.analyzed;
@@ -6753,7 +6916,12 @@ async function analyzeDeployPolicies() {
     deployState.deploymentBlockers = respData.deploymentBlockers || { unsupportedIpv6: 0, unknownActionSessions: 0, failedConnectionSessions: 0, hasExcludedTraffic: false, blocked: false };
     setLoadingPct(95);
     setLoadingText('Enrichissement des données…');
-  } catch (err) { resetAnalyzeBtn(); alert(err.message); return; }
+  } catch (err) {
+    resetAnalyzeBtn();
+    if (setAddressSelectionMismatch(err)) return;
+    alert(err.message);
+    return;
+  }
 
   const ifaces = deployState.interfaces?.interfaces || [];
   const zones  = deployState.interfaces?.zones || [];
@@ -7235,6 +7403,25 @@ function policyIdsCell(p) {
   return shown.map(id => `<span class="policy-id-badge" ${tip ? `title="${escHtml(tip)}"` : ''}>${escHtml(id)}</span>`).join(' ') + more;
 }
 
+function simpleAddressSelectionReady(policy, side) {
+  const choice = policy?.analysis?.addressChoices?.[side];
+  if (!choice) return true;
+  const selection = policy.addressSelections?.[side];
+  if (!selection || selection.confirmed !== true) return false;
+  const mode = simpleSelectionMode(selection);
+  if (choice.existingObjects?.length > 0) {
+    return mode === 'existing-object'
+      && choice.existingObjects.some(object => object.name === selection.objectName);
+  }
+  if (mode === 'subnet') return Boolean(selection.cidr);
+  if (mode === 'hosts' || mode === 'host') {
+    const selected = new Set(selection.ips || selection.hosts || []);
+    return selected.size === simpleChoiceObservedIps(choice).length
+      && simpleChoiceObservedIps(choice).every(ip => selected.has(ip));
+  }
+  return false;
+}
+
 function isPolicyComplete(p, _debug) {
   const a = p.analysis || {};
   const dbg = msg => { if (_debug) console.log('[complete]', msg, 'dstMode:', p._dstMode, '_use32Dst:', p._use32Dst, '_isMultiDst:', p._isMultiDst, 'dstHosts:', p.dstHosts, '_dstHostsFound:', p._dstHostsFound, '_dstHostNames:', p._dstHostNames, '_multiDstSubnets:', JSON.stringify(p._multiDstSubnets)); };
@@ -7242,6 +7429,8 @@ function isPolicyComplete(p, _debug) {
   // Interfaces must be explicitly selected
   if (!p._srcintf) { dbg('FAIL: no _srcintf'); return false; }
   if (!p._dstintf) { dbg('FAIL: no _dstintf'); return false; }
+  if (!simpleAddressSelectionReady(p, 'source')) { dbg('FAIL: source address choice not confirmed'); return false; }
+  if (!simpleAddressSelectionReady(p, 'destination')) { dbg('FAIL: destination address choice not confirmed'); return false; }
 
   // Helper : un nom auto-généré FF_HOST_... non modifié = incomplet
   const autoHostName = h => ffHostName(h);
@@ -8101,6 +8290,10 @@ function renderDeployPolicies(analyzed, resetPage = true) {
   // el('deploy-policy-body') est null → on abandonne au lieu de crasher sur .innerHTML.
   const body = el('deploy-policy-body');
   if (!body) return;
+  if (deployState.addressSelectionMismatch) {
+    body.innerHTML = `<div class="seg-safety-warning address-selection-mismatch" role="alert"><strong>Aucune règle ne peut être construite</strong><span>${escHtml(deployState.addressSelectionMismatch.message || deployState.addressSelectionMismatch.error || 'La télémétrie et la configuration FortiGate ne correspondent pas.')}</span></div>`;
+    return;
+  }
   analyzed = analyzed || [];   // garde: liste absente → pas de crash sur .length plus bas
   if (resetPage) deployState.page = 1;
   const v2ProfileActive = Boolean(deployState.policyEngineProfile);
@@ -8504,6 +8697,16 @@ async function generateDeployConf() {
         const proceed = await showPreflightModal(pf);
         if (!proceed) { if (btn) { btn.disabled = false; btn.textContent = '⬇ Générer config FortiGate'; } return; }
       }
+    } else {
+      const payload = await pfRes.json().catch(() => ({}));
+      const error = new Error(payload.error || `HTTP ${pfRes.status}`);
+      error.code = payload.code;
+      error.details = payload;
+      if (setAddressSelectionMismatch(error)) {
+        if (btn) { btn.disabled = false; btn.textContent = '⬇ Générer config FortiGate'; }
+        return;
+      }
+      throw error;
     }
   } catch { /* non-bloquant */ }
 
@@ -8516,7 +8719,15 @@ async function generateDeployConf() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ selectedPolicies, opts }),
     });
-    if (!r.ok) { const e = await r.json(); alert(e.error || 'Erreur génération'); return; }
+    if (!r.ok) {
+      const payload = await r.json().catch(() => ({}));
+      const error = new Error(payload.error || `HTTP ${r.status}`);
+      error.code = payload.code;
+      error.details = payload;
+      if (setAddressSelectionMismatch(error)) return;
+      alert(error.message || 'Erreur génération');
+      return;
+    }
     const { cli, existingPoliciesCli } = await r.json();
 
     deployState.generatedCli      = cli;
