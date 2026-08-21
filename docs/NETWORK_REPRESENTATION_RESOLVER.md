@@ -172,6 +172,19 @@ Elle n'expose aucun `UserDecision`, `finalMetrics` ni policy modifiée. Elle n'a
 
 Le `resolverInputHash` inclut la policy exacte, le côté résolu, la configuration technique, la version resolver et la clé Traffic Scope. Un changement de configuration ou de scope invalide donc les deux résolutions.
 
+Smoke Phase 3 sur image candidate et cache réel copié :
+
+```text
+GET Policy Engine V2                 HTTP 200
+GET representations P-00001          HTTP 200
+Candidates source / destination      3 / 2
+policy_id absent / inconnu            400 / 404
+Policies avant/après identiques      oui
+Métriques avant/après identiques     oui
+Missing / Unexpected / Expansion     0 / 0 / 0 %
+Champs décision/application exposés  0
+```
+
 ## Tests Phase 2
 
 La suite dédiée couvre :
