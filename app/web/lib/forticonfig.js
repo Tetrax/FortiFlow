@@ -1264,6 +1264,77 @@ function buildPolicyAddressChoices(policy, fortiConfig) {
   };
 }
 
+function validatePolicyAddressSelections(selectedPolicies, fortiConfig) {
+  const issues = [];
+  for (let index = 0; index < (selectedPolicies || []).length; index++) {
+    const policy = selectedPolicies[index] || {};
+    const selections = policy.addressSelections || policy._addressSelections;
+    if (!selections || typeof selections !== 'object') continue;
+    for (const [side, selection] of [['source', selections.source || selections.src], ['destination', selections.destination || selections.dst]]) {
+      if (!selection) continue;
+      const observed = policyObservedIps(policy, side === 'source' ? 'src' : 'dst');
+      const result = validateAddressSelection(observed, selection, fortiConfig || {});
+      if (!result.ok) {
+        issues.push({
+          level: 'error',
+          code: 'ADDRESS_SELECTION_INVALID',
+          msg: `Policy #${index + 1}: choix d’adresse ${side} invalide — ${result.errors.join('; ')}`,
+        });
+      }
+    }
+  }
+  return { ok: issues.length === 0, issues };
+}
+
+function selectionModeForPolicy(selection) {
+  return String(selection?.mode || selection?.type || '').trim().toLowerCase().replace(/[_ ]/g, '-');
+}
+
+function applyPolicyAddressSelections(analyzedPolicies, selectedPolicies) {
+  return (analyzedPolicies || []).map((policy, index) => {
+    const requested = selectedPolicies?.[index]?.addressSelections || selectedPolicies?.[index]?._addressSelections;
+    if (!requested || policy?._policyEngineV2) return policy;
+    const next = {
+      ...policy,
+      analysis: {
+        ...(policy.analysis || {}),
+        srcAddr: { ...(policy.analysis?.srcAddr || {}) },
+        dstAddr: { ...(policy.analysis?.dstAddr || {}) },
+      },
+    };
+    for (const [side, selection] of [['source', requested.source || requested.src], ['destination', requested.destination || requested.dst]]) {
+      if (!selection) continue;
+      const prefix = side === 'source' ? 'src' : 'dst';
+      const mode = selectionModeForPolicy(selection);
+      const choice = policy.analysis?.addressChoices?.[side];
+      if (mode === 'existing' || mode === 'object' || mode === 'existing-object' || mode === 'fortigate-object') {
+        const objectName = String(selection.objectName || selection.name || '').trim();
+        const object = choice?.existingObjects?.find(candidate => candidate.name === objectName);
+        if (!object) continue; // server validation is authoritative; never guess a name here.
+        next[`_${prefix}AddrName`] = object.name;
+        delete next[`_${prefix}CidrOverride`];
+        next[`_use32${prefix === 'src' ? 'Src' : 'Dst'}`] = false;
+        next[`_${prefix}Mode`] = 'subnet';
+        next.analysis[`${prefix}Addr`] = {
+          ...next.analysis[`${prefix}Addr`], found: true, name: object.name, cidr: object.cidr, source: 'config',
+        };
+      } else if (mode === 'subnet' || mode === 'create-subnet') {
+        next[`_${prefix}CidrOverride`] = selection.cidr;
+        next[`_use32${prefix === 'src' ? 'Src' : 'Dst'}`] = false;
+        next[`_${prefix}Mode`] = 'subnet';
+        next.analysis[`${prefix}Addr`] = {
+          ...next.analysis[`${prefix}Addr`], found: false, cidr: selection.cidr,
+        };
+      } else if (mode === 'hosts' || mode === 'host' || mode === 'create-hosts' || mode === 'host-32') {
+        delete next[`_${prefix}CidrOverride`];
+        next[`_use32${prefix === 'src' ? 'Src' : 'Dst'}`] = true;
+        next[`_${prefix}Mode`] = 'hosts';
+      }
+    }
+    return next;
+  });
+}
+
 function addressMatchFromChoices(match, choices) {
   if (!choices?.existingObjects?.length) return match;
   const preferred = choices.existingObjects[0];
@@ -2324,6 +2395,8 @@ function preflightValidation(selectedPolicies, config, observedFlows = null, req
   let generalizedPolicies = 0;
   let unclassifiedPolicies = 0;
   const routingContextUnproven = Boolean(config.hasPolicyRoutes || config.hasSdwanRules);
+  const addressSelectionValidation = validatePolicyAddressSelections(selectedPolicies, config);
+  issues.push(...addressSelectionValidation.issues);
 
   if (config.hasNonDefaultVrf) {
     issues.push({
@@ -2684,6 +2757,8 @@ module.exports = {
   findPredefinedService,
   parseFortiConfig,
   analyzePolicies,
+  validatePolicyAddressSelections,
+  applyPolicyAddressSelections,
   generateConfig,
   validateAgainstExisting,
   preflightValidation,

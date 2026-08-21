@@ -9,6 +9,7 @@ const { buildAnalysis, flowDecision, consolidatePolicies } = require('../lib/ana
 const {
   parseFortiConfig,
   analyzePolicies,
+  applyPolicyAddressSelections,
   generateConfig,
   preflightValidation,
   findAddress,
@@ -1014,6 +1015,104 @@ test('l’analyse expose les choix d’adresse simples sans choisir implicitemen
   assert.equal(analyzed.analysis.addressChoices.destination.calculatedSubnet.cidr, '10.1.1.0/27');
   assert.equal(analyzed.analysis.addressChoices.destination.calculatedSubnet.unobservedIpCount, 30);
 });
+
+test('le preflight revalide les choix d’adresse stateless et refuse toute dérive', () => {
+  const config = {
+    addresses: { USERS: { name: 'USERS', cidr: '10.0.0.0/24' } },
+    addressGroups: {},
+    interfaces: { lan: {}, servers: {} },
+    zones: {},
+  };
+  const base = {
+    srcintf: 'lan',
+    dstintf: 'servers',
+    srcSubnet: '10.0.0.0/24',
+    srcHosts: ['10.0.0.10'],
+    dstTarget: '10.0.1.0/24',
+    dstHosts: ['10.0.1.20'],
+    dstType: 'private',
+    addressSelections: {
+      source: { mode: 'existing-object', objectName: 'USERS', confirmed: true },
+      destination: { mode: 'hosts', ips: ['10.0.1.20'], confirmed: true },
+    },
+    action: 'accept',
+    analysis: {
+      srcAddr: { found: false, cidr: '10.0.0.0/24' },
+      dstAddr: { found: false, cidr: '10.0.1.0/24' },
+      srcIface: 'lan',
+      dstIface: 'servers',
+      services: [{ label: 'HTTPS', name: 'HTTPS', found: true }],
+    },
+  };
+
+  assert.equal(preflightValidation([base], config).ok, true);
+
+  const stale = preflightValidation([{
+    ...base,
+    addressSelections: {
+      ...base.addressSelections,
+      source: { mode: 'existing-object', objectName: 'REMOVED', confirmed: true },
+    },
+  }], config);
+  assert.equal(stale.ok, false);
+  assert.ok(stale.issues.some(issue => issue.code === 'ADDRESS_SELECTION_INVALID'));
+
+  const excluded = preflightValidation([{
+    ...base,
+    addressSelections: {
+      ...base.addressSelections,
+      destination: { mode: 'subnet', cidr: '10.0.1.0/28', confirmed: true },
+    },
+  }], config);
+  assert.equal(excluded.ok, false);
+  assert.ok(excluded.issues.some(issue => /ne contient pas/i.test(issue.msg)));
+
+  const unconfirmed = preflightValidation([{
+    ...base,
+    addressSelections: {
+      ...base.addressSelections,
+      source: { mode: 'existing-object', objectName: 'USERS', confirmed: false },
+    },
+  }], config);
+  assert.equal(unconfirmed.ok, false);
+  assert.ok(unconfirmed.issues.some(issue => /confirmation/i.test(issue.msg)));
+});
+
+
+test('applique les sélections d’adresse locales sans modifier la configuration de session', () => {
+  const policy = {
+    srcSubnet: '10.0.0.0/24',
+    srcHosts: ['10.0.0.10'],
+    dstTarget: '10.0.1.0/24',
+    dstHosts: ['10.0.1.20'],
+    dstType: 'private',
+    flowSrcintf: 'lan',
+    services: ['HTTPS'],
+    ports: [443],
+    protos: ['TCP'],
+    serviceTuples: [{ proto: '6', port: '443', service: 'HTTPS', sessions: 1 }],
+  };
+  const config = {
+    addresses: { USERS: { name: 'USERS', cidr: '10.0.0.0/24' } },
+    customServices: {},
+    interfaces: { lan: { cidr: '10.0.0.1/24' }, servers: { cidr: '10.0.1.1/24' } },
+    zones: {}, fullRoutes: [], staticRoutes: [], sdwanEnabled: false, sdwanMembers: [],
+  };
+  const analyzed = analyzePolicies([policy], config);
+  const selected = [{
+    ...analyzed[0],
+    addressSelections: {
+      source: { mode: 'existing-object', objectName: 'USERS', confirmed: true },
+      destination: { mode: 'subnet', cidr: '10.0.1.0/27', confirmed: true },
+    },
+  }];
+  const applied = applyPolicyAddressSelections(analyzed, selected)[0];
+  assert.equal(applied.analysis.srcAddr.name, 'USERS');
+  assert.equal(applied.analysis.srcAddr.found, true);
+  assert.equal(applied._dstCidrOverride, '10.0.1.0/27');
+  assert.equal(applied._use32Dst, false);
+});
+
 
 test('les données non interprétables bloquent le CLI tandis que les échecs connus restent informatifs', () => {
   const sessionData = {

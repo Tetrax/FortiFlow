@@ -84,6 +84,16 @@ test('les chemins policy-engine, preflight, génération et workspace revalident
   }
 });
 
+test('le serveur valide les sélections d’adresse avant le preflight et la génération', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(source, /validatePolicyAddressSelections/);
+  for (const marker of ["app.post('/api/deploy/preflight'", "app.post('/api/deploy/generate'"]) {
+    const start = source.indexOf(marker);
+    const end = source.indexOf('\n});', start);
+    const route = source.slice(start, end >= 0 ? end : source.length);
+    assert.match(route, /assertAddressSelections|validatePolicyAddressSelections/);
+  }
+});
 test(
   'le reverse proxy écrase X-Forwarded-For avec l’adresse TCP réelle',
   {

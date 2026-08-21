@@ -13,7 +13,7 @@ const { createSession, getSession, setSessionData, setFortiConfig,
         getStats, listSessions } = require('./lib/store');
 const { parseFortiConfig, analyzePolicies,
         generateConfig, validateAgainstExisting,
-        preflightValidation, sameServiceLabelScope,
+        preflightValidation, validatePolicyAddressSelections, applyPolicyAddressSelections, sameServiceLabelScope,
         parseFullRoutingTable, parseOspfRoutingTable, parseBgpNetworkTable,
         sortRoutes, formatExistingPolicies }             = require('./lib/forticonfig');
 const { buildHostPairCoverage, buildPolicyOrderIssues }  = require('./lib/coverage');
@@ -288,6 +288,18 @@ function sendConfigTelemetryMismatch(res, validation) {
 function assertConfigTelemetry(session, fortiConfig, res) {
   const validation = validateConfigTelemetryForSession(session, fortiConfig);
   if (!validation.ok && res) sendConfigTelemetryMismatch(res, validation);
+  return validation;
+}
+
+function assertAddressSelections(selectedPolicies, fortiConfig, res) {
+  const validation = validatePolicyAddressSelections(selectedPolicies, fortiConfig || {});
+  if (!validation.ok && res) {
+    res.status(422).json({
+      error: 'Choix d’adresse invalide : la sélection ne correspond plus aux flux ou à la configuration FortiGate.',
+      code: 'ADDRESS_SELECTION_INVALID',
+      issues: validation.issues,
+    });
+  }
   return validation;
 }
 
@@ -1956,6 +1968,8 @@ app.post('/api/deploy/preflight', (req, res) => {
   if (!Array.isArray(selectedPolicies) || selectedPolicies.length === 0) {
     return res.status(400).json({ error: 'selectedPolicies requis' });
   }
+  const addressSelectionValidation = assertAddressSelections(selectedPolicies, s.fortiConfig, res);
+  if (!addressSelectionValidation.ok) return;
 
   try {
     const requiredPolicyEngineAtoms = getRequiredPolicyEngineAtoms(s, selectedPolicies, s.fortiConfig);
@@ -1988,6 +2002,8 @@ app.post('/api/deploy/generate', (req, res) => {
   if (!Array.isArray(selectedPolicies) || selectedPolicies.length === 0) {
     return res.status(400).json({ error: 'selectedPolicies requis' });
   }
+  const addressSelectionValidation = assertAddressSelections(selectedPolicies, s.fortiConfig, res);
+  if (!addressSelectionValidation.ok) return;
 
   try {
     const o = opts || {};
@@ -2027,7 +2043,10 @@ app.post('/api/deploy/generate', (req, res) => {
       }
     }
 
-    const analyzed = analyzePolicies(selectedPolicies, configToUse, o.preferredWanIntf || null);
+    let analyzed = applyPolicyAddressSelections(
+      analyzePolicies(selectedPolicies, configToUse, o.preferredWanIntf || null),
+      selectedPolicies,
+    );
 
     // Re-inject per-policy overrides from frontend (action, log, securityProfiles)
     for (let i = 0; i < analyzed.length; i++) {
