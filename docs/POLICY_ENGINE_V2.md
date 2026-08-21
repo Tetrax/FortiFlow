@@ -134,6 +134,19 @@ Un objet CIDR existant est réutilisable en Recommandé uniquement lorsque sa ca
 
 Les objets existants sont préférés lorsqu'ils correspondent exactement aux membres ou au CIDR retenu. Une simple présence d'objet ne justifie jamais son périmètre.
 
+## Frontière moteur exact / choix d’adresse
+
+Policy Engine V2 reste l’autorité des tuples `(source, destination, service)`, de l’affinité d’interface/VDOM et des métriques `missing/unexpected`. Le choix d’adresse est une étape de présentation et de génération, traitée dans le drawer historique Source/Destination ; il ne réécrit pas les FlowAtoms et ne persiste aucune décision.
+
+Pour une policy, `app/web/lib/address-selection.js` :
+
+- réutilise uniquement les objets subnet FortiGate contenant toutes les IP observées, en LPM puis nom stable ;
+- ne calcule un subnet minimal que si aucun objet ne correspond ; le nombre d’IP non observées est arithmétique ;
+- propose sinon un subnet confirmé ou les hôtes exacts `/32`, en réutilisant les `/32` présents ;
+- ignore les noms comme preuve technique et n’énumère jamais un `/16` ou plus large.
+
+Le serveur revalide le choix courant avant preflight et génération. Une sélection périmée, une couverture incomplète ou une confirmation absente bloque la CLI. Le gate identité/télémétrie est exécuté avant la mutation de configuration et avant les chemins d’analyse, workspace, preflight et génération ; son message contractuel est `La télémétrie et la configuration FortiGate ne correspondent pas.` Les détails opérationnels sont dans `docs/ADDRESS_SELECTION.md`.
+
 ## Normalisation des services
 
 Chaque service est classé comme : prédéfini exact, objet existant exact, custom stable, port applicatif spécifique, rare, dynamique, candidat RPC, port destination illisible ou protocole non résolu. La priorité est : objet existant exact, prédéfini exact, custom exact et stable, objet custom dédié. Un objet ICMP type/code exact peut être réutilisé ; un libellé ICMP ne portant pas une preuve suffisante reste bloquant.
