@@ -10,7 +10,7 @@
 La télémétrie et la configuration FortiGate ne correspondent pas.
 ```
 
-Une identité absente reste inconnue et n’est jamais inventée. Un cluster HA ou plusieurs équipements ne passent que si les membres et la sélection technique sont explicites. Plusieurs VDOM sans sélection sont refusés.
+Une identité absente reste inconnue et n’est jamais inventée. Le mode avertissement n’est conservé que lorsqu’une preuve positive indépendante existe (identité concordante ou IP contenue dans un réseau d’interface connu) ; une capture sans preuve positive est refusée. Les flux dont l’identité est partielle sont comptés et signalés, même si d’autres flux sont complets. Un cluster HA ou plusieurs équipements ne passent que si les membres et la sélection technique sont explicites, et le membre observé doit correspondre exactement au membre sélectionné. Plusieurs VDOM sans sélection sont refusés.
 
 ## Les trois choix dans le drawer Source/Destination
 
@@ -22,7 +22,7 @@ Les noms ne servent jamais à prouver une inclusion réseau. Les objets FQDN, pl
 
 ## Validation serveur
 
-Le navigateur conserve le choix uniquement dans la policy en cours. Avant le preflight et la génération, le serveur revalide le CIDR, la couverture de chaque IP observée, l’objet FortiGate courant et la confirmation. Un objet supprimé, un CIDR qui exclut un hôte ou une confirmation absente est refusé ; aucune décision réseau n’est persistée.
+Le navigateur conserve le choix uniquement dans la policy en cours. Avant le preflight et la génération, le serveur revalide le CIDR, la couverture de chaque IP observée, l’objet FortiGate courant et la confirmation. Un objet supprimé, un CIDR qui exclut un hôte ou une confirmation absente est refusé ; une clé `_srcCidrOverride`/`_dstCidrOverride` isolée n’est jamais une autorité. Pour Policy Engine V2, le serveur rebâtit d’abord chaque policy via son identifiant stable, son profil et son `TrafficScope` validés ; interfaces, scope, tuples protocole/port et services fusionnés du navigateur sont ignorés. Seuls le choix d’adresse validé et les champs opératoires explicitement autorisés sont recopiés. Les sélections subnet/objet WAN sont ensuite consommées par le générateur ; le mode hôtes conserve les destinations `/32` exactes.
 
 Le choix d’adresse ne modifie ni les FlowAtoms, ni l’affinité service/interface/VDOM, ni les garde-fous CLI (`ALL`, services globaux, dérive de service et scopes mélangés). L’import d’un workspace accepte un ancien champ `networkDecisions` mais l’ignore en mémoire.
 

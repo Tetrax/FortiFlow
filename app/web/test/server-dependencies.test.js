@@ -95,6 +95,19 @@ test('le serveur valide les sélections d’adresse avant le preflight et la gé
   }
 });
 
+test('les routes de déploiement rebâtissent les policies V2 depuis la provenance serveur', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(source, /\.\/lib\/policy-binding/);
+  for (const marker of ["app.post('/api/deploy/preflight'", "app.post('/api/deploy/generate'"]) {
+    const start = source.indexOf(marker);
+    const end = source.indexOf('\n});', start);
+    const route = source.slice(start, end >= 0 ? end : source.length);
+    const binding = route.indexOf('bindSubmittedPolicies');
+    assert.ok(binding >= 0, `provenance absente de ${marker}`);
+    assert.ok(binding < route.indexOf('preflightValidation'), `preflight avant binding dans ${marker}`);
+  }
+});
+
 test('l’import workspace ignore networkDecisions avant la restauration de session', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   assert.match(source, /stripLegacyNetworkDecisions/);

@@ -1268,10 +1268,19 @@ function validatePolicyAddressSelections(selectedPolicies, fortiConfig) {
   const issues = [];
   for (let index = 0; index < (selectedPolicies || []).length; index++) {
     const policy = selectedPolicies[index] || {};
-    const selections = policy.addressSelections || policy._addressSelections;
-    if (!selections || typeof selections !== 'object') continue;
+    const selections = policy.addressSelections || policy._addressSelections || {};
     for (const [side, selection] of [['source', selections.source || selections.src], ['destination', selections.destination || selections.dst]]) {
-      if (!selection) continue;
+      const prefix = side === 'source' ? 'src' : 'dst';
+      if (!selection) {
+        if (policy[`_${prefix}CidrOverride`] && policy._serverPolicyBinding !== true) {
+          issues.push({
+            level: 'error',
+            code: 'ADDRESS_SELECTION_INVALID',
+            msg: `Policy #${index + 1}: l’override CIDR ${side} exige un choix d’adresse confirmé`,
+          });
+        }
+        continue;
+      }
       const observed = policyObservedIps(policy, side === 'source' ? 'src' : 'dst');
       const result = validateAddressSelection(observed, selection, fortiConfig || {});
       if (!result.ok) {
@@ -1296,6 +1305,7 @@ function applyPolicyAddressSelections(analyzedPolicies, selectedPolicies) {
     if (!requested) return policy;
     const next = {
       ...policy,
+      addressSelections: requested,
       _policyEngineV2: policy._policyEngineV2 ? { ...policy._policyEngineV2 } : policy._policyEngineV2,
       _segmentationPlan: {
         source: policy._segmentationPlan?.source || (policy._use32Src ? 'host' : 'network'),
@@ -1829,6 +1839,12 @@ function generateConfig(selectedPolicies, opts = {}) {
 
   for (const p of selectedPolicies) {
     const { analysis } = p;
+    const selections = p.addressSelections || p._addressSelections || {};
+    if (p._serverPolicyBinding !== true
+      && ((p._srcCidrOverride && !(selections.source || selections.src))
+        || (p._dstCidrOverride && !(selections.destination || selections.dst)))) {
+      throw new Error(`Policy "${p.policyName || p.name || p.id || '?'}" : override CIDR sans sélection d’adresse confirmée`);
+    }
     if (!analysis || !Array.isArray(analysis.services)) {
       throw new Error(`Policy "${p.policyName || p.name || p.id || '?'}" sans analyse de services — génération refusée`);
     }
@@ -1925,6 +1941,20 @@ function generateConfig(selectedPolicies, opts = {}) {
     // ── WAN policy : "all" uniquement sur choix explicite ──
     } else if ((p._isWan || p.dstType === 'public') && p._dstUseAll === true) {
       dstAddrName = 'all';
+    } else if ((p._isWan || p.dstType === 'public')
+        && !p._use32Dst
+        && (p._dstCidrOverride || p._dstAddrName || (p._dstMode === 'subnet' && p.analysis?.dstAddr?.found))) {
+      // A confirmed WAN subnet/object selection is server-applied before generation.
+      if (p._dstAddrName && p.analysis?.dstAddr?.found) {
+        dstAddrName = p._dstAddrName;
+      } else if (p._dstCidrOverride) {
+        const cidr = p._dstCidrOverride;
+        const name = p._dstAddrName || p.dstAddrName || suggestAddrName(cidr, NP);
+        registerGeneratedAddress(cidr, name);
+        dstAddrName = name;
+      } else {
+        throw new Error(`Policy WAN "${p.policyName || p.name || p.id || '?'}" sans destination réseau sélectionnée`);
+      }
     } else if (p._isWan || p.dstType === 'public') {
       // Mode sûr par défaut : conserver exactement les destinations WAN observées.
       if (p._isMultiDst && p._multiDstSubnets?.length > 0) {

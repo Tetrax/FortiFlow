@@ -19,6 +19,7 @@ const { parseFortiConfig, analyzePolicies,
 const { buildHostPairCoverage, buildPolicyOrderIssues }  = require('./lib/coverage');
 const { getCaptureDeploymentBlockers }                    = require('./lib/deploy-safety');
 const { parseTrafficScopeQuery, trafficScopeKey }          = require('./lib/traffic-scope');
+const { bindPolicyEngineV2Selections }                     = require('./lib/policy-binding');
 const {
   validateConfigTelemetryConsistency,
   selectTelemetryVdom,
@@ -302,6 +303,22 @@ function assertAddressSelections(selectedPolicies, fortiConfig, res) {
     });
   }
   return validation;
+}
+
+function bindSubmittedPolicies(session, selectedPolicies, fortiConfig) {
+  return bindPolicyEngineV2Selections(selectedPolicies, {
+    fortiConfig: fortiConfig || {},
+    getPolicyEngineResult: (profile, trafficScope) =>
+      getPolicyEngineResult(session, profile, fortiConfig || {}, trafficScope),
+  });
+}
+
+function sendPolicyBindingFailure(res, binding) {
+  return res.status(422).json({
+    error: 'Génération refusée : la provenance Policy Engine V2 est invalide ou inconnue',
+    code: 'POLICY_ENGINE_PROVENANCE_INVALID',
+    issues: binding.issues || [],
+  });
 }
 
 function validateWorkspaceConfigTelemetry(data, fortiConfig) {
@@ -1979,14 +1996,18 @@ app.post('/api/deploy/preflight', (req, res) => {
   const consistency = assertConfigTelemetry(s, s.fortiConfig, res);
   if (!consistency.ok) return;
 
-  const { selectedPolicies } = req.body || {};
-  if (!Array.isArray(selectedPolicies) || selectedPolicies.length === 0) {
+  const { selectedPolicies: submittedPolicies } = req.body || {};
+  if (!Array.isArray(submittedPolicies) || submittedPolicies.length === 0) {
     return res.status(400).json({ error: 'selectedPolicies requis' });
   }
-  const addressSelectionValidation = assertAddressSelections(selectedPolicies, s.fortiConfig, res);
-  if (!addressSelectionValidation.ok) return;
 
   try {
+    const binding = bindSubmittedPolicies(s, submittedPolicies, s.fortiConfig);
+    if (!binding.ok) return sendPolicyBindingFailure(res, binding);
+    const selectedPolicies = binding.policies;
+    const addressSelectionValidation = assertAddressSelections(selectedPolicies, s.fortiConfig, res);
+    if (!addressSelectionValidation.ok) return;
+
     const requiredPolicyEngineAtoms = getRequiredPolicyEngineAtoms(s, selectedPolicies, s.fortiConfig);
     const result = preflightValidation(selectedPolicies, s.fortiConfig, s.data?.flows || [], requiredPolicyEngineAtoms);
     const augmented = augmentPreflightEvidence(result, s.data, s.fortiConfig, selectedPolicies);
@@ -2013,12 +2034,10 @@ app.post('/api/deploy/generate', (req, res) => {
   const consistency = assertConfigTelemetry(s, s.fortiConfig, res);
   if (!consistency.ok) return;
 
-  const { selectedPolicies, opts } = req.body || {};
-  if (!Array.isArray(selectedPolicies) || selectedPolicies.length === 0) {
+  const { selectedPolicies: submittedPolicies, opts } = req.body || {};
+  if (!Array.isArray(submittedPolicies) || submittedPolicies.length === 0) {
     return res.status(400).json({ error: 'selectedPolicies requis' });
   }
-  const addressSelectionValidation = assertAddressSelections(selectedPolicies, s.fortiConfig, res);
-  if (!addressSelectionValidation.ok) return;
 
   try {
     const o = opts || {};
@@ -2043,6 +2062,12 @@ app.post('/api/deploy/generate', (req, res) => {
       });
       configToUse = { ...s.fortiConfig, interfaces: patchedInterfaces };
     }
+
+    const binding = bindSubmittedPolicies(s, submittedPolicies, configToUse);
+    if (!binding.ok) return sendPolicyBindingFailure(res, binding);
+    const selectedPolicies = binding.policies;
+    const addressSelectionValidation = assertAddressSelections(selectedPolicies, configToUse, res);
+    if (!addressSelectionValidation.ok) return;
     const requiredPolicyEngineAtoms = getRequiredPolicyEngineAtoms(s, selectedPolicies, configToUse);
 
     // SD-WAN zone takes priority; if none, preferredWanIntf falls to null (detectWanCandidates handles it)

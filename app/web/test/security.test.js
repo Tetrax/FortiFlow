@@ -815,6 +815,111 @@ test('les profils réseau sont explicitement classés comme généralisation', (
   assert.ok(result.issues.some(issue => issue.code === 'GENERALIZED_SCOPE'));
 });
 
+test('le preflight et le générateur refusent un override CIDR sans sélection confirmée', () => {
+  const policy = {
+    srcintf: 'lan',
+    dstintf: 'servers',
+    srcSubnet: '10.0.0.0/24',
+    srcHosts: ['10.0.0.10'],
+    dstTarget: '10.0.1.20/32',
+    dstHosts: ['10.0.1.20'],
+    dstType: 'private',
+    _srcCidrOverride: '10.0.0.0/8',
+    _use32Src: false,
+    _use32Dst: true,
+    _segmentationPlan: { source: 'network', destination: 'host', services: 'separate' },
+    services: ['HTTPS'],
+    serviceTuples: [{ proto: '6', port: '443', service: 'HTTPS' }],
+    action: 'accept',
+    log: 'all',
+    analysis: {
+      srcAddr: { found: false, cidr: '10.0.0.0/24' },
+      dstAddr: { found: false, cidr: '10.0.1.20/32' },
+      services: [{ label: 'HTTPS', found: true, name: 'HTTPS' }],
+    },
+  };
+  const config = {
+    addresses: {},
+    addressGroups: {},
+    customServices: {},
+    serviceGroups: {},
+    interfaces: { lan: {}, servers: {} },
+    zones: {},
+  };
+  const preflight = preflightValidation([policy], config, [aggregate()]);
+  assert.equal(preflight.ok, false);
+  assert.ok(preflight.issues.some(issue => issue.code === 'ADDRESS_SELECTION_INVALID'));
+  assert.throws(
+    () => generateConfig([policy], config),
+    /sélection d’adresse/i,
+  );
+});
+
+test('la génération WAN utilise l’objet destination explicitement sélectionné', () => {
+  const config = {
+    addresses: { PUBLIC_NET: { name: 'PUBLIC_NET', cidr: '203.0.113.0/24' } },
+    addressGroups: {},
+    customServices: {},
+    serviceGroups: {},
+    interfaces: { lan: {}, wan1: { name: 'wan1', isWan: true } },
+    zones: {},
+  };
+  const policy = wanPolicy({
+    dstTarget: '203.0.113.10',
+    services: ['HTTPS'],
+    serviceTuples: [{ proto: '6', port: '443', service: 'HTTPS' }],
+    analysis: {
+      srcAddr: { found: false, cidr: '10.0.0.0/24' },
+      dstAddr: { found: false, cidr: '203.0.113.10/32' },
+      services: [{ label: 'HTTPS', found: true, name: 'HTTPS' }],
+    },
+  });
+  const analyzed = analyzePolicies([policy], config, null);
+  const selected = [{
+    ...analyzed[0],
+    addressSelections: {
+      destination: { mode: 'existing-object', objectName: 'PUBLIC_NET', confirmed: true },
+    },
+  }];
+  const applied = applyPolicyAddressSelections(analyzed, selected);
+  const cli = generateConfig(applied, config);
+  assert.match(cli, /set dstaddr "PUBLIC_NET"/);
+  assert.doesNotMatch(cli, /FF_HOST_203_0_113_10/);
+});
+
+test('la génération WAN utilise aussi le CIDR subnet explicitement sélectionné', () => {
+  const config = {
+    addresses: {},
+    addressGroups: {},
+    customServices: {},
+    serviceGroups: {},
+    interfaces: { lan: {}, wan1: { name: 'wan1', isWan: true } },
+    zones: {},
+  };
+  const policy = wanPolicy({
+    dstTarget: '203.0.113.10',
+    services: ['HTTPS'],
+    serviceTuples: [{ proto: '6', port: '443', service: 'HTTPS' }],
+    analysis: {
+      srcAddr: { found: false, cidr: '10.0.0.0/24' },
+      dstAddr: { found: false, cidr: '203.0.113.10/32' },
+      services: [{ label: 'HTTPS', found: true, name: 'HTTPS' }],
+    },
+  });
+  const analyzed = analyzePolicies([policy], config, null);
+  const selected = [{
+    ...analyzed[0],
+    addressSelections: {
+      destination: { mode: 'subnet', cidr: '203.0.113.0/25', confirmed: true },
+    },
+  }];
+  const applied = applyPolicyAddressSelections(analyzed, selected);
+  const cli = generateConfig(applied, config);
+  assert.match(cli, /edit "FF_203_0_113_0_25"/);
+  assert.match(cli, /set subnet 203\.0\.113\.0 255\.255\.255\.128/);
+  assert.doesNotMatch(cli, /FF_HOST_203_0_113_10/);
+});
+
 test('les collisions d’objets générés sont refusées au lieu de produire une CLI incohérente', () => {
   const first = wanPolicy({
     srcAddrName: 'SRC-A',

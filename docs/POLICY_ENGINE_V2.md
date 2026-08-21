@@ -145,7 +145,7 @@ Pour une policy, `app/web/lib/address-selection.js` :
 - propose sinon un subnet confirmé ou les hôtes exacts `/32`, en réutilisant les `/32` présents ;
 - ignore les noms comme preuve technique et n’énumère jamais un `/16` ou plus large.
 
-Le serveur revalide le choix courant avant preflight et génération. Une sélection périmée, une couverture incomplète ou une confirmation absente bloque la CLI. Le gate identité/télémétrie est exécuté avant la mutation de configuration et avant les chemins d’analyse, workspace, preflight et génération ; son message contractuel est `La télémétrie et la configuration FortiGate ne correspondent pas.` Les détails opérationnels sont dans `docs/ADDRESS_SELECTION.md`.
+Le serveur revalide le choix courant avant preflight et génération. Une sélection périmée, une couverture incomplète ou une confirmation absente bloque la CLI. Pour toute policy V2 soumise, le serveur réobtient le résultat depuis le profil, le `TrafficScope` et l’identifiant stable validés ; les interfaces, partition, tuples protocole/port, CIDR bruts et `_mergedServices` du client ne sont jamais la source technique. Seuls la sélection d’adresse validée et les champs opératoires autorisés sont conservés. Le gate identité/télémétrie est exécuté avant la mutation de configuration et avant les chemins d’analyse, workspace, preflight et génération ; son message contractuel est `La télémétrie et la configuration FortiGate ne correspondent pas.` Les détails opérationnels sont dans `docs/ADDRESS_SELECTION.md`.
 
 ## Normalisation des services
 
