@@ -8,6 +8,13 @@ const assert = require('node:assert/strict');
 const appSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
 const styleSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'style.css'), 'utf8');
 
+test('échappe les guillemets dans les attributs alimentés par la configuration FortiGate', () => {
+  const helper = appSource.match(/function escHtml\(s\) \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(helper, 'helper escHtml introuvable');
+  const escape = Function(`"use strict"; ${helper}; return escHtml;`)();
+  assert.equal(escape(`SAFE"'&<>`), 'SAFE&quot;&#39;&amp;&lt;&gt;');
+});
+
 test('Deploy uses Policy Engine V2 recommended profile and safety metrics', () => {
   assert.match(appSource, /api\/policy-engine\/v2\?profile=/);
   for (const label of ['Recommandé', 'Strict', 'Synthétique', 'Expert']) {
