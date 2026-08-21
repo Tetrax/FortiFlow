@@ -974,6 +974,47 @@ test('la chaîne plan → ré-analyse → CLI conserve une règle par service', 
 });
 
 
+test('l’analyse expose les choix d’adresse simples sans choisir implicitement un subnet calculé', () => {
+  const policy = {
+    srcSubnet: '10.0.0.0/24',
+    srcHosts: ['10.0.0.10', '10.0.0.20'],
+    flowSrcintf: 'lan',
+    dstTarget: '10.1.1.0/24',
+    dstHosts: ['10.1.1.10', '10.1.1.20'],
+    dstType: 'private',
+    services: ['HTTPS'],
+    ports: [443],
+    protos: ['TCP'],
+    serviceTuples: [{ proto: '6', port: '443', service: 'HTTPS', sessions: 1 }],
+  };
+  const fortiConfig = {
+    addresses: {
+      USERS_WIDE: { name: 'USERS_WIDE', cidr: '10.0.0.0/16' },
+    },
+    customServices: {},
+    interfaces: {
+      lan: { name: 'lan', cidr: '10.0.0.1/24' },
+      servers: { name: 'servers', cidr: '10.1.1.1/24' },
+    },
+    zones: {},
+    fullRoutes: [],
+    staticRoutes: [],
+    sdwanEnabled: false,
+    sdwanMembers: [],
+  };
+
+  const analyzed = analyzePolicies([policy], fortiConfig)[0];
+  assert.equal(analyzed.analysis.srcAddr.found, true);
+  assert.equal(analyzed.analysis.srcAddr.name, 'USERS_WIDE');
+  assert.equal(analyzed.analysis.srcAddr.cidr, '10.0.0.0/16');
+  assert.deepEqual(analyzed.analysis.addressChoices.source.existingObjects, [{
+    name: 'USERS_WIDE', cidr: '10.0.0.0/16', unobservedIpCount: 65534,
+  }]);
+  assert.equal(analyzed.analysis.addressChoices.destination.existingObjects.length, 0);
+  assert.equal(analyzed.analysis.addressChoices.destination.calculatedSubnet.cidr, '10.1.1.0/27');
+  assert.equal(analyzed.analysis.addressChoices.destination.calculatedSubnet.unobservedIpCount, 30);
+});
+
 test('les données non interprétables bloquent le CLI tandis que les échecs connus restent informatifs', () => {
   const sessionData = {
     meta: { skipReasons: { ipv6: 3 } },

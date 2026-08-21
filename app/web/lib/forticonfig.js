@@ -1,5 +1,7 @@
 'use strict';
 
+const { buildAddressChoices, validateAddressSelection } = require('./address-selection');
+
 // ─── FortiGate config section parser ─────────────────────────────────────────
 // Extrait les blocs : config X / edit "name" / set key val / next / end
 // Gère la profondeur pour ignorer les sections imbriquées sans les parser.
@@ -1243,12 +1245,48 @@ function suggestAddrName(cidr, prefix = 'FF') {
   return prefix + '_' + (cidr || '').replace(/\//g, '_').replace(/\./g, '_');
 }
 
+function policyObservedIps(policy, side) {
+  const hosts = side === 'src' ? policy?.srcHosts : policy?.dstHosts;
+  if (Array.isArray(hosts) && hosts.length > 0) return [...new Set(hosts.filter(Boolean))];
+  const target = side === 'src' ? policy?.srcSubnet : policy?.dstTarget;
+  if (!target) return [];
+  const value = String(target).trim();
+  if (/^\d{1,3}(?:\.\d{1,3}){3}(?:\/32)?$/.test(value)) return [value.replace(/\/32$/, '')];
+  return [];
+}
+
+function buildPolicyAddressChoices(policy, fortiConfig) {
+  const sourceIps = policyObservedIps(policy, 'src');
+  const destinationIps = policyObservedIps(policy, 'dst');
+  return {
+    source: sourceIps.length ? buildAddressChoices(sourceIps, fortiConfig) : null,
+    destination: destinationIps.length ? buildAddressChoices(destinationIps, fortiConfig) : null,
+  };
+}
+
+function addressMatchFromChoices(match, choices) {
+  if (!choices?.existingObjects?.length) return match;
+  const preferred = choices.existingObjects[0];
+  return {
+    ...match,
+    found: true,
+    name: preferred.name,
+    cidr: preferred.cidr,
+    source: 'config',
+    allMatches: choices.existingObjects,
+  };
+}
+
 function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
   const { addresses, customServices, interfaces, zones } = fortiConfig;
 
   return policies.map(p => {
     // Source address
-    const srcAddrMatch = findAddress(p.srcSubnet, addresses);
+    const addressChoices = buildPolicyAddressChoices(p, fortiConfig);
+    const srcAddrMatch = addressMatchFromChoices(
+      findAddress(p.srcSubnet, addresses),
+      p._policyEngineV2 ? null : addressChoices.source,
+    );
     // Destination address
     let dstAddrMatch;
     if (p.dstType === 'public') {
@@ -1259,6 +1297,10 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
     } else {
       dstAddrMatch = findAddress(p.dstTarget, addresses);
     }
+    dstAddrMatch = addressMatchFromChoices(
+      dstAddrMatch,
+      p._policyEngineV2 ? null : addressChoices.destination,
+    );
 
     // Services
     const protoLabel = p.protos?.[0] || 'TCP';
@@ -1570,8 +1612,9 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
       _srcHostsFound: srcHostsFound.size ? [...srcHostsFound] : (p._srcHostsFound || undefined),
       _dstHostsFound: dstHostsFound.size ? [...dstHostsFound] : (p._dstHostsFound || undefined),
       analysis: {
-        srcAddr:    { ...srcAddrMatch,  cidr: p.srcSubnet, suggestedName: suggestAddrName(p.srcSubnet) },
-        dstAddr:    { ...dstAddrMatch,  cidr: p.dstTarget, suggestedName: suggestAddrName(p.dstTarget) },
+        addressChoices,
+        srcAddr:    { ...srcAddrMatch,  cidr: srcAddrMatch.cidr || p.srcSubnet, suggestedName: suggestAddrName(p.srcSubnet) },
+        dstAddr:    { ...dstAddrMatch,  cidr: dstAddrMatch.cidr || p.dstTarget, suggestedName: suggestAddrName(p.dstTarget) },
         services:   serviceItems,
         srcIface:       srcIfaceName   || null,
         srcIfaceSource: srcIfaceSource,
