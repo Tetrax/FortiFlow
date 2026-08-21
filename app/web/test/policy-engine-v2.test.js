@@ -18,6 +18,44 @@ test('Policy Engine V2 exposes a pure deterministic build entry point', () => {
   assert.equal(typeof analyzer.buildPolicyEngineV2, 'function');
 });
 
+test('Traffic Scope filters flows before canonical FlowAtoms are built', () => {
+  const retained = flow('10.0.0.10', '198.51.100.10', 6, 443, 'HTTPS', {
+    srcintf: 'inside', dstintf: 'outside', count: 4,
+  });
+  const excluded = flow('10.0.0.10', '10.0.1.10', 6, 443, 'HTTPS', {
+    srcintf: 'inside', dstintf: 'servers', count: 2,
+  });
+  const fortiConfig = {
+    addresses: {}, customServices: {},
+    interfaces: {
+      inside: { name: 'inside', role: 'lan', isWan: false },
+      outside: { name: 'outside', role: 'wan', isWan: true },
+      servers: { name: 'servers', role: 'lan', isWan: false },
+    },
+    zones: {},
+  };
+
+  const result = analyzer.buildPolicyEngineV2([retained, excluded], {
+    profile: 'recommended',
+    fortiConfig,
+    trafficScope: { mode: 'lan-internet' },
+  });
+
+  assert.equal(result.atoms.length, 1);
+  assert.equal(result.atoms[0].destination, '198.51.100.10');
+  assert.equal(result.inputSummary.inputFlows, 1);
+  assert.equal(result.policies[0]._policyEngineV2.trafficScopeKey, result.trafficScope.key);
+  assert.equal(result.policies[0]._policyEngineV2.trafficScope.mode, 'lan-internet');
+  assert.deepEqual(result.trafficScope.summary, {
+    inputFlows: 2,
+    inputSessions: 6,
+    retainedFlows: 1,
+    retainedSessions: 4,
+    excludedFlows: 1,
+    excludedSessions: 2,
+  });
+});
+
 test('service scope comparison ignores duplicate labels but still detects real drift', () => {
   const requested = [
     { label: 'MMS' },

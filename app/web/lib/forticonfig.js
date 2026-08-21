@@ -523,8 +523,9 @@ function parseFortiConfig(text, selectedVdom = null) {
     // WAN : priorité au set role (lan/dmz/undefined = LAN, wan = WAN)
     // puis mode dhcp/pppoe (route par défaut dynamique = WAN)
     // sinon détection par IP (fallback)
-    const roleLan  = props.role === 'lan' || props.role === 'dmz';
-    const roleWan  = props.role === 'wan';
+    const role = String(props.role || '').replace(/^"|"$/g, '').toLowerCase();
+    const roleLan  = role === 'lan' || role === 'dmz';
+    const roleWan  = role === 'wan';
     const modeDhcp = props.mode === 'dhcp' || props.mode === 'pppoe';
     const isWan = !isTunnel && (roleWan || (!roleLan && (modeDhcp || (!isPrivateIP(props.ip?.split(' ')[0] || '') && !!props.ip))));
     interfaces[name] = {
@@ -534,6 +535,7 @@ function parseFortiConfig(text, selectedVdom = null) {
       prefix,
       alias:    props.alias || name,
       type:     props.type  || 'physical',
+      role:     role || null,
       isWan,
       _roleWan: roleWan,
       isTunnel,
