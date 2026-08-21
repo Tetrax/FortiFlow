@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 
 const { buildPolicyEngineV2 } = require('../lib/policy-engine-v2');
 const { resolveNetworkRepresentations } = require('../lib/network-representation-resolver');
@@ -315,4 +316,114 @@ test('persisted decision is marked invalidated when its current context changes'
   });
   assert.equal(cannotRevive.valid, false);
   assert.ok(cannotRevive.reasons.includes('DECISION_ALREADY_INVALIDATED'));
+});
+
+test('decision analysis never mutates nested fields on multiple unselected policies', () => {
+  const flows = [
+    flow('192.0.2.0', '198.51.100.10'),
+    flow('192.0.2.1', '198.51.100.10'),
+    ...['198.51.100.20', '198.51.100.21', '198.51.100.22'].map(destination =>
+      flow('192.0.2.50', destination, { proto: '17', dstport: '53', service: 'DNS' })
+    ),
+    ...['198.51.100.30', '198.51.100.31'].map(destination =>
+      flow('192.0.2.60', destination, { proto: '6', dstport: '22', service: 'SSH' })
+    ),
+  ];
+  const addresses = {
+    SOURCE_NET: { name: 'SOURCE_NET', cidr: '192.0.2.0/31' },
+  };
+  for (const destination of [...new Set(flows.map(item => item.dstip))]) {
+    addresses[`HOST_${destination.replaceAll('.', '_')}`] = {
+      name: `HOST_${destination.replaceAll('.', '_')}`,
+      cidr: `${destination}/32`,
+    };
+  }
+  const fortiConfig = {
+    selectedVdom: 'root', addresses, addressGroups: {}, customServices: {}, serviceGroups: {}, zones: {},
+    interfaces: {
+      users: { name: 'users', role: 'lan', isWan: false, cidr: '192.0.2.0/24' },
+      servers: { name: 'servers', role: 'lan', isWan: false, cidr: '198.51.100.0/24' },
+    },
+    staticRoutes: [], fullRoutes: [], existingPolicies: [],
+  };
+  const engine = buildPolicyEngineV2(flows, {
+    profile: 'recommended', fortiConfig, trafficScope: { mode: 'all' },
+  });
+  assert.ok(engine.policies.length >= 3);
+  assert.ok(engine.policies.filter(item => item._multiDstSubnets?.length > 1).length >= 2);
+  const selected = engine.policies.find(item =>
+    item.sources.length === 2 && item.destinations.length === 1
+  );
+  const resolution = resolveNetworkRepresentations(selected, fortiConfig, { side: 'source' });
+  const candidate = resolution.candidates.find(item => item.kind === 'existing-object');
+  const before = structuredClone(engine.policies);
+  const beforeHash = crypto.createHash('sha256').update(JSON.stringify(engine.policies)).digest('hex');
+
+  applyNetworkRepresentationDecision({
+    engineResult: engine,
+    fortiConfig,
+    observedFlows: flows,
+    policyId: selected.id,
+    side: 'source',
+    candidateId: candidate.candidateId,
+    resolverInputHash: resolution.resolverInputHash,
+  });
+
+  const afterHash = crypto.createHash('sha256').update(JSON.stringify(engine.policies)).digest('hex');
+  assert.equal(afterHash, beforeHash);
+  assert.deepEqual(engine.policies, before);
+});
+
+test('two concurrent decisions keep the shared original policy context immutable', async () => {
+  const flows = [
+    flow('192.0.2.0', '198.51.100.10'),
+    flow('192.0.2.1', '198.51.100.10'),
+    ...['198.51.100.20', '198.51.100.21', '198.51.100.22'].map(destination =>
+      flow('192.0.2.50', destination, { proto: '17', dstport: '53', service: 'DNS' })
+    ),
+  ];
+  const addresses = { SOURCE_NET: { name: 'SOURCE_NET', cidr: '192.0.2.0/31' } };
+  for (const destination of [...new Set(flows.map(item => item.dstip))]) {
+    addresses[`HOST_${destination.replaceAll('.', '_')}`] = {
+      name: `HOST_${destination.replaceAll('.', '_')}`,
+      cidr: `${destination}/32`,
+    };
+  }
+  const fortiConfig = {
+    selectedVdom: 'root', addresses, addressGroups: {}, customServices: {}, serviceGroups: {}, zones: {},
+    interfaces: {
+      users: { name: 'users', role: 'lan', isWan: false, cidr: '192.0.2.0/24' },
+      servers: { name: 'servers', role: 'lan', isWan: false, cidr: '198.51.100.0/24' },
+    },
+    staticRoutes: [], fullRoutes: [], existingPolicies: [],
+  };
+  const engine = buildPolicyEngineV2(flows, {
+    profile: 'recommended', fortiConfig, trafficScope: { mode: 'all' },
+  });
+  const sourcePolicy = engine.policies.find(item => item.sources.length === 2);
+  const destinationPolicy = engine.policies.find(item => item.destinations.length === 3);
+  const sourceResolution = resolveNetworkRepresentations(sourcePolicy, fortiConfig, { side: 'source' });
+  const destinationResolution = resolveNetworkRepresentations(destinationPolicy, fortiConfig, { side: 'destination' });
+  const sourceCandidate = sourceResolution.candidates.find(item => item.kind === 'existing-object');
+  const destinationCandidate = destinationResolution.candidates.find(item => item.kind === 'new-exact-group');
+  const before = structuredClone(engine.policies);
+  const beforeHash = crypto.createHash('sha256').update(JSON.stringify(engine.policies)).digest('hex');
+
+  const [sourceResult, destinationResult] = await Promise.all([
+    Promise.resolve().then(() => applyNetworkRepresentationDecision({
+      engineResult: engine, fortiConfig, observedFlows: flows,
+      policyId: sourcePolicy.id, side: 'source', candidateId: sourceCandidate.candidateId,
+      resolverInputHash: sourceResolution.resolverInputHash,
+    })),
+    Promise.resolve().then(() => applyNetworkRepresentationDecision({
+      engineResult: engine, fortiConfig, observedFlows: flows,
+      policyId: destinationPolicy.id, side: 'destination', candidateId: destinationCandidate.candidateId,
+      resolverInputHash: destinationResolution.resolverInputHash,
+    })),
+  ]);
+
+  assert.equal(sourceResult.metrics.unexpectedAllowedTuples, 0);
+  assert.equal(destinationResult.metrics.unexpectedAllowedTuples, 0);
+  assert.equal(crypto.createHash('sha256').update(JSON.stringify(engine.policies)).digest('hex'), beforeHash);
+  assert.deepEqual(engine.policies, before);
 });

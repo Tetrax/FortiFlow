@@ -333,10 +333,12 @@ function applyNetworkRepresentationDecision({
   const decision = createNetworkUserDecision({
     resolution, candidate, policy, profile: engineResult.profile, now,
   });
-  const appliedPolicy = applyCandidateToPolicy(policy, candidate, side, decision);
-  const appliedPolicies = engineResult.policies.map(item =>
-    String(item.id) === String(policy.id) ? appliedPolicy : item
+  const appliedPolicies = structuredClone(engineResult.policies);
+  const selectedIndex = appliedPolicies.findIndex(item => String(item.id) === String(policy.id));
+  const appliedPolicy = applyCandidateToPolicy(
+    appliedPolicies[selectedIndex], candidate, side, decision,
   );
+  appliedPolicies[selectedIndex] = appliedPolicy;
   const metrics = evaluatePolicies(engineResult.atoms, appliedPolicies);
   metrics.blockedRequiredTuples = Number(engineResult.metrics?.blockedRequiredTuples || 0);
   metrics.deployableRequiredTuples = metrics.observedRequiredTuples - metrics.blockedRequiredTuples;
