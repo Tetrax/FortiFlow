@@ -150,6 +150,35 @@ test('sélectionne automatiquement le VDOM unique prouvé par la télémétrie',
   assert.equal(consistency.selectTelemetryVdom([flow({ vdom: 'missing' })], ['root']), null);
 });
 
+test('refuse un VDOM demandé qui n’existe pas dans la configuration', () => {
+  const multiVdom = `
+config vdom
+    edit "root"
+    next
+    edit "tenant-b"
+    next
+end
+`;
+  assert.throws(() => parseFortiConfig(multiVdom, 'not-real'), /VDOM.*not-real.*introuvable/i);
+});
+
+test('une valeur vdomSelectionRequired=false ne peut pas masquer une sélection multi-VDOM absente', () => {
+  const result = consistency.validateConfigTelemetryConsistency(
+    [flow({ vdom: 'root' })],
+    config({
+      identity: {
+        hostname: 'FW-AVR-01',
+        devid: 'FGT-AVR-01',
+        selectedVdom: null,
+        vdomList: ['root', 'tenant-b'],
+        vdomSelectionRequired: false,
+      },
+      selectedVdom: null,
+    }),
+  );
+  assertMismatch(result);
+});
+
 test('refuse une capture sans aucune preuve positive de config ou de réseau', () => {
   const result = consistency.validateConfigTelemetryConsistency(
     [flow({ devname: '', devid: '', vdom: '' })],

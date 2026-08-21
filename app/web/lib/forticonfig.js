@@ -415,6 +415,9 @@ function parseFortiConfig(text, selectedVdom = null) {
 
   // ── Multi-VDOM: if present, extract the target VDOM block and parse it ──
   const vdomList = extractVdomNames(lines);
+  if (selectedVdom && !vdomList.includes(selectedVdom)) {
+    throw new Error(`VDOM ${selectedVdom} introuvable dans la configuration`);
+  }
   let parseLines = lines;
   let parseText  = text;
   let activeVdom = null;

@@ -60,11 +60,7 @@ function normalizeConfigIdentity(fortiConfig = {}) {
       || configured.selectedDevid
       || fortiConfig.selectedDeviceId,
   ) || null;
-  const vdomSelectionRequired = Boolean(
-    firstDefined(configured, ['vdomSelectionRequired'])
-      ?? firstDefined(fortiConfig, ['vdomSelectionRequired'])
-      ?? (vdomList.length > 1 && !selectedVdom),
-  );
+  const vdomSelectionRequired = vdomList.length > 1 && !text(selectedVdom);
 
   return {
     hostname: text(configured.hostname ?? fortiConfig.hostname) || null,

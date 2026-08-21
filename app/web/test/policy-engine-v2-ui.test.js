@@ -53,6 +53,7 @@ test('le drawer historique propose uniquement les choix d’adresse simples', ()
   assert.match(appSource, /!simpleAddressMode && p\.metrics/);
   assert.match(appSource, /!simpleAddressMode \? buildPolicyAffinityHtml\(p\) : ''/);
   assert.match(appSource, /!simpleDestinationMode \? `<div class="drawer-field">/);
+  assert.match(appSource, /simpleHostsConfirmed\(policy, side\)/);
 });
 
 test('un mismatch de cohérence reste bloquant avant l’étape Règles', () => {

@@ -7438,6 +7438,12 @@ function simpleAddressSelectionReady(policy, side) {
   return false;
 }
 
+function simpleHostsConfirmed(policy, side) {
+  const selection = policy?.addressSelections?.[side];
+  const mode = simpleSelectionMode(selection);
+  return selection?.confirmed === true && (mode === 'hosts' || mode === 'host');
+}
+
 function isPolicyComplete(p, _debug) {
   const a = p.analysis || {};
   const dbg = msg => { if (_debug) console.log('[complete]', msg, 'dstMode:', p._dstMode, '_use32Dst:', p._use32Dst, '_isMultiDst:', p._isMultiDst, 'dstHosts:', p.dstHosts, '_dstHostsFound:', p._dstHostsFound, '_dstHostNames:', p._dstHostNames, '_multiDstSubnets:', JSON.stringify(p._multiDstSubnets)); };
@@ -7454,6 +7460,8 @@ function isPolicyComplete(p, _debug) {
     const n = cleanHostName(h, namesMap?.[h]);
     return n && n !== autoHostName(h);
   };
+  const sourceHostsConfirmed = simpleHostsConfirmed(p, 'source');
+  const destinationHostsConfirmed = simpleHostsConfirmed(p, 'destination');
 
   // Source addresses / hosts
   // _multiSrcSubnets a la priorité — srcHosts est une liste plate qui peut contenir
@@ -7465,7 +7473,7 @@ function isPolicyComplete(p, _debug) {
         if (!s.addrFound && !s.addrName) { dbg(`FAIL: multiSrc subnet ${s.subnet} no addrName`); return false; }
       } else {
         for (const h of (s.hosts || [])) {
-          if (!srcFoundSet.has(h) && !hostNameOk(h, p._srcHostNames)) { dbg(`FAIL: multiSrc host ${h} not found/named`); return false; }
+          if (!srcFoundSet.has(h) && !sourceHostsConfirmed && !hostNameOk(h, p._srcHostNames)) { dbg(`FAIL: multiSrc host ${h} not found/named`); return false; }
         }
       }
     }
@@ -7474,7 +7482,7 @@ function isPolicyComplete(p, _debug) {
     if (_srcModeResolved === 'hosts' && (p.srcHosts || []).length > 0) {
       const foundSet = new Set(p._srcHostsFound || []);
       for (const h of (p.srcHosts || [])) {
-        if (!foundSet.has(h) && !hostNameOk(h, p._srcHostNames)) { dbg(`FAIL: src host ${h} not found/named`); return false; }
+        if (!foundSet.has(h) && !sourceHostsConfirmed && !hostNameOk(h, p._srcHostNames)) { dbg(`FAIL: src host ${h} not found/named`); return false; }
       }
     } else {
       if (!a.srcAddr?.found && !p._srcAddrName) { dbg('FAIL: srcAddr not found/named'); return false; }
@@ -7495,7 +7503,7 @@ function isPolicyComplete(p, _debug) {
         if (!s.addrFound && !s.addrName) { dbg(`FAIL: multiDst subnet ${s.subnet} no addrName`); return false; }
       } else {
         for (const h of (s.hosts || [])) {
-          if (!dstFoundSet.has(h) && !hostNameOk(h, p._dstHostNames)) { dbg(`FAIL: multiDst host ${h} not found/named`); return false; }
+          if (!dstFoundSet.has(h) && !destinationHostsConfirmed && !hostNameOk(h, p._dstHostNames)) { dbg(`FAIL: multiDst host ${h} not found/named`); return false; }
         }
       }
     }
@@ -7505,13 +7513,13 @@ function isPolicyComplete(p, _debug) {
     if (isWanSpecific && p.dstHosts?.length > 0) {
       const foundSet = new Set(p._dstHostsFound || []);
       for (const h of (p.dstHosts || [])) {
-        if (!foundSet.has(h) && !hostNameOk(h, p._dstHostNames)) { dbg(`FAIL: dst host ${h} not found/named (WAN specific)`); return false; }
+        if (!foundSet.has(h) && !destinationHostsConfirmed && !hostNameOk(h, p._dstHostNames)) { dbg(`FAIL: dst host ${h} not found/named (WAN specific)`); return false; }
       }
     } else if (!isWanSpecific) {
       if (_dstModeResolved === 'hosts' && (p.dstHosts || []).length > 0) {
         const foundSet = new Set(p._dstHostsFound || []);
         for (const h of (p.dstHosts || [])) {
-          if (!foundSet.has(h) && !hostNameOk(h, p._dstHostNames)) { dbg(`FAIL: dst host ${h} not found/named`); return false; }
+          if (!foundSet.has(h) && !destinationHostsConfirmed && !hostNameOk(h, p._dstHostNames)) { dbg(`FAIL: dst host ${h} not found/named`); return false; }
         }
       } else if (p.dstType !== 'public') {
         if (!a.dstAddr?.found && !p._dstAddrName) { dbg('FAIL: dstAddr not found/named'); return false; }
