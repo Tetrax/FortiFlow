@@ -87,6 +87,20 @@ test('reconstruit une policy V2 depuis le résultat serveur et ignore les champs
   assert.equal(bound._serverPolicyBinding, true);
 });
 
+test('la policy liée contient une analyse technique serveur utilisable directement au preflight', () => {
+  const config = fortiConfig();
+  const flows = [flow()];
+  const serverResult = analyzer.buildPolicyEngineV2(flows, { profile: 'recommended', fortiConfig: config });
+  const result = binding.bindPolicyEngineV2Selections([serverResult.policies[0]], {
+    fortiConfig: config,
+    getPolicyEngineResult: () => serverResult,
+  });
+  assert.equal(result.ok, true);
+  assert.ok(result.policies[0].analysis?.services?.length > 0);
+  const preflight = preflightValidation(result.policies, config, flows, serverResult.atoms);
+  assert.equal(preflight.ok, true, JSON.stringify(preflight.issues));
+});
+
 test('refuse une policy V2 sans provenance complète ou avec un identifiant inconnu', () => {
   assert.equal(typeof binding.bindPolicyEngineV2Selections, 'function');
   const serverResult = analyzer.buildPolicyEngineV2([flow()], { profile: 'recommended', fortiConfig: fortiConfig() });
@@ -105,6 +119,20 @@ test('refuse une policy V2 sans provenance complète ou avec un identifiant inco
   }], { fortiConfig: fortiConfig(), getPolicyEngineResult: getResult });
   assert.equal(unknown.ok, false);
   assert.ok(unknown.issues.some(issue => issue.code === 'POLICY_ENGINE_PROVENANCE_INVALID'));
+});
+
+test('refuse aussi une policy sans aucune provenance V2 au lieu de basculer en legacy', () => {
+  const result = binding.bindPolicyEngineV2Selections([{
+    id: 'LEGACY-FORGED',
+    srcintf: 'dmz',
+    dstintf: 'users',
+    services: ['HTTPS'],
+  }], {
+    fortiConfig: fortiConfig(),
+    getPolicyEngineResult: () => ({ policies: [], atoms: [] }),
+  });
+  assert.equal(result.ok, false);
+  assert.ok(result.issues.some(issue => issue.code === 'POLICY_ENGINE_PROVENANCE_INVALID'));
 });
 
 test('valide les sélections d’adresse contre la policy serveur et ignore les overrides CIDR client', () => {

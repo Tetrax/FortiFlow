@@ -1,7 +1,7 @@
 'use strict';
 
 const { trafficScopeKey } = require('./traffic-scope');
-const { validatePolicyAddressSelections } = require('./forticonfig');
+const { analyzePolicies, validatePolicyAddressSelections } = require('./forticonfig');
 
 const POLICY_ENGINE_PROFILES = new Set(['recommended', 'strict', 'synthetic', 'expert']);
 const SAFE_OPERATION_FIELDS = [
@@ -85,7 +85,7 @@ function bindPolicyEngineV2Selections(submittedPolicies, options = {}) {
   for (let index = 0; index < policies.length; index++) {
     const submitted = policies[index] || {};
     if (!isV2Submission(submitted)) {
-      boundPolicies.push(submitted);
+      issues.push(issue(index, 'provenance Policy Engine V2 absente'));
       continue;
     }
 
@@ -132,7 +132,7 @@ function bindPolicyEngineV2Selections(submittedPolicies, options = {}) {
       continue;
     }
 
-    const effective = clone(serverPolicy);
+    const effective = clone(analyzePolicies([serverPolicy], fortiConfig, null)[0]);
     effective._serverPolicyBinding = true;
     for (const field of SAFE_OPERATION_FIELDS) {
       if (hasOwn(submitted, field)) effective[field] = clone(submitted[field]);
