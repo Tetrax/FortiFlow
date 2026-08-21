@@ -226,6 +226,26 @@ Le POST exige `policyId`, `side`, `candidateId` et `resolverInputHash`, retourne
 
 Le workflow ne persiste jamais une décision refusée pour hash périmé, candidat absent, ambiguïté ou expansion. Il ne modifie pas la policy source et n'appelle jamais `generateConfig`.
 
+### Correction immutabilité du policy context
+
+Le premier replay AVR a révélé que les policies non sélectionnées restaient des références originales. `analyzePolicies()` enrichissait alors `_multiDstSubnets[*].addrFound/addrName` en place. La correction clone désormais profondément **tout** `engineResult.policies` avant d'appliquer la décision, puis transmet uniquement ce contexte cloné à `evaluatePolicies`, `analyzePolicies` et `preflightValidation`.
+
+Tests dédiés : plusieurs policies non sélectionnées avec arrays/objets privés imbriqués, comparaison SHA-256 + `deepEqual`, et deux décisions concurrentes sur le même contexte original.
+
+Replay AVR après correction, commit `2b550456f35ca273706f9479ee5c4fa6db498cb3` :
+
+```text
+Policies / FlowAtoms                         17 / 104
+Hash original après exact object            identique
+Hash original après new exact group         identique
+Hash original après deux décisions          identique
+Coverage / Missing / Unexpected / Expansion 100 % / 0 / 0 / 0 %
+CIDR sparse refusé                           422 / 230 unexpected
+Hash périmé refusé                           409
+```
+
+Le finding immutabilité HIGH est clos. Le passage UI reste cependant bloqué par un manque d'évidence distinct : la configuration AVR réelle correspondante contient zéro groupe d'adresses et ne permet pas de tester `existing-group` sur télémétrie réelle.
+
 Smoke end-to-end Phase 4 sur image candidate, session synthétique isolée et redémarrage réel du conteneur :
 
 ```text
