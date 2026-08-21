@@ -19,6 +19,11 @@ const { parseFortiConfig, analyzePolicies,
 const { buildHostPairCoverage, buildPolicyOrderIssues }  = require('./lib/coverage');
 const { getCaptureDeploymentBlockers }                    = require('./lib/deploy-safety');
 const { parseTrafficScopeQuery, trafficScopeKey }          = require('./lib/traffic-scope');
+const {
+  validateConfigTelemetryConsistency,
+  CONFIG_TELEMETRY_MISMATCH,
+  CONFIG_TELEMETRY_MISMATCH_MESSAGE,
+} = require('./lib/config-consistency');
 
 const app   = express();
 const TRUST_PROXY = (process.env.FORTIFLOW_TRUST_PROXY || '').trim();
@@ -263,6 +268,31 @@ function flowsForFortiConfig(flows, fortiConfig) {
   const hasVdomMetadata = list.some(flow => String(flow.vdom || '').trim());
   if (!hasVdomMetadata) return list;
   return list.filter(flow => String(flow.vdom || '').trim() === selectedVdom);
+}
+
+function validateConfigTelemetryForSession(session, fortiConfig = session?.fortiConfig) {
+  const flows = session?.originalFlows || session?.data?.flows || [];
+  return validateConfigTelemetryConsistency(flows, fortiConfig || {});
+}
+
+function sendConfigTelemetryMismatch(res, validation) {
+  return res.status(422).json({
+    error: CONFIG_TELEMETRY_MISMATCH_MESSAGE,
+    code: CONFIG_TELEMETRY_MISMATCH,
+    message: CONFIG_TELEMETRY_MISMATCH_MESSAGE,
+    details: validation.errors?.[0]?.details || [],
+    warnings: validation.warnings || [],
+  });
+}
+
+function assertConfigTelemetry(session, fortiConfig, res) {
+  const validation = validateConfigTelemetryForSession(session, fortiConfig);
+  if (!validation.ok && res) sendConfigTelemetryMismatch(res, validation);
+  return validation;
+}
+
+function validateWorkspaceConfigTelemetry(data, fortiConfig) {
+  return validateConfigTelemetryConsistency(data?.flows || [], fortiConfig || {});
 }
 
 function getPolicyEngineResult(session, profile = 'recommended', fortiConfig = session.fortiConfig || {}, trafficScope = { mode: 'all' }) {
@@ -694,6 +724,8 @@ app.get('/api/policy-engine/v2', (req, res) => {
   if (!Array.isArray(s.data?.flows)) {
     return res.status(410).json({ error: 'Flows indisponibles pour Policy Engine V2' });
   }
+  const consistency = assertConfigTelemetry(s, s.fortiConfig || {}, res);
+  if (!consistency.ok) return;
   const profile = String(req.query.profile || 'recommended');
   if (!['recommended', 'strict', 'synthetic', 'expert'].includes(profile)) {
     return res.status(400).json({ error: 'Profil Policy Engine V2 invalide' });
@@ -1313,8 +1345,10 @@ app.get('/api/export/workspace', (req, res) => {
   const s = requireSession(req, res);
   if (!s) return;
   if (!s.data || s.status !== 'ready') return res.status(409).json({ error: 'Session non prête' });
+  const consistency = assertConfigTelemetry(s, s.fortiConfig, res);
+  if (!consistency.ok) return;
 
-  // Si les flows ont été libérés en mémoire (après chargement conf FortiGate),
+  // Si les flows ont été libérés en mémoire (après chargement de la config FortiGate),
   // on les récupère depuis le cache disque qui a été écrit avant le free.
   let exportData = s.data;
   if (!exportData.flows) {
@@ -1356,6 +1390,10 @@ app.post('/api/import/workspace', express.raw({ type: ['application/octet-stream
       jsonText = buf.toString('utf8');
     }
     const body = validateWorkspaceBody(parseWorkspaceJson(jsonText));
+    if (body.fortiConfig) {
+      const consistency = validateWorkspaceConfigTelemetry(body.data, body.fortiConfig);
+      if (!consistency.ok) return sendConfigTelemetryMismatch(res, consistency);
+    }
     const id = createSession();
     setSessionData(id, body.data);
     if (body.fortiConfig) setFortiConfig(id, body.fortiConfig);
@@ -1374,6 +1412,8 @@ app.get('/api/workspaces', (req, res) => {
 app.post('/api/workspaces', express.json({ limit: '10kb' }), async (req, res) => {
   const s = requireSession(req, res);
   if (!s) return;
+  const consistency = assertConfigTelemetry(s, s.fortiConfig, res);
+  if (!consistency.ok) return;
   const zlib = require('zlib');
   const name = (req.body?.name || '').trim().slice(0, 80) || 'Sans nom';
 
@@ -1423,6 +1463,10 @@ app.get('/api/workspaces/:id', async (req, res) => {
       )
     );
     const body = validateWorkspaceBody(parseWorkspaceJson(json));
+    if (body.fortiConfig) {
+      const consistency = validateWorkspaceConfigTelemetry(body.data, body.fortiConfig);
+      if (!consistency.ok) return sendConfigTelemetryMismatch(res, consistency);
+    }
     const newId = createSession();
     setSessionData(newId, body.data);
     if (body.fortiConfig) setFortiConfig(newId, body.fortiConfig);
@@ -1711,6 +1755,9 @@ app.post('/api/deploy/config-upload', upload.single('conffile'), async (req, res
   try {
     const text = await fs.promises.readFile(req.file.path, 'utf8');
     const fortiConfig = parseFortiConfig(text);
+    const consistency = assertConfigTelemetry(s, fortiConfig);
+    if (!consistency.ok) return sendConfigTelemetryMismatch(res, consistency);
+
     s.fortiConfig = fortiConfig;
     s.fortiConfigRawText = text;
     setFortiConfig(s.id, fortiConfig);
@@ -1772,6 +1819,9 @@ app.post('/api/deploy/config-vdom', express.json(), (req, res) => {
 
   try {
     const fortiConfig = parseFortiConfig(s.fortiConfigRawText, vdom);
+    const consistency = assertConfigTelemetry(s, fortiConfig);
+    if (!consistency.ok) return sendConfigTelemetryMismatch(res, consistency);
+
     s.fortiConfig = fortiConfig;
     setFortiConfig(s.id, fortiConfig);
 
@@ -1841,6 +1891,8 @@ app.post('/api/deploy/dynamic-routes', (req, res) => {
   const s = requireSession(req, res);
   if (!s) return;
   if (!s.fortiConfig) return res.status(404).json({ error: 'Aucune config FortiGate chargée' });
+  const consistency = assertConfigTelemetry(s, s.fortiConfig, res);
+  if (!consistency.ok) return;
 
   const { protocol, cliOutput } = req.body || {};
   if (!cliOutput || !protocol) return res.status(400).json({ error: 'protocol et cliOutput requis' });
@@ -1897,6 +1949,8 @@ app.post('/api/deploy/preflight', (req, res) => {
   const s = requireSession(req, res);
   if (!s) return;
   if (!s.fortiConfig) return res.status(404).json({ error: 'Aucune config FortiGate chargée' });
+  const consistency = assertConfigTelemetry(s, s.fortiConfig, res);
+  if (!consistency.ok) return;
 
   const { selectedPolicies } = req.body || {};
   if (!Array.isArray(selectedPolicies) || selectedPolicies.length === 0) {
@@ -1927,6 +1981,8 @@ app.post('/api/deploy/generate', (req, res) => {
   const s = requireSession(req, res);
   if (!s) return;
   if (!s.fortiConfig) return res.status(404).json({ error: 'Aucune config FortiGate chargée' });
+  const consistency = assertConfigTelemetry(s, s.fortiConfig, res);
+  if (!consistency.ok) return;
 
   const { selectedPolicies, opts } = req.body || {};
   if (!Array.isArray(selectedPolicies) || selectedPolicies.length === 0) {

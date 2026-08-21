@@ -56,6 +56,34 @@ const nginxConfigPath = path.resolve(
   'fortiflow.conf',
 );
 
+test('le chargement de configuration passe le gate de cohérence avant toute mutation de session', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(source, /\.\/lib\/config-consistency/);
+  assert.match(source, /CONFIG_TELEMETRY_MISMATCH/);
+  const gate = source.indexOf('validateConfigTelemetryConsistency');
+  const mutation = source.indexOf('s.fortiConfig = fortiConfig');
+  assert.ok(gate >= 0, 'le gate de cohérence doit être appelé');
+  assert.ok(mutation >= 0, 'la mutation de session doit rester identifiable');
+  assert.ok(gate < mutation, 'la configuration ne doit pas muter avant la validation');
+  assert.match(source, /sendConfigTelemetryMismatch\(res/);
+});
+
+test('les chemins policy-engine, preflight, génération et workspace revalident la cohérence', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  for (const marker of [
+    "app.get('/api/policy-engine/v2'",
+    "app.post('/api/deploy/preflight'",
+    "app.post('/api/deploy/generate'",
+    "app.post('/api/import/workspace'",
+  ]) {
+    const start = source.indexOf(marker);
+    assert.ok(start >= 0, `route absente: ${marker}`);
+    const end = source.indexOf('\n});', start);
+    const route = source.slice(start, end >= 0 ? end : source.length);
+    assert.match(route, /configTelemetry|validateConfigTelemetryConsistency|validateWorkspaceConfigTelemetry|assertConfigTelemetry/);
+  }
+});
+
 test(
   'le reverse proxy écrase X-Forwarded-For avec l’adresse TCP réelle',
   {

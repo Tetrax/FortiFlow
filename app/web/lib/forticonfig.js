@@ -328,6 +328,84 @@ function extractVdomLines(lines, vdomName) {
   return result;
 }
 
+// ─── Config identity ──────────────────────────────────────────────────────────
+
+function unquoteConfigValue(value) {
+  return String(value || '').trim().replace(/^"|"$/g, '');
+}
+
+// Read top-level `set` directives from a non-edit FortiOS config section.
+// This deliberately ignores nested config blocks so a child setting cannot
+// masquerade as the device/global identity of the selected scope.
+function extractTopLevelSettings(lines, sectionName) {
+  const settings = {};
+  let inSection = false;
+  let depth = 0;
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    if (!inSection) {
+      if (line === `config ${sectionName}`) {
+        inSection = true;
+        depth = 1;
+      }
+      continue;
+    }
+    if (line.startsWith('config ')) {
+      depth++;
+      continue;
+    }
+    if (line === 'end') {
+      depth--;
+      if (depth === 0) break;
+      continue;
+    }
+    if (depth !== 1 || !line.startsWith('set ')) continue;
+    const rest = line.slice(4).trim();
+    const split = rest.indexOf(' ');
+    if (split <= 0) {
+      settings[rest] = '';
+      continue;
+    }
+    settings[rest.slice(0, split)] = unquoteConfigValue(rest.slice(split + 1));
+  }
+  return settings;
+}
+
+function parseConfigIdentity(lines, vdomList, selectedVdom, activeVdom) {
+  const global = extractTopLevelSettings(lines, 'system global');
+  const haSettings = extractTopLevelSettings(lines, 'system ha');
+  const firstNonEmpty = (...values) => values
+    .map(value => unquoteConfigValue(value))
+    .find(value => value !== '') || null;
+  const hostname = firstNonEmpty(global.hostname);
+  // FortiOS backups do not normally expose the appliance serial. Preserve an
+  // explicitly exported value when present, but never infer it from hostname.
+  const devid = firstNonEmpty(
+    global.devid,
+    global['device-id'],
+    global['serial-number'],
+    global.serial,
+  );
+  const selectionExplicit = vdomList.length <= 1 || Boolean(selectedVdom);
+  return {
+    hostname,
+    devid,
+    serial: devid,
+    vdom: activeVdom || null,
+    selectedVdom: activeVdom || null,
+    vdomList: [...vdomList],
+    vdomSelectionExplicit: selectionExplicit,
+    vdomSelectionRequired: vdomList.length > 1 && !selectionExplicit,
+    ha: {
+      enabled: Object.keys(haSettings).length > 0,
+      groupName: firstNonEmpty(haSettings['group-name']),
+      groupId: firstNonEmpty(haSettings['group-id']),
+      memberDeviceIds: [],
+    },
+  };
+}
+
 // ─── Main config parser ───────────────────────────────────────────────────────
 
 function parseFortiConfig(text, selectedVdom = null) {
@@ -344,6 +422,7 @@ function parseFortiConfig(text, selectedVdom = null) {
     parseText  = parseLines.join('\n');
   }
 
+  const identity = parseConfigIdentity(lines, vdomList, selectedVdom, activeVdom);
   // ── Raw section extraction — single pass for all sections ──
   const _sections     = extractSections(parseLines, [
     'firewall address',
@@ -636,7 +715,7 @@ function parseFortiConfig(text, selectedVdom = null) {
     profileGroup: Object.keys(_sections['firewall profile-group'] || {}),
   };
 
-  return { addresses, addressGroups, customServices, serviceGroups, interfaces, zones, sdwanMembers, sdwanZoneNames, sdwanEnabled, sdwanIntfName, vdomList, selectedVdom: activeVdom, hasVdom: vdomList.length > 0, staticRoutes, fullRoutes, hasBgp, hasOspf, hasNonDefaultVrf, hasPolicyRoutes, hasSdwanRules, existingPolicies, securityProfiles };
+  return { addresses, addressGroups, customServices, serviceGroups, interfaces, zones, sdwanMembers, sdwanZoneNames, sdwanEnabled, sdwanIntfName, vdomList, selectedVdom: activeVdom, hasVdom: vdomList.length > 0, identity, vdomSelectionRequired: identity.vdomSelectionRequired, staticRoutes, fullRoutes, hasBgp, hasOspf, hasNonDefaultVrf, hasPolicyRoutes, hasSdwanRules, existingPolicies, securityProfiles };
 }
 
 // ─── Static routes + BGP parser ──────────────────────────────────────────────
