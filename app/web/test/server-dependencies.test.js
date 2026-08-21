@@ -84,6 +84,14 @@ test('les chemins policy-engine, preflight, génération et workspace revalident
   }
 });
 
+test('le gate de cohérence filtre la télémétrie sur le VDOM explicitement sélectionné', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const start = source.indexOf('function validateConfigTelemetryForSession');
+  const end = source.indexOf('\n}', start);
+  const helper = source.slice(start, end >= 0 ? end : source.length);
+  assert.match(helper, /flowsForFortiConfig\([^,]+,\s*fortiConfig/);
+});
+
 test('la sauvegarde et l’export workspace restent possibles avant le chargement FortiGate', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   for (const marker of ["app.get('/api/export/workspace'", "app.post('/api/workspaces'"]) {

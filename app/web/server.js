@@ -273,7 +273,8 @@ function flowsForFortiConfig(flows, fortiConfig) {
 }
 
 function validateConfigTelemetryForSession(session, fortiConfig = session?.fortiConfig) {
-  const flows = session?.originalFlows || session?.data?.flows || [];
+  const sourceFlows = session?.originalFlows || session?.data?.flows || [];
+  const flows = flowsForFortiConfig(sourceFlows, fortiConfig || {});
   return validateConfigTelemetryConsistency(flows, fortiConfig || {});
 }
 

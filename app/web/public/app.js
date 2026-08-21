@@ -2055,7 +2055,6 @@ async function denied() {
       const portTags = d.ports.slice(0, 8).map(p => `<span class="tag port-tag">${escHtml(p)}</span>`).join('');
       const barW = Math.round((d.sessions / data[0].sessions) * 100);
       return `<tr>
-        <td><input type="checkbox" class="denied-chk" data-idx="${i}"></td>
         <td class="mono">${escHtml(d.srcSubnet)}</td>
         <td class="mono">${escHtml(d.dstTarget)}</td>
         <td>${typeTag(d.dstType)}</td>
@@ -2069,12 +2068,10 @@ async function denied() {
       <div style="padding:24px;max-width:1400px">
         <div style="margin-bottom:12px;display:flex;align-items:center;gap:12px">
           <span style="font-size:13px;color:var(--text2)">${data.length} flux refusés · ${fmtNum(totalSessions)} sessions bloquées</span>
-          <button class="btn-accent" id="btn-denied-to-deploy" disabled>Envoyer au déploiement</button>
         </div>
         <div style="overflow-x:auto">
           <table>
             <thead><tr>
-              <th><input type="checkbox" id="chk-all-denied"></th>
               <th>Source</th><th>Destination</th><th>Type</th>
               <th>Services / Ports</th><th>Sessions</th><th>Volume</th>
             </tr></thead>
@@ -2082,53 +2079,6 @@ async function denied() {
           </table>
         </div>
       </div>`;
-
-    // Wire select-all
-    const chkAll = el('chk-all-denied');
-    const deniedSelected = new Set();
-    const updateBtn = () => {
-      const btn = el('btn-denied-to-deploy');
-      btn.disabled = deniedSelected.size === 0;
-      btn.textContent = deniedSelected.size > 0
-        ? `Envoyer ${deniedSelected.size} flux au déploiement`
-        : 'Envoyer au déploiement';
-    };
-
-    chkAll.addEventListener('change', e => {
-      document.querySelectorAll('.denied-chk').forEach(chk => {
-        chk.checked = e.target.checked;
-        e.target.checked ? deniedSelected.add(+chk.dataset.idx) : deniedSelected.delete(+chk.dataset.idx);
-      });
-      updateBtn();
-    }, { signal });
-
-    document.querySelectorAll('.denied-chk').forEach(chk => {
-      chk.addEventListener('change', e => {
-        e.target.checked ? deniedSelected.add(+chk.dataset.idx) : deniedSelected.delete(+chk.dataset.idx);
-        updateBtn();
-      }, { signal });
-    });
-
-    el('btn-denied-to-deploy').addEventListener('click', () => {
-      if (deniedSelected.size === 0) return;
-      // Convert selected denied flows to policy format and push to deploy
-      const selectedDenied = [...deniedSelected].map(i => data[i]).filter(Boolean);
-      // Store as pending denied policies for the deploy tab
-      deployState._pendingDenied = selectedDenied.map(d => ({
-        srcSubnet:   d.srcSubnet,
-        dstTarget:   d.dstTarget,
-        dstType:     d.dstType,
-        sessions:    d.sessions,
-        services:    d.services,
-        ports:       d.ports,
-        protos:      ['TCP'],
-        serviceDesc: [...d.services, ...d.ports.map(p => `${p}/TCP`)].join(', '),
-        policyIds:   [],
-        action:      'deny',
-        _fromDenied: true,
-      }));
-      navigateTo('deploy');
-    }, { signal });
 
   } catch (err) {
     el(_renderTarget || 'content').innerHTML = `<div class="empty-state" style="padding:40px;color:var(--danger)">${escHtml(err.message)}</div>`;
@@ -6864,11 +6814,6 @@ async function analyzeDeployPolicies() {
       coverageRatio: polData.quality.captureCoverageRatio,
       available: polData.quality.temporalDataAvailable,
     } : null;
-    // Append pending denied flows if any
-    if (deployState._pendingDenied && deployState._pendingDenied.length > 0) {
-      rawPolicies = rawPolicies.concat(deployState._pendingDenied);
-      deployState._pendingDenied = null;
-    }
     setLoadingText(`${rawPolicies.length} policies V2 sûres — analyse FortiGate en cours…`);
     setLoadingPct(30);
   } catch (err) {

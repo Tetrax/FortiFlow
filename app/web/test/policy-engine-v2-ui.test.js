@@ -15,6 +15,11 @@ test('échappe les guillemets dans les attributs alimentés par la configuration
   assert.equal(escape(`SAFE"'&<>`), 'SAFE&quot;&#39;&amp;&lt;&gt;');
 });
 
+test('les flux refusés restent une vue de preuve et ne contournent pas la provenance V2', () => {
+  assert.equal(appSource.includes('btn-denied-to-deploy'), false);
+  assert.equal(appSource.includes('_pendingDenied'), false);
+});
+
 test('Deploy uses Policy Engine V2 recommended profile and safety metrics', () => {
   assert.match(appSource, /api\/policy-engine\/v2\?profile=/);
   for (const label of ['Recommandé', 'Strict', 'Synthétique', 'Expert']) {
