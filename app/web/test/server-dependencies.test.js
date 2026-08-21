@@ -34,6 +34,14 @@ test('server exposes the Policy Engine V2 endpoint', () => {
   assert.match(source, /optimization:\s*result\.optimization/);
 });
 
+test('Policy Engine V2 API parses Traffic Scope, keys the cache, and returns scope metrics', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(source, /require\(['"]\.\/lib\/traffic-scope['"]\)/);
+  assert.match(source, /parseTrafficScopeQuery\(req\.query\)/);
+  assert.match(source, /trafficScopeKey/);
+  assert.match(source, /trafficScope:\s*result\.trafficScope/);
+});
+
 test('deployment preflight receives the complete V2 atom set after user selection', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   const wiredCalls = source.match(/preflightValidation\([^\n]+requiredPolicyEngineAtoms\)/g) || [];

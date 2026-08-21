@@ -18,6 +18,7 @@ const { parseFortiConfig, analyzePolicies,
         sortRoutes, formatExistingPolicies }             = require('./lib/forticonfig');
 const { buildHostPairCoverage, buildPolicyOrderIssues }  = require('./lib/coverage');
 const { getCaptureDeploymentBlockers }                    = require('./lib/deploy-safety');
+const { parseTrafficScopeQuery, trafficScopeKey }          = require('./lib/traffic-scope');
 
 const app   = express();
 const TRUST_PROXY = (process.env.FORTIFLOW_TRUST_PROXY || '').trim();
@@ -264,17 +265,24 @@ function flowsForFortiConfig(flows, fortiConfig) {
   return list.filter(flow => String(flow.vdom || '').trim() === selectedVdom);
 }
 
-function getPolicyEngineResult(session, profile = 'recommended', fortiConfig = session.fortiConfig || {}) {
+function getPolicyEngineResult(session, profile = 'recommended', fortiConfig = session.fortiConfig || {}, trafficScope = { mode: 'all' }) {
   const flows = session.data?.flows || [];
-  const cached = session.policyEngineV2Cache;
+  const activeTrafficScopeKey = trafficScopeKey(trafficScope);
+  const cacheKey = `${profile}||${activeTrafficScopeKey}`;
+  if (!(session.policyEngineV2Cache instanceof Map)) session.policyEngineV2Cache = new Map();
+  const cached = session.policyEngineV2Cache.get(cacheKey);
   if (cached
-    && cached.profile === profile
     && cached.flows === flows
     && cached.fortiConfig === fortiConfig) {
     return cached.result;
   }
-  const result = buildPolicyEngineV2(flows, { profile, fortiConfig });
-  session.policyEngineV2Cache = { profile, flows, fortiConfig, result };
+  const result = buildPolicyEngineV2(flows, { profile, fortiConfig, trafficScope });
+  session.policyEngineV2Cache.set(cacheKey, {
+    profile, trafficScopeKey: activeTrafficScopeKey, trafficScope: result.trafficScope, flows, fortiConfig, result,
+  });
+  if (session.policyEngineV2Cache.size > 16) {
+    session.policyEngineV2Cache.delete(session.policyEngineV2Cache.keys().next().value);
+  }
   return result;
 }
 
@@ -284,7 +292,19 @@ function getRequiredPolicyEngineAtoms(session, selectedPolicies, fortiConfig) {
     .filter(Boolean))];
   if (profiles.length === 0) return null;
   if (profiles.length > 1) throw new Error('Plusieurs profils Policy Engine V2 sont mélangés dans la sélection');
-  return getPolicyEngineResult(session, profiles[0], fortiConfig).atoms;
+  const policyScopes = (selectedPolicies || [])
+    .filter(policy => policy?._policyEngineV2?.profile)
+    .map(policy => ({
+      key: policy._policyEngineV2.trafficScopeKey || trafficScopeKey({ mode: 'all' }),
+      scope: policy._policyEngineV2.trafficScope || { mode: 'all' },
+    }));
+  const scopeKeys = [...new Set(policyScopes.map(entry => entry.key))];
+  if (scopeKeys.length > 1) throw new Error('Plusieurs Traffic Scopes sont mélangés dans la sélection');
+  const trafficScope = policyScopes[0]?.scope || { mode: 'all' };
+  if (trafficScopeKey(trafficScope) !== (scopeKeys[0] || trafficScopeKey({ mode: 'all' }))) {
+    throw new Error('Traffic Scope de policy invalide ou altéré');
+  }
+  return getPolicyEngineResult(session, profiles[0], fortiConfig, trafficScope).atoms;
 }
 
 function requireSession(req, res) {
@@ -678,8 +698,14 @@ app.get('/api/policy-engine/v2', (req, res) => {
   if (!['recommended', 'strict', 'synthetic', 'expert'].includes(profile)) {
     return res.status(400).json({ error: 'Profil Policy Engine V2 invalide' });
   }
+  let trafficScope;
   try {
-    const result = getPolicyEngineResult(s, profile, s.fortiConfig || {});
+    trafficScope = parseTrafficScopeQuery(req.query);
+  } catch (error) {
+    return res.status(400).json({ error: error.message });
+  }
+  try {
+    const result = getPolicyEngineResult(s, profile, s.fortiConfig || {}, trafficScope);
     const captureBlockers = getCaptureDeploymentBlockers(s.data, s.fortiConfig || {});
     const quality = {
       captureStart: s.data.stats?.captureStart ?? null,
@@ -717,6 +743,7 @@ app.get('/api/policy-engine/v2', (req, res) => {
       affinityViews: result.affinityViews,
       blockers: result.blockers,
       inputSummary: result.inputSummary,
+      trafficScope: result.trafficScope,
       expertParameters: result.expertParameters,
       quality,
     };

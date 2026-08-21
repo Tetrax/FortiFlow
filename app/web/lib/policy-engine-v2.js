@@ -1,6 +1,7 @@
 'use strict';
 
 const { PREDEFINED } = require('./forticonfig');
+const { filterTrafficScope, trafficScopeKey } = require('./traffic-scope');
 
 const PROFILE_NAMES = new Set(['recommended', 'strict', 'synthetic', 'expert']);
 
@@ -928,9 +929,12 @@ function buildStrictPolicies(atoms) {
 
 function buildPolicyEngineV2(flows, options = {}) {
   const profile = PROFILE_NAMES.has(options.profile) ? options.profile : 'recommended';
-  const inputSummary = summarizeInput(flows);
-  const canonicalAtoms = canonicalizeFlows(flows);
-  const serviceInventory = buildServiceInventory(canonicalAtoms, options.fortiConfig || {});
+  const fortiConfig = options.fortiConfig || {};
+  const scopedInput = filterTrafficScope(flows, options.trafficScope || { mode: 'all' }, fortiConfig);
+  const activeTrafficScopeKey = trafficScopeKey(scopedInput.scope);
+  const inputSummary = summarizeInput(scopedInput.flows);
+  const canonicalAtoms = canonicalizeFlows(scopedInput.flows);
+  const serviceInventory = buildServiceInventory(canonicalAtoms, fortiConfig);
   const serviceByKey = new Map(serviceInventory.map(service => [service.key, service]));
   const atoms = canonicalAtoms.map(atom => ({
     ...atom,
@@ -946,7 +950,7 @@ function buildPolicyEngineV2(flows, options = {}) {
         name: `FFV2-${String(index + 1).padStart(5, '0')}`,
       }));
   const exactPolicies = ['recommended', 'expert'].includes(profile)
-    ? applyExactExistingSourceObjects(sourceAggregatedPolicies, options.fortiConfig || {})
+    ? applyExactExistingSourceObjects(sourceAggregatedPolicies, fortiConfig)
     : sourceAggregatedPolicies;
   const beforeOptimizationMetrics = evaluatePolicies(atoms, beforeOptimizationPolicies);
   const policies = profile === 'synthetic'
@@ -965,6 +969,8 @@ function buildPolicyEngineV2(flows, options = {}) {
   ));
   for (const policy of policies) {
     policy._policyEngineV2.deploymentBlocked = policy.serviceDescriptors.some(service => service.deploymentBlocked);
+    policy._policyEngineV2.trafficScopeKey = activeTrafficScopeKey;
+    policy._policyEngineV2.trafficScope = scopedInput.scope;
     policy.metrics = evaluatePolicy(observedTupleSet, policy);
   }
   const metrics = evaluatePolicies(atoms, policies);
@@ -1000,7 +1006,12 @@ function buildPolicyEngineV2(flows, options = {}) {
     allowImplicitExpansion: false,
     networkAggregation: false,
   } : undefined;
-  return { profile, atoms, policies, metrics, optimization, serviceInventory, affinityViews, blockers, inputSummary, expertParameters };
+  const trafficScope = {
+    ...scopedInput.scope,
+    key: activeTrafficScopeKey,
+    summary: scopedInput.summary,
+  };
+  return { profile, atoms, policies, metrics, optimization, serviceInventory, affinityViews, blockers, inputSummary, trafficScope, expertParameters };
 }
 
 module.exports = {
