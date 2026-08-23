@@ -393,52 +393,36 @@ async function dashboard() {
 
   const s  = state.stats;
   const m  = state.meta;
-  const pct = s.totalSessions ? Math.round(s.acceptSessions / s.totalSessions * 100) : 0;
+  let policyCount = 0;
+  try {
+    const policyData = await api('/api/policies?include_no_rcvd=1');
+    policyCount = (policyData.policies || policyData || []).length;
+  } catch { /* le dashboard reste disponible si les policies ne sont pas prêtes */ }
 
   el(_renderTarget || 'content').innerHTML = `
     <div class="stat-grid">
       <div class="stat-card">
         <div class="stat-value">${fmtNum(s.totalSessions)}</div>
-        <div class="stat-label">Sessions totales</div>
+        <div class="stat-label">Sessions analysées</div>
       </div>
       <div class="stat-card">
-        <div class="stat-value">${fmtNum(s.uniqueFlows)}</div>
-        <div class="stat-label">Flux uniques</div>
+        <div class="stat-value blue">${fmtNum(s.uniqueFlows)}</div>
+        <div class="stat-label">Flux analysés</div>
       </div>
       <div class="stat-card">
-        <div class="stat-value blue">${fmtNum(s.uniqueSrcIPs)}</div>
-        <div class="stat-label">IPs source</div>
+        <div class="stat-value blue">${fmtNum(s.srcSubnets)}</div>
+        <div class="stat-label">Réseaux détectés</div>
       </div>
       <div class="stat-card">
-        <div class="stat-value blue">${fmtNum(s.uniqueDstIPs)}</div>
-        <div class="stat-label">IPs destination</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value">${fmtNum(s.srcSubnets)}</div>
-        <div class="stat-label">Subnets /24 source</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value orange">${fmtNum(s.privateSrcIPs)}</div>
-        <div class="stat-label">Hôtes RFC1918</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value">${pct}%</div>
-        <div class="stat-label">Taux d'acceptation</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value red">${fmtNum(s.denySessions)}</div>
-        <div class="stat-label">Sessions refusées</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value blue">${fmtBytes(s.totalBytes)}</div>
-        <div class="stat-label">Volume total</div>
+        <div class="stat-value">${fmtNum(policyCount)}</div>
+        <div class="stat-label">Policies proposées</div>
       </div>
     </div>
 
     <div class="section-header" style="margin-top:8px;">
       <div>
         <div class="section-title">Fichier analysé</div>
-        <div class="section-sub">${m?.filename || ''} — ${fmtNum(m?.lineCount)} lignes lues · ${fmtNum(m?.uniqueFlows || 0)} flux uniques · ${fmtNum(m?.skipped || 0)} ignorées${m?.skipReasons ? ` (${fmtNum(m.skipReasons.nonTraffic || 0)} non-traffic, ${fmtNum(m.skipReasons.invalidFlow || 0)} invalides)` : ''}</div>
+        <div class="section-sub">${m?.filename || ''} — ${fmtNum(s.totalSessions)} sessions · ${fmtBytes(s.totalBytes)} · ${fmtNum(m?.lineCount)} lignes · ${fmtNum(m?.skipped || 0)} ignorées${m?.skipReasons ? ` (${fmtNum(m.skipReasons.nonTraffic || 0)} non-traffic, ${fmtNum(m.skipReasons.invalidFlow || 0)} invalides)` : ''}</div>
       </div>
       <div style="display:flex;gap:8px;">
         <button class="export-btn primary" onclick="navigateTo('policies')">◎ Voir les policies</button>
@@ -455,7 +439,7 @@ async function dashboard() {
           <div><div class="stat-value" style="font-size:18px;color:var(--danger)">${fmtNum(s.denySessions)}</div><div class="stat-label" style="color:var(--danger)">DENY/DROP</div></div>
         </div>
       </div>
-      <div class="stat-card" style="cursor:pointer;" onclick="navigateTo('groups')">
+      <div class="stat-card" style="cursor:pointer;" onclick="state.subView.analyse='matrix';navigateTo('analyse')">
         <div style="font-size:12px;color:var(--text2);margin-bottom:8px;">Destinations</div>
         <div style="display:flex;gap:16px;align-items:center;">
           <div><div class="stat-value" style="font-size:18px;">${fmtNum(s.privateDstIPs)}</div><div class="stat-label" style="color:var(--accent2)">LAN (RFC1918)</div></div>
@@ -700,8 +684,8 @@ async function matrix() {
   el(_renderTarget || 'content').innerHTML = `
     <div class="section-header">
       <div>
-        <div class="section-title">Heatmap LAN → LAN</div>
-        <div class="section-sub">Intensité = nombre de sessions entre subnets /24 privés</div>
+        <div class="section-title">Matrice réseau LAN → LAN</div>
+        <div class="section-sub">Communications observées entre réseaux privés · intensité selon le nombre de sessions</div>
       </div>
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <div class="matrix-toggle">
@@ -778,16 +762,17 @@ function renderMatrix(data, mode = 'accept', signal) {
     return;
   }
 
-  const CELL  = 32;
-  const FONT  = '11px monospace';
+  const availableMatrixWidth = Math.max(480, (el('matrix-wrap')?.clientWidth || 900) - 180);
+  const CELL  = Math.max(38, Math.min(92, Math.floor(availableMatrixWidth / Math.max(srcSubnets.length, dstSubnets.length))));
+  const FONT  = `${CELL >= 72 ? 12 : 11}px monospace`;
   const PAD   = 8;
 
   // Measure the longest label to set left margin dynamically
   const tmpCanvas = document.createElement('canvas');
   const tmpCtx    = tmpCanvas.getContext('2d');
   tmpCtx.font = FONT;
-  const longestSrc = Math.max(...srcSubnets.map(s => tmpCtx.measureText(s.replace('.0/24', '.x')).width));
-  const longestDst = Math.max(...dstSubnets.map(s => tmpCtx.measureText(s.replace('.0/24', '.x')).width));
+  const longestSrc = Math.max(...srcSubnets.map(s => tmpCtx.measureText(s).width));
+  const longestDst = Math.max(...dstSubnets.map(s => tmpCtx.measureText(s).width));
 
   // Left margin = longest src label + padding
   const LABEL_LEFT = Math.ceil(longestSrc) + 16;
@@ -801,9 +786,27 @@ function renderMatrix(data, mode = 'accept', signal) {
   canvas.width  = W;
   canvas.height = H;
   const ctx = canvas.getContext('2d');
+  const rootStyle = getComputedStyle(document.documentElement);
+  const cssColor = (name, fallback) => rootStyle.getPropertyValue(name).trim() || fallback;
+  const parseColor = (value) => {
+    const hex = value.match(/^#([0-9a-f]{6})$/i);
+    if (hex) return [parseInt(hex[1].slice(0,2),16), parseInt(hex[1].slice(2,4),16), parseInt(hex[1].slice(4,6),16)];
+    const rgb = value.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
+    return rgb ? [Number(rgb[1]), Number(rgb[2]), Number(rgb[3])] : [80, 80, 110];
+  };
+  const mix = (from, to, amount) => {
+    const a = parseColor(from), b = parseColor(to);
+    return `rgb(${a.map((value, i) => Math.round(value + (b[i] - value) * amount)).join(',')})`;
+  };
+  const matrixBg = cssColor('--bg1', '#101018');
+  const matrixCell = cssColor('--bg2', '#161622');
+  const matrixDiagonal = cssColor('--bg3', '#202034');
+  const matrixAccept = cssColor('--accent2', '#6b9ee8');
+  const matrixDeny = cssColor('--danger', '#c95252');
+  const matrixText = cssColor('--text2', '#9090b0');
 
   // Background
-  ctx.fillStyle = '#0e0e1a';
+  ctx.fillStyle = matrixBg;
   ctx.fillRect(0, 0, W, H);
 
   // Legend canvas — vert pour accept, rouge pour deny
@@ -811,13 +814,13 @@ function renderMatrix(data, mode = 'accept', signal) {
   if (lc) {
     const lctx = lc.getContext('2d');
     const grad = lctx.createLinearGradient(0, 0, 120, 0);
-    grad.addColorStop(0, '#0e0e1a');
+    grad.addColorStop(0, matrixBg);
     if (mode === 'deny') {
-      grad.addColorStop(0.5, '#550000');
-      grad.addColorStop(1,   '#ff1744');
+      grad.addColorStop(0.5, mix(matrixBg, matrixDeny, 0.55));
+      grad.addColorStop(1, matrixDeny);
     } else {
-      grad.addColorStop(0.5, '#005533');
-      grad.addColorStop(1,   '#00e676');
+      grad.addColorStop(0.5, mix(matrixBg, matrixAccept, 0.55));
+      grad.addColorStop(1, matrixAccept);
     }
     lctx.fillStyle = grad;
     lctx.fillRect(0, 0, 120, 12);
@@ -829,7 +832,7 @@ function renderMatrix(data, mode = 'accept', signal) {
 
   // Draw column labels (dst subnets) — rotated -45°, anchored at bottom-left of each column
   ctx.font = FONT;
-  ctx.fillStyle = '#9090b0';
+  ctx.fillStyle = matrixText;
   ctx.textAlign = 'left';
   for (let di = 0; di < dstSubnets.length; di++) {
     const x = LABEL_LEFT + di * CELL + CELL / 2;
@@ -837,18 +840,18 @@ function renderMatrix(data, mode = 'accept', signal) {
     ctx.save();
     ctx.translate(x, y);
     ctx.rotate(-Math.PI / 4);
-    ctx.fillText(dstSubnets[di].replace('.0/24', '.x'), 0, 0);
+    ctx.fillText(dstSubnets[di], 0, 0);
     ctx.restore();
   }
 
   // Draw row labels (src subnets) — right-aligned, vertically centred on each row
   ctx.font = FONT;
-  ctx.fillStyle = '#9090b0';
+  ctx.fillStyle = matrixText;
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
   for (let si = 0; si < srcSubnets.length; si++) {
     const y = LABEL_TOP + si * CELL + CELL / 2;
-    ctx.fillText(srcSubnets[si].replace('.0/24', '.x'), LABEL_LEFT - 8, y);
+    ctx.fillText(srcSubnets[si], LABEL_LEFT - 8, y);
   }
   ctx.textBaseline = 'alphabetic';
 
@@ -859,27 +862,21 @@ function renderMatrix(data, mode = 'accept', signal) {
       const y = LABEL_TOP  + si * CELL;
 
       // Grid cell background
-      ctx.fillStyle = si === di ? '#12122a' : '#0b0b18';
-      ctx.fillRect(x + 1, y + 1, CELL - 2, CELL - 2);
+      ctx.fillStyle = si === di ? matrixDiagonal : matrixCell;
+      ctx.beginPath();
+      ctx.roundRect(x + 2, y + 2, CELL - 4, CELL - 4, 4);
+      ctx.fill();
 
       const c = cellMap.get(`${si},${di}`);
       if (c) {
         const t = maxCount > 0 ? Math.log1p(c.count) / Math.log1p(maxCount) : 0;
-        // Couleur : vert (accept) ou rouge (deny) sur échelle log
-        if (mode === 'deny') {
-          const r = Math.round(80 + t * 175);
-          ctx.fillStyle = `rgb(${r},${Math.round(t * 23)},${Math.round(t * 20)})`;
-        } else {
-          const g = Math.round(60 + t * 170);
-          const b = Math.round(60 + t * 58);
-          ctx.fillStyle = `rgb(0,${g},${b})`;
-        }
-        ctx.fillRect(x + 1, y + 1, CELL - 2, CELL - 2);
+        ctx.fillStyle = mix(matrixCell, mode === 'deny' ? matrixDeny : matrixAccept, 0.25 + t * 0.75);
+        ctx.beginPath();
+        ctx.roundRect(x + 2, y + 2, CELL - 4, CELL - 4, 4);
+        ctx.fill();
 
         // Session count inside cell
-        const textColor = mode === 'deny'
-          ? (t > 0.55 ? '#000' : '#ff5252')
-          : (t > 0.55 ? '#000' : '#00e676');
+        const textColor = t > 0.55 ? cssColor('--bg0', '#09090e') : cssColor('--text', '#f0eef8');
         ctx.fillStyle = textColor;
         ctx.font = '9px monospace';
         ctx.textAlign = 'center';
@@ -1247,6 +1244,8 @@ function renderPoliciesTable(policies, excluded) {
     const pid    = 'pd-' + i;
     const srcB64 = btoa(p.srcSubnet);
     const dstB64 = btoa(p.dstTarget);
+    const serviceItems = String(p.serviceDesc || '').split(',').map(item => item.trim()).filter(Boolean);
+    const serviceCell = `${serviceItems.slice(0, 8).map(escHtml).join(', ')}${serviceItems.length > 8 ? ` <span class="compact-more">+${serviceItems.length - 8} autres</span>` : ''}`;
     const drillBtn = p.srcSubnet && p.dstTarget
       ? '<button class="drill-btn" onclick="togglePolicyDrill(' + i + ',\'' + srcB64 + '\',\'' + dstB64 + '\')">&#9662; H\u00f4tes</button>'
       : '';
@@ -1254,7 +1253,7 @@ function renderPoliciesTable(policies, excluded) {
       + '<td class="mono" style="color:var(--text2)">' + (i + 1) + '</td>'
       + '<td class="mono">' + typeTag('private') + ' ' + escHtml(p.srcSubnet) + '</td>'
       + '<td class="mono">' + typeTag(p.dstType) + ' ' + escHtml(p.dstTarget) + '</td>'
-      + '<td style="max-width:260px;white-space:normal;font-family:var(--mono);font-size:11px;">' + escHtml(p.serviceDesc) + '</td>'
+      + '<td style="max-width:320px;white-space:normal;font-family:var(--mono);font-size:11px;line-height:1.7">' + serviceCell + '</td>'
       + '<td class="mono">' + (p.sessions > 0 ? fmtNum(p.sessions) : '\u2013') + '</td>'
       + '<td class="mono">' + fmtBytes(p.sentBytes + p.rcvdBytes) + '</td>'
       + '<td>' + actionTag(p.action) + '</td>'
@@ -1267,7 +1266,7 @@ function renderPoliciesTable(policies, excluded) {
   }).join('');
 
   const isRaw = state.policies.viewMode === 'raw';
-  const srcHeader = isRaw ? 'Source /32' : 'Source (subnet /24)';
+  const srcHeader = isRaw ? 'Source /32' : 'Source (réseau)';
   const dstHeader = isRaw ? 'Destination /32' : 'Destination';
   const countLabel = fmtNum(policies.length) + ' règle' + (policies.length > 1 ? 's' : '') + ' — ordonnées par volume de sessions';
 
@@ -2824,6 +2823,18 @@ function mountDrawer() {
       const hint = document.getElementById('drawer-undo-hint');
       if (hint) hint.style.display = '';
     };
+    if (e.target.closest('.drawer-services-toggle')) {
+      p._servicesExpanded = !p._servicesExpanded;
+      populateDrawer(_drawerIdx);
+      return;
+    }
+    const hostsToggle = e.target.closest('.drawer-hosts-toggle');
+    if (hostsToggle) {
+      const key = hostsToggle.dataset.hostsType === 'src' ? '_srcHostsExpanded' : '_dstHostsExpanded';
+      p[key] = !p[key];
+      populateDrawer(_drawerIdx);
+      return;
+    }
     // Action toggle (accept / deny)
     if (e.target.matches('.drawer-action-btn')) {
       p._action = e.target.dataset.action;
@@ -3249,10 +3260,10 @@ function syncHostCell(idx, type) {
   syncRowStatus(idx);
 }
 
-function _buildSvcCellHtml(p) {
+function _buildSvcCellHtml(p, limit = Infinity) {
   const svcList = p.analysis?.services || [];
   const stripPredef = n => (n || '').replace(/PREDEFINED$/i, '');
-  const html = svcList.map(svc => {
+  const html = svcList.slice(0, limit).map(svc => {
     if (svc.found) {
       const dispName = stripPredef(svc.name);
       return `<span class="match-ok" style="font-size:10px" title="${escHtml(svc.portHint || stripPredef(svc.label) || dispName)}">&#10003; ${escHtml(dispName)}${badgeHtml('config')}</span>`;
@@ -3266,14 +3277,15 @@ function _buildSvcCellHtml(p) {
     }
     return `<span class="match-ok" style="font-size:10px;color:var(--warn)" title="${escHtml(svc.portHint || displayName)}">${displayName ? escHtml(displayName) + ' ' : ''}${badgeHtml('auto')}</span>`;
   }).join(' ');
-  return html || '<span style="color:var(--text2)">–</span>';
+  const more = svcList.length > limit ? `<span class="compact-more">+${svcList.length - limit} autres</span>` : '';
+  return (html + (html && more ? ' ' : '') + more) || '<span style="color:var(--text2)">–</span>';
 }
 
 function syncSvcCell(idx) {
   const p = deployState.analyzed?.[idx];
   if (!p) return;
   const cell = document.querySelector(`.svc-cell[data-svc-idx="${idx}"]`);
-  if (cell) cell.innerHTML = _buildSvcCellHtml(p);
+  if (cell) cell.innerHTML = _buildSvcCellHtml(p, 3);
   syncRowStatus(idx);
 }
 
@@ -3328,7 +3340,8 @@ function populateDrawer(idx) {
       let hostsHtml = '';
       if (!isSubnet && s.hosts?.length > 0) {
         const visibleSrcHosts = s.hosts.filter(h => !p._excludedSrcHosts?.has(h));
-        hostsHtml = `<div style="padding-left:16px;margin-top:2px;margin-bottom:6px">${visibleSrcHosts.slice(0, 50).map(h => {
+        const shownSrcHosts = p._srcHostsExpanded ? visibleSrcHosts : visibleSrcHosts.slice(0, 8);
+        hostsHtml = `<div style="padding-left:16px;margin-top:2px;margin-bottom:6px">${shownSrcHosts.map(h => {
           const foundSet = new Set(p._srcHostsFound || []);
           const hostName = cleanHostName(h, (p._srcHostNames || {})[h]) || `FF_HOST_${h.replace(/\./g,'_')}`;
           const hostFound = foundSet.has(h);
@@ -3339,7 +3352,7 @@ function populateDrawer(idx) {
               : `<input class="drawer-host-input" data-type="src" data-host="${escHtml(h)}" value="${escHtml(inputVal(cleanHostName(h, p._srcHostNames?.[h]), `FF_HOST_${h.replace(/\./g,'_')}`))}" placeholder="${escHtml(hostName)}">`}
             <button class="btn-del-item" data-del-type="src-host" data-host="${escHtml(h)}" title="Retirer cet hôte">✕</button>
           </div>`;
-        }).join('')}${visibleSrcHosts.length > 50 ? `<div style="font-size:10px;color:var(--text2)">+${visibleSrcHosts.length - 50} autres…</div>` : ''}</div>`;
+        }).join('')}${visibleSrcHosts.length > 8 ? `<button class="drawer-more-toggle drawer-hosts-toggle" data-hosts-type="src">${p._srcHostsExpanded ? 'Réduire' : `+ ${visibleSrcHosts.length - 8} autres`}</button>` : ''}</div>`;
       }
       return `<div class="drawer-multisrc-row" style="display:flex;align-items:center;gap:6px;padding:3px 0">
         <span class="drawer-multisrc-subnet" style="font-family:var(--mono);font-size:11px;min-width:120px">${escHtml(s.subnet)}</span>
@@ -3360,14 +3373,15 @@ function populateDrawer(idx) {
           : ''}
       </div>
       ${_addrBanner('src')}
-      <div class="drawer-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-srcintf">${ifOpts}</select></div>
+      <div class="drawer-field drawer-interface-field drawer-source-interface-field"><span class="drawer-field-label">Source</span><select class="drawer-input drawer-srcintf">${ifOpts}</select></div>
     </div>`;
   } else {
     // ── Single source subnet ──
     let srcHostsHtml = '';
     if (srcHosts.length > 0 && srcMode === 'hosts') {
       const visibleSrcHostsSingle = srcHosts.filter(h => !p._excludedSrcHosts?.has(h));
-      srcHostsHtml = `<div class="drawer-host-list">${visibleSrcHostsSingle.slice(0, 80).map(h => {
+      const shownSrcHostsSingle = p._srcHostsExpanded ? visibleSrcHostsSingle : visibleSrcHostsSingle.slice(0, 8);
+      srcHostsHtml = `<div class="drawer-host-list">${shownSrcHostsSingle.map(h => {
         const foundSet = new Set(p._srcHostsFound || []);
         const hostFound = foundSet.has(h);
         const name = cleanHostName(h, (p._srcHostNames || {})[h]) || `FF_HOST_${h.replace(/\./g,'_')}`;
@@ -3378,7 +3392,7 @@ function populateDrawer(idx) {
             : `<input class="drawer-host-input" data-type="src" data-host="${escHtml(h)}" value="${escHtml(inputVal(cleanHostName(h, p._srcHostNames?.[h]), `FF_HOST_${h.replace(/\./g,'_')}`))}" placeholder="${escHtml(name)}">`}
           <button class="btn-del-item" data-del-type="src-host" data-host="${escHtml(h)}" title="Retirer cet hôte">✕</button>
         </div>`;
-      }).join('')}</div>`;
+      }).join('')}${visibleSrcHostsSingle.length > 8 ? `<button class="drawer-more-toggle drawer-hosts-toggle" data-hosts-type="src">${p._srcHostsExpanded ? 'Réduire' : `+ ${visibleSrcHostsSingle.length - 8} autres`}</button>` : ''}</div>`;
       if (srcHosts.length > 1) {
         const srcGrpFound = p._srcAddrGrpFound;
         srcHostsHtml += `<div class="drawer-toggle-row" style="margin-top:4px">
@@ -3395,17 +3409,17 @@ function populateDrawer(idx) {
       <div class="drawer-field"><span class="drawer-field-label">Subnet</span><span class="drawer-field-value">${escHtml(p.srcSubnet || '')}</span></div>
       <div class="drawer-toggle-row">
         <span style="font-size:11px;color:var(--text2)">Mode :</span>
-        <button class="drawer-toggle-btn drawer-mode-btn ${srcMode==='subnet'?'active':''}" data-type="src" data-mode="subnet">/24 subnet</button>
+        <button class="drawer-toggle-btn drawer-mode-btn ${srcMode==='subnet'?'active':''}" data-type="src" data-mode="subnet">/${p.srcSubnet?.split('/')[1] || 'CIDR'} réseau</button>
         <button class="drawer-toggle-btn drawer-mode-btn ${srcMode==='hosts'?'active':''} ${srcHosts.length<1?'disabled':''}" data-type="src" data-mode="hosts">/32 hôtes (${srcHosts.length})</button>
       </div>
-      ${srcMode === 'subnet' ? `<div class="drawer-field">
+      ${srcMode === 'subnet' ? `<div class="drawer-field drawer-object-field">
         <span class="drawer-field-label">Objet addr</span>
         ${srcFound ? `<span class="drawer-field-value" style="color:var(--success)" title="${escHtml(a.srcAddr?.cidr || p.srcSubnet || '')}">&#10003; ${escHtml(srcAddrName)}${badgeHtml('config')}</span>`
           : `<input class="drawer-input drawer-src-name" value="${escHtml(inputVal(srcAddrName, a.srcAddr?.suggestedName || suggestAddrNameFE(p.srcSubnet)))}" placeholder="${escHtml(srcAddrName || 'FF_...')}">${badgeHtml('auto')}`}
       </div>` : ''}
       ${srcHostsHtml}
       ${_addrBanner('src')}
-      <div class="drawer-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-srcintf">${ifOpts}</select></div>
+      <div class="drawer-field drawer-interface-field drawer-source-interface-field"><span class="drawer-field-label">Source</span><select class="drawer-input drawer-srcintf">${ifOpts}</select></div>
     </div>`;
   }
 
@@ -3420,7 +3434,8 @@ function populateDrawer(idx) {
       let hostsHtml = '';
       if (!isSubnet && s.hosts?.length > 0) {
         const visibleDstHosts = s.hosts.filter(h => !p._excludedDstHosts?.has(h));
-        hostsHtml = `<div style="padding-left:16px;margin-top:2px;margin-bottom:6px">${visibleDstHosts.slice(0, 50).map(h => {
+        const shownDstHosts = p._dstHostsExpanded ? visibleDstHosts : visibleDstHosts.slice(0, 8);
+        hostsHtml = `<div style="padding-left:16px;margin-top:2px;margin-bottom:6px">${shownDstHosts.map(h => {
           const foundSet = new Set(p._dstHostsFound || []);
           const hostName = cleanHostName(h, (p._dstHostNames || {})[h]) || `FF_HOST_${h.replace(/\./g,'_')}`;
           const hostFound = foundSet.has(h);
@@ -3431,7 +3446,7 @@ function populateDrawer(idx) {
               : `<input class="drawer-host-input" data-type="dst" data-host="${escHtml(h)}" value="${escHtml(inputVal(cleanHostName(h, p._dstHostNames?.[h]), `FF_HOST_${h.replace(/\./g,'_')}`))}" placeholder="${escHtml(hostName)}">`}
             <button class="btn-del-item" data-del-type="dst-host" data-host="${escHtml(h)}" title="Retirer cet hôte">✕</button>
           </div>`;
-        }).join('')}${visibleDstHosts.length > 50 ? `<div style="font-size:10px;color:var(--text2)">+${visibleDstHosts.length - 50} autres…</div>` : ''}</div>`;
+        }).join('')}${visibleDstHosts.length > 8 ? `<button class="drawer-more-toggle drawer-hosts-toggle" data-hosts-type="dst">${p._dstHostsExpanded ? 'Réduire' : `+ ${visibleDstHosts.length - 8} autres`}</button>` : ''}</div>`;
       }
       return `<div class="drawer-multidst-row">
         <span class="drawer-multidst-subnet">${escHtml(s.subnet)}</span>
@@ -3450,7 +3465,7 @@ function populateDrawer(idx) {
         <button class="drawer-toggle-btn drawer-dstall-btn ${!dstUseAllMulti ? 'active' : ''}" data-val="false">IPs spécifiques (${subs.length})</button>
         <button class="drawer-toggle-btn drawer-dstall-btn ${dstUseAllMulti ? 'active' : ''}" data-val="true">all</button>
       </div>` : ''}
-      ${isMultiDstWan && dstUseAllMulti ? `<div class="drawer-field">
+      ${isMultiDstWan && dstUseAllMulti ? `<div class="drawer-field drawer-object-field">
         <span class="drawer-field-label">Objet addr</span>
         <span class="drawer-field-value" style="color:var(--success)">&#10003; all${badgeHtml('config')}</span>
       </div>` : `${subRows}
@@ -3472,7 +3487,8 @@ function populateDrawer(idx) {
     if (dstHosts.length > 0 && (dstMode === 'hosts' || (isWan && !dstUseAll))) {
       const dstFoundSet = new Set(p._dstHostsFound || []);
       const visibleDstHostsSingle = dstHosts.filter(h => !p._excludedDstHosts?.has(h));
-      dstHostsHtml = `<div class="drawer-host-list">${visibleDstHostsSingle.slice(0, 80).map(h => {
+      const shownDstHostsSingle = p._dstHostsExpanded ? visibleDstHostsSingle : visibleDstHostsSingle.slice(0, 8);
+      dstHostsHtml = `<div class="drawer-host-list">${shownDstHostsSingle.map(h => {
         const name = cleanHostName(h, (p._dstHostNames || {})[h]) || `FF_HOST_${h.replace(/\./g,'_')}`;
         const hostFound = dstFoundSet.has(h);
         return `<div class="drawer-host-row">
@@ -3482,7 +3498,7 @@ function populateDrawer(idx) {
             : `<input class="drawer-host-input" data-type="dst" data-host="${escHtml(h)}" value="${escHtml(inputVal(cleanHostName(h, p._dstHostNames?.[h]), `FF_HOST_${h.replace(/\./g,'_')}`))}" placeholder="${escHtml(name)}">`}
           <button class="btn-del-item" data-del-type="dst-host" data-host="${escHtml(h)}" title="Retirer cet hôte">✕</button>
         </div>`;
-      }).join('')}</div>`;
+      }).join('')}${visibleDstHostsSingle.length > 8 ? `<button class="drawer-more-toggle drawer-hosts-toggle" data-hosts-type="dst">${p._dstHostsExpanded ? 'Réduire' : `+ ${visibleDstHostsSingle.length - 8} autres`}</button>` : ''}</div>`;
     }
     // WAN + IPs spécifiques + pas de dstHosts : montrer dstTarget comme objet à nommer
     let dstWanSpecificHtml = '';
@@ -3492,11 +3508,11 @@ function populateDrawer(idx) {
       const customName = p._dstAddrName || '';
       const dstTargetFound = dstFound && dstAddrName !== 'all';
       dstWanSpecificHtml = dstTargetFound
-        ? `<div class="drawer-field">
+        ? `<div class="drawer-field drawer-object-field">
             <span class="drawer-field-label">Objet addr</span>
             <span class="drawer-field-value" style="color:var(--success)">&#10003; ${escHtml(dstAddrName)}${badgeHtml('config')}</span>
           </div>`
-        : `<div class="drawer-field">
+        : `<div class="drawer-field drawer-object-field">
             <span class="drawer-field-label">Objet addr</span>
             <input class="drawer-input drawer-dst-name" value="${escHtml(inputVal(customName, autoName))}" placeholder="${escHtml(autoName)}">${badgeHtml('auto')}
           </div>`;
@@ -3512,16 +3528,16 @@ function populateDrawer(idx) {
         <button class="drawer-toggle-btn drawer-dstall-btn ${dstUseAll ? 'active' : ''}" data-val="true">all</button>
         <button class="drawer-toggle-btn drawer-dstall-btn ${!dstUseAll ? 'active' : ''}" data-val="false">IPs spécifiques${dstHosts.length > 0 ? ` (${dstHosts.length})` : ''}</button>
       </div>
-      ${dstUseAll ? `<div class="drawer-field">
+      ${dstUseAll ? `<div class="drawer-field drawer-object-field">
         <span class="drawer-field-label">Objet addr</span>
         <span class="drawer-field-value" style="color:var(--success)">&#10003; all${badgeHtml('config')}</span>
       </div>` : dstWanSpecificHtml}
       ` : `${p.dstType === 'private' ? `<div class="drawer-toggle-row">
         <span style="font-size:11px;color:var(--text2)">Mode :</span>
-        <button class="drawer-toggle-btn drawer-mode-btn ${dstMode==='subnet'?'active':''}" data-type="dst" data-mode="subnet">/24 subnet</button>
+        <button class="drawer-toggle-btn drawer-mode-btn ${dstMode==='subnet'?'active':''}" data-type="dst" data-mode="subnet">/${p.dstTarget?.split('/')[1] || 'CIDR'} réseau</button>
         <button class="drawer-toggle-btn drawer-mode-btn ${dstMode==='hosts'?'active':''} ${dstHosts.length<1?'disabled':''}" data-type="dst" data-mode="hosts">/32 hôtes (${dstHosts.length})</button>
       </div>` : ''}
-      ${dstMode === 'subnet' ? `<div class="drawer-field">
+      ${dstMode === 'subnet' ? `<div class="drawer-field drawer-object-field">
         <span class="drawer-field-label">Objet addr</span>
         ${dstFound ? `<span class="drawer-field-value" style="color:var(--success)" title="${escHtml(a.dstAddr?.cidr || p.dstTarget || '')}">&#10003; ${escHtml(dstAddrName)}${badgeHtml('config')}</span>`
           : `<input class="drawer-input drawer-dst-name" value="${escHtml(inputVal(dstAddrName, a.dstAddr?.suggestedName || suggestAddrNameFE(p.dstTarget)))}" placeholder="${escHtml(dstAddrName || 'FF_...')}">${badgeHtml('auto')}`}
@@ -3557,7 +3573,8 @@ function populateDrawer(idx) {
       <button class="btn-sm btn-accent svc-do-merge" style="font-size:10px">Fusionner</button>
     </div>` : '';
   const stripPd = n => (n || '').replace(/PREDEFINED$/i, '');
-  const svcsHtml = svcList.map(svc => {
+  const visibleSvcList = p._servicesExpanded ? svcList : svcList.slice(0, 6);
+  const svcsHtml = visibleSvcList.map(svc => {
     if (svc.found) {
       const dispLabel = stripPd(svc.label || svc.name);
       const dispName  = stripPd(svc.name);
@@ -3588,6 +3605,9 @@ function populateDrawer(idx) {
       <button class="btn-del-item" data-del-type="svc" data-svc-key="${escHtml(svcKey)}" title="Retirer ce service de la policy">✕</button>
     </div>`;
   }).join('');
+  const servicesMore = svcList.length > 6
+    ? `<button class="drawer-more-toggle drawer-services-toggle">${p._servicesExpanded ? 'Réduire' : `+ ${svcList.length - 6} autres`}</button>`
+    : '';
 
   // Propagation banner (shown after blur on svc name when other policies have same port/proto)
   const pp = p._propagatePending;
@@ -3599,39 +3619,46 @@ function populateDrawer(idx) {
 
   const body = document.getElementById('drawer-body');
   body.innerHTML = `
-    <div class="drawer-section">
-      <div class="drawer-section-title">General</div>
-      <div class="drawer-field"><span class="drawer-field-label">Direction</span><span class="drawer-field-value">${p._isWan ? '<span class="dir-badge wan">WAN</span>' : '<span class="dir-badge lan">LAN</span>'}</span></div>
-      <div class="drawer-field"><span class="drawer-field-label">Policy IDs</span><span class="drawer-field-value">${(p.policyIds||[]).join(', ') || '—'}</span></div>
-      <div class="drawer-field"><span class="drawer-field-label">Sessions</span><span class="drawer-field-value">${fmtNum(p.sessions||0)}</span></div>
-      <div class="drawer-field"><span class="drawer-field-label">Action</span>
-        <div style="display:flex;gap:4px">
-          <button class="btn-sm drawer-action-btn ${(p._action||'accept')==='accept'?'active':''}" data-action="accept" style="${(p._action||'accept')==='accept'?'background:var(--success,#22c55e);color:#fff;border-color:var(--success,#22c55e)':''}">✓ Accept</button>
-          <button class="btn-sm drawer-action-btn ${(p._action||'accept')==='deny'?'active':''}" data-action="deny" style="${(p._action||'accept')==='deny'?'background:var(--danger,#ef4444);color:#fff;border-color:var(--danger,#ef4444)':''}">✕ Deny</button>
-        </div>
-      </div>
-      <div class="drawer-field"><span class="drawer-field-label">Log</span>
-        <select class="drawer-input drawer-log-sel">
-          <option value="all" ${(p._log||'all')==='all'?'selected':''}>log all</option>
-          <option value="utm" ${p._log==='utm'?'selected':''}>log utm</option>
-          <option value="disable" ${p._log==='disable'?'selected':''}>log disable</option>
-        </select>
-      </div>
-      <div class="drawer-field"><span class="drawer-field-label">NAT</span><label style="display:flex;align-items:center;gap:6px"><input type="checkbox" class="drawer-nat" ${p._nat ? 'checked' : ''}> <span style="font-size:11px;color:var(--text2)">Activer le NAT</span></label></div>
-      <div class="drawer-field"><span class="drawer-field-label">Nom policy</span><input class="drawer-input drawer-policy-name" value="${escHtml(p._policyName || '')}" placeholder="FF_POLICY_..."></div>
-      <div class="drawer-field" style="margin-top:4px">
-        <button class="btn-sm" onclick="filterFlowsByPolicy(${idx})" style="width:100%;justify-content:center">→ Voir les flux</button>
+    <div class="drawer-section drawer-general-summary">
+      <div class="drawer-section-title">Général</div>
+      <div class="drawer-general-grid">
+        <div><span>Direction</span>${p._isWan ? '<span class="dir-badge wan">WAN</span>' : '<span class="dir-badge lan">LAN</span>'}</div>
+        <div><span>Sessions</span><strong>${fmtNum(p.sessions || 0)}</strong></div>
+        <div><span>Policy ID</span><strong>${(p.policyIds || [])[0] || '—'}</strong></div>
+        <div class="drawer-general-action"><span>Action</span><button class="btn-sm drawer-action-btn ${(p._action||'accept')==='accept'?'active':''}" data-action="accept">✓ Accept</button><button class="btn-sm drawer-action-btn ${(p._action||'accept')==='deny'?'active':''}" data-action="deny">✕ Deny</button></div>
       </div>
     </div>
     ${srcSection}
     ${dstSection}
-    <div class="drawer-section">
-      <div class="drawer-section-title">Interfaces destination</div>
-      <div class="drawer-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-dstintf">${ifOptsDst}</select></div>
+    <div class="drawer-section" id="drawer-interfaces-section">
+      <div class="drawer-section-title">Interfaces</div>
+      <div id="drawer-interface-fields"><div class="drawer-field drawer-interface-field"><span class="drawer-field-label">Destination</span><select class="drawer-input drawer-dstintf">${ifOptsDst}</select></div></div>
     </div>
-    ${svcList.length ? `<div class="drawer-section"><div class="drawer-section-title">Services (${svcList.length})${selectableSvcs.length > 1 ? `<label style="font-size:10px;color:var(--text2);font-weight:400;margin-left:8px;display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" class="svc-sel-all" ${selectedSvcs.length === selectableSvcs.length ? 'checked' : ''} style="cursor:pointer;margin:0"> Tout sélectionner</label>` : ''}</div>${svcsHtml}${mergeBar}${propagateBanner}</div>` : ''}
-    ${buildDrawerSecProfiles(p, idx)}
+    ${svcList.length ? `<div class="drawer-section"><div class="drawer-section-title">Services (${svcList.length})${selectableSvcs.length > 1 ? `<label style="font-size:10px;color:var(--text2);font-weight:400;margin-left:8px;display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" class="svc-sel-all" ${selectedSvcs.length === selectableSvcs.length ? 'checked':''} style="cursor:pointer;margin:0"> Tout sélectionner</label>` : ''}</div>${svcsHtml}${servicesMore}${mergeBar}${propagateBanner}</div>` : ''}
+    <div class="drawer-section" id="drawer-objects-section">
+      <div class="drawer-section-title">Objets FortiGate</div>
+      <div id="drawer-object-fields"></div>
+    </div>
+    <details class="drawer-advanced">
+      <summary>Options avancées</summary>
+      <div class="drawer-advanced-body">
+        <div class="drawer-field"><span class="drawer-field-label">Log</span><select class="drawer-input drawer-log-sel"><option value="all" ${(p._log||'all')==='all'?'selected':''}>log all</option><option value="utm" ${p._log==='utm'?'selected':''}>log utm</option><option value="disable" ${p._log==='disable'?'selected':''}>log disable</option></select></div>
+        <div class="drawer-field"><span class="drawer-field-label">NAT</span><label style="display:flex;align-items:center;gap:6px"><input type="checkbox" class="drawer-nat" ${p._nat ? 'checked' : ''}> Activer</label></div>
+        <div class="drawer-field"><span class="drawer-field-label">Nom policy</span><input class="drawer-input drawer-policy-name" value="${escHtml(p._policyName || '')}" placeholder="FF_POLICY_..."></div>
+        <div class="drawer-field"><button class="btn-sm" onclick="filterFlowsByPolicy(${idx})" style="width:100%;justify-content:center">→ Voir les flux</button></div>
+        ${buildDrawerSecProfiles(p, idx)}
+      </div>
+    </details>
   `;
+  const interfaceFields = body.querySelector('#drawer-interface-fields');
+  body.querySelectorAll('.drawer-source-interface-field').forEach(field => interfaceFields.prepend(field));
+  const objectFields = body.querySelector('#drawer-object-fields');
+  body.querySelectorAll('.drawer-object-field').forEach(field => objectFields.append(field));
+  [...objectFields.children].forEach((field, index) => {
+    const label = field.querySelector('.drawer-field-label');
+    if (label) label.textContent = index === 0 ? 'Source' : 'Destination';
+  });
+  if (!objectFields.children.length) body.querySelector('#drawer-objects-section').style.display = 'none';
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -3639,11 +3666,11 @@ function populateDrawer(idx) {
 // ═══════════════════════════════════════════════════════════════
 
 async function analyse() {
-  const sub = state.subView.analyse;
+  let sub = state.subView.analyse;
+  if (sub === 'groups') sub = state.subView.analyse = 'flows';
   const pills = [
     { key: 'flows',  label: 'Flux',    icon: '≡' },
     { key: 'matrix', label: 'Matrice', icon: '⊞' },
-    { key: 'groups', label: 'Groupes', icon: '⊕' },
     { key: 'ports',  label: 'Ports',   icon: '◫' },
   ];
   const pillsHtml = pills.map(p =>
@@ -3799,20 +3826,15 @@ async function deploy() {
         <div class="deploy-step-header">
           <span class="deploy-step-num">4</span>
           Policies à générer
-          <div style="margin-left:auto;display:flex;gap:12px;align-items:center;font-size:12px;font-weight:400">
-            <label class="deploy-toggle-label">
-              NAT <input type="checkbox" id="opt-nat"> <span class="deploy-toggle-knob"></span>
-              <span style="color:var(--text2);font-weight:400;font-size:11px">(WAN uniquement)</span>
-            </label>
-            <select id="opt-action" class="deploy-select">
-              <option value="accept">accept</option>
-              <option value="deny">deny</option>
-            </select>
-            <select id="opt-log" class="deploy-select">
-              <option value="all">log all</option>
-              <option value="utm">log utm</option>
-              <option value="disable">log disable</option>
-            </select>
+          <div style="margin-left:auto;display:flex;gap:8px;align-items:center;font-size:12px;font-weight:400">
+            <div class="dropdown-wrap" id="deploy-options-wrap">
+              <button class="btn-sm dropdown-trigger">Options ▾</button>
+              <div class="dropdown-menu deploy-options-menu">
+                <label class="deploy-option-row"><span>NAT WAN</span><input type="checkbox" id="opt-nat"></label>
+                <label class="deploy-option-row"><span>Action</span><select id="opt-action" class="deploy-select"><option value="accept">accept</option><option value="deny">deny</option></select></label>
+                <label class="deploy-option-row"><span>Logs</span><select id="opt-log" class="deploy-select"><option value="all">log all</option><option value="utm">log utm</option><option value="disable">log disable</option></select></label>
+              </div>
+            </div>
             <button class="btn-accent" id="btn-analyze">⚡ Analyser les policies</button>
           </div>
         </div>
@@ -3860,7 +3882,7 @@ async function deploy() {
               <div class="detail-mode-hint">${{
                 service:              '↳ 1 policy par service — sources et destinations restent groupées. Vue propre par protocole.',
                 host:                 '↳ 1:1 complet : 1 policy par hôte src /32 × hôte dst /32 × service. Maximum de granularité.',
-                'src-agg-dst-detail': '↳ Hybride : sources en subnet /24, destinations en IP /32. Idéal pour flux utilisateurs → serveurs (WSUS, DC, VEEAM…).',
+                'src-agg-dst-detail': '↳ Hybride : sources en réseau CIDR, destinations en IP /32. Idéal pour flux utilisateurs → serveurs (WSUS, DC, VEEAM…).',
               }[deployState.bruteMode] || ''}</div>
               <button class="btn-sm btn-accent" style="width:100%;margin-bottom:8px" data-detail-action="apply">▶ Appliquer</button>
               <div class="dropdown-sep" style="margin:4px -4px"></div>
@@ -4198,7 +4220,7 @@ async function deploy() {
       if (hintEl) hintEl.textContent = {
         service:              '↳ 1 policy par service — sources et destinations restent groupées. Vue propre par protocole.',
         host:                 '↳ 1:1 complet : 1 policy par hôte src /32 × hôte dst /32 × service. Maximum de granularité.',
-        'src-agg-dst-detail': '↳ Hybride : sources en subnet /24, destinations en IP /32. Idéal pour flux utilisateurs → serveurs (WSUS, DC, VEEAM…).',
+        'src-agg-dst-detail': '↳ Hybride : sources en réseau CIDR, destinations en IP /32. Idéal pour flux utilisateurs → serveurs (WSUS, DC, VEEAM…).',
       }[deployState.bruteMode] || '';
       return;
     }
@@ -6612,23 +6634,38 @@ function syncAddrCell(idx, type) {
   syncRowStatus(idx);
 }
 
+function objectStatusTag(addrAnalysis, currentName) {
+  if (!addrAnalysis?.found) {
+    return currentName
+      ? '<span class="object-status-tag create">À CRÉER</span>'
+      : '<span class="object-status-tag auto">AUTO</span>';
+  }
+  const prefix = parseInt(String(addrAnalysis.cidr || '').split('/')[1], 10);
+  const source = String(addrAnalysis.source || '').replace('config-range', 'config');
+  if (source === 'config' && Number.isInteger(prefix) && prefix <= 16) {
+    return `<span class="object-status-tag broad" title="Objet existant à périmètre large">LARGE /${prefix}</span>`;
+  }
+  return source === 'config'
+    ? '<span class="object-status-tag exact">EXACT</span>'
+    : '<span class="object-status-tag auto">AUTO</span>';
+}
+
 function addrCell(addrAnalysis, currentName, idx, field) {
   if (!addrAnalysis?.found) {
     const displayName = currentName || addrAnalysis?.suggestedName || '';
     // Si l'utilisateur a tapé un nom custom → neutre (sera créé), sinon orange (action requise)
     if (currentName) {
-      return `<span class="inline-editable found" data-idx="${idx}" data-field="${field}" title="Cliquer pour modifier">${escHtml(currentName)} ${badgeHtml('auto')}</span>`;
+      return `<span class="inline-editable found" data-idx="${idx}" data-field="${field}" title="Cliquer pour modifier"><span class="object-name">${escHtml(currentName)}</span>${objectStatusTag(addrAnalysis, currentName)}</span>`;
     }
-    return `<span class="inline-editable missing" data-idx="${idx}" data-field="${field}" title="Cliquer pour modifier">${displayName ? escHtml(displayName) + ' ' : ''}${badgeHtml('auto')}</span>`;
+    return `<span class="inline-editable missing" data-idx="${idx}" data-field="${field}" title="Cliquer pour modifier"><span class="object-name">${displayName ? escHtml(displayName) : '—'}</span>${objectStatusTag(addrAnalysis, currentName)}</span>`;
   }
   const matches = addrAnalysis.allMatches || [{ name: addrAnalysis.name, source: addrAnalysis.source }];
   const cidrTip = addrAnalysis.cidr ? ` (${addrAnalysis.cidr})` : '';
-  const src = (matches[0].source || addrAnalysis.source || '').replace('config-range', 'config');
-  const badge = src === 'config' ? badgeHtml('config') : badgeHtml('auto');
+  const badge = objectStatusTag(addrAnalysis, currentName);
   if (matches.length === 1) {
-    return `<span class="inline-editable found" data-idx="${idx}" data-field="${field}" title="${escHtml(matches[0].name + cidrTip)}">${escHtml(matches[0].name)}${badge}</span>`;
+    return `<span class="inline-editable found" data-idx="${idx}" data-field="${field}" title="${escHtml(matches[0].name + cidrTip)}"><span class="object-name">${escHtml(matches[0].name)}</span>${badge}</span>`;
   }
-  return `<span class="inline-editable found" data-idx="${idx}" data-field="${field}" title="${escHtml(matches.length + ' objets correspondent' + cidrTip)}">${escHtml(matches[0].name)}${badge}</span>`;
+  return `<span class="inline-editable found" data-idx="${idx}" data-field="${field}" title="${escHtml(matches.length + ' objets correspondent' + cidrTip)}"><span class="object-name">${escHtml(matches[0].name)}</span>${badge}</span>`;
 }
 
 // Legacy addrCell for drawer/modal contexts (with full input)
@@ -7338,7 +7375,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     const dstAddrCell = _buildDstAddrCell(p, idx);
 
     // Services — compact
-    const svcCells = _buildSvcCellHtml(p);
+    const svcCells = _buildSvcCellHtml(p, 3);
 
     // Interfaces — read-only text, editable in drawer
     let srcIntf, dstIntf;
@@ -7391,22 +7428,24 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     const isHighlighted = !isAgg && idx === deployState._highlightIdx;
     if (isHighlighted) deployState._highlightIdx = null; // consommer une seule fois
     const isScan = isScanPolicy(p);
+    const objectState = rowStatus === 'ok'
+      ? '<span class="policy-ready">Prête</span>'
+      : `<span class="policy-needs-work" title="${escHtml(statusTitle)}">À compléter</span>`;
+    const interfaceSummary = `<span class="policy-interface-pair">${srcIntf}<span class="policy-interface-arrow">→</span>${dstIntf}</span>`;
     return `
       <tr class="deploy-policy-row ${isAgg ? 'seq-row' : ''} ${p._action === 'deny' ? 'policy-deny-row' : ''} ${p._disabled ? 'policy-disabled-row' : ''} ${isHighlighted ? 'policy-row-flash' : ''} ${isScan ? 'policy-scan-row' : ''}" data-idx="${idx}" ${isAgg ? `data-seq-members="${p._sequenceMembers.join(',')}"` : ''}>
-        <td><button class="btn-del-item deploy-del-policy" data-idx="${idx}" ${isAgg ? `data-seq-members="${p._sequenceMembers.join(',')}"` : ''} title="Supprimer cette policy">✕</button></td>
-        <td><input type="checkbox" ${chkAttr}></td>
-        <td class="merge-chk-cell"><input type="checkbox" ${mergeChkAttr} title="Sélectionner pour fusion"></td>
-        <td class="status-cell" title="${escHtml(statusTitle)}"><div class="status-bar status-${rowStatus}"></div></td>
-        <td><button class="btn-toggle-policy" data-idx="${idx}" title="${p._disabled ? 'Policy désactivée — cliquer pour activer' : 'Policy activée — cliquer pour désactiver'}"><span class="policy-status-badge ${p._disabled ? 'badge-disabled' : 'badge-enabled'}">${p._disabled ? 'DIS' : 'ENA'}</span></button></td>
-        <td class="impact-cell"><div class="impact-bar" style="width:${barW}%"></div><span class="impact-val">${fmtNum(p.sessions || 0)}</span></td>
-        <td>${actionBadge}${dirBadge}</td>
-        <td>${warnBadge}${seqBadge}${isScan ? '<span class="scan-badge" title="Destination silencieuse : ≥80% des flows n\'ont reçu aucune réponse. Port fermé, hôte injoignable, ou flux déjà bloqué ailleurs. Vérifier avant de créer une règle.">⚠ silencieux</span>' : ''}${p._hpsUnverified ? '<span class="scan-badge" title="Aucune paire src→dst trouvée dans l\'index de flows pour les services de cette policy. Les hôtes affichés n\'ont pas pu être vérifiés — possible désaccord de nommage entre logs et objets FortiGate.">⚠ non vérifié</span>' : ''}${srcSubnetText}${srcModeBadge}</td>
-        <td>${srcAddrCell}</td>
-        ${allSrcAutoFlag ? '' : `<td>${srcIntf}</td>`}
-        <td>${dstTargetCell(p, idx)}</td>
-        <td>${dstAddrCell}</td>
-        ${allDstAutoFlag ? '' : `<td>${dstIntf}</td>`}
-        <td class="svc-cell" data-svc-idx="${idx}">${svcCells}</td>
+        <td class="policy-controls-cell">
+          <input type="checkbox" ${chkAttr} title="Inclure dans le CLI">
+          <button class="btn-toggle-policy" data-idx="${idx}" title="${p._disabled ? 'Activer' : 'Désactiver'}"><span class="policy-status-badge ${p._disabled ? 'badge-disabled' : 'badge-enabled'}">${p._disabled ? 'DIS' : 'ENA'}</span></button>
+          <input type="checkbox" ${mergeChkAttr} title="Sélectionner pour fusion">
+          <button class="btn-del-item deploy-del-policy policy-row-secondary" data-idx="${idx}" ${isAgg ? `data-seq-members="${p._sequenceMembers.join(',')}"` : ''} title="Supprimer">✕</button>
+        </td>
+        <td class="policy-main-cell"><div class="policy-primary-line">${actionBadge}${dirBadge}${warnBadge}${seqBadge}${isScan ? '<span class="scan-badge">⚠ silencieux</span>' : ''}<span class="policy-primary-value">${srcSubnetText}${srcModeBadge}</span><span class="policy-session-inline">${fmtNum(p.sessions || 0)}</span></div></td>
+        <td class="policy-main-cell">${dstTargetCell(p, idx)}</td>
+        <td class="svc-cell policy-services-cell" data-svc-idx="${idx}">${svcCells}</td>
+        <td class="policy-interfaces-cell">${interfaceSummary}</td>
+        <td class="policy-objects-cell"><div class="policy-object-pair">${srcAddrCell}<span class="policy-interface-arrow">→</span>${dstAddrCell}</div></td>
+        <td class="policy-state-cell">${objectState}</td>
       </tr>`;
   }
 
@@ -7460,16 +7499,13 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     <div style="overflow-x:auto">
       <table class="deploy-policy-table">
         <thead><tr>
-          <th></th>
-          <th class="col-hdr-chk" title="Inclure dans le CLI généré"><input type="checkbox" id="chk-all-deploy" title="Tout cocher / décocher"></th>
-          <th class="col-hdr-chk" title="Sélectionner des policies à fusionner manuellement">⚡</th>
-          <th></th>
-          <th title="Activer / désactiver la policy dans le CLI généré"></th>
-          ${thSort('Sessions', 'sessions')}
-          ${thSort('Dir.', 'dir')}
-          ${thSort('Source', 'source')}${thSort('Src addr', 'srcAddr')}${allSrcAutoFlag ? '' : thSort('Src intf', 'srcIntf')}
-          ${thSort('Destination', 'dst')}${thSort('Dst addr', 'dstAddr')}${allDstAutoFlag ? '' : thSort('Dst intf', 'dstIntf')}
+          <th class="col-hdr-chk" title="Inclure toutes les policies"><input type="checkbox" id="chk-all-deploy" title="Tout cocher / décocher"></th>
+          ${thSort('Source', 'source')}
+          ${thSort('Destination', 'dst')}
           ${thSort('Services', 'services')}
+          <th>Interfaces</th>
+          <th>Objets FortiGate</th>
+          <th>État</th>
         </tr></thead>
         <tbody>${rows}</tbody>
       </table>

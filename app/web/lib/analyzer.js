@@ -34,7 +34,7 @@ function getSubnet24(ip) {
 }
 
 // Longest-prefix match against knownSubnets (sorted most-specific first).
-// Falls back to /24 if no match or no knownSubnets provided.
+// Keeps the observed IP as a /32 host when no FortiGate network matches.
 // knownSubnets = [{ prefix: Number, networkInt: Number, cidr: String }]
 function getSubnetForIP(ip, knownSubnets) {
   if (knownSubnets && knownSubnets.length > 0) {
@@ -46,7 +46,7 @@ function getSubnetForIP(ip, knownSubnets) {
       }
     }
   }
-  return getSubnet24(ip);
+  return isNaN(ip2int(ip)) ? null : `${ip}/32`;
 }
 
 // ─── Proto labels ─────────────────────────────────────────────────────────────

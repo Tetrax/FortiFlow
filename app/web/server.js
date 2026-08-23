@@ -10,7 +10,7 @@ const { parseFile }                                      = require('./lib/parser
 const { buildAnalysis, consolidatePolicies }             = require('./lib/analyzer');
 const { createSession, getSession, setSessionData, setFortiConfig,
         setSessionError, deleteSession, getStats, listSessions } = require('./lib/store');
-const { parseFortiConfig, analyzePolicies,
+const { parseFortiConfig, extractKnownSubnets, preserveDestinationServiceAffinity, analyzePolicies,
         generateConfig, validateAgainstExisting,
         preflightValidation,
         parseFullRoutingTable, parseOspfRoutingTable, parseBgpNetworkTable,
@@ -130,27 +130,6 @@ app.use((req, res, next) => {
 });
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-// Extracts sorted (most-specific first) subnet list from fortiConfig.addresses,
-// used to re-analyze flows with real CIDR boundaries instead of hardcoded /24.
-function extractKnownSubnets(fortiConfig) {
-  const addresses = fortiConfig?.addresses || {};
-  const subnets = [];
-  for (const addr of Object.values(addresses)) {
-    if (!addr.cidr || !addr.cidr.includes('/')) continue;
-    const slash = addr.cidr.lastIndexOf('/');
-    const ip  = addr.cidr.slice(0, slash);
-    const prefix = parseInt(addr.cidr.slice(slash + 1), 10);
-    if (isNaN(prefix) || prefix < 0 || prefix > 32) continue;
-    if (prefix === 32) continue; // /32 hosts: used for individual matching only, not subnet grouping
-    const parts = ip.split('.');
-    if (parts.length !== 4) continue;
-    const ipInt = parts.reduce((acc, p) => (acc * 256) + parseInt(p, 10), 0);
-    const mask  = prefix === 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) >>> 0;
-    subnets.push({ prefix, networkInt: (ipInt & mask) >>> 0, cidr: addr.cidr });
-  }
-  return subnets.sort((a, b) => b.prefix - a.prefix);
-}
 
 function requireSession(req, res) {
   const id = req.query.session || req.params.session;
@@ -428,6 +407,17 @@ app.get('/api/hosts', (req, res) => {
 app.get('/api/policies', (req, res) => {
   const s = requireSession(req, res);
   if (!s) return;
+
+  // Une session restaurée peut contenir des policies calculées avant le lookup
+  // FortiGate. Recalculer une seule fois avant de les envoyer au drawer.
+  if (s.fortiConfig && s.data?.flows?.length > 0 && !s._networkResolutionApplied) {
+    const meta = s.data.meta;
+    const newAnalysis = buildAnalysis(s.data.flows, extractKnownSubnets(s.fortiConfig));
+    newAnalysis.meta = meta;
+    s.data = newAnalysis;
+    s._networkResolutionApplied = true;
+    setSessionData(s.id, newAnalysis);
+  }
 
   let policies = s.data.policies;
   if (req.query.subnet) {
@@ -1362,6 +1352,7 @@ app.post('/api/deploy/config-upload', upload.single('conffile'), async (req, res
         const newAnalysis = buildAnalysis(s.data.flows, knownSubnets);
         newAnalysis.meta = meta;
         s.data = newAnalysis;
+        s._networkResolutionApplied = true;
         setSessionData(s.id, newAnalysis);
       }
     }
@@ -1409,6 +1400,16 @@ app.post('/api/deploy/config-vdom', express.json(), (req, res) => {
     const fortiConfig = parseFortiConfig(s.fortiConfigRawText, vdom);
     s.fortiConfig = fortiConfig;
     setFortiConfig(s.id, fortiConfig);
+
+    // Recalculer les réseaux proposés avec les objets et interfaces du VDOM choisi.
+    if (s.data?.flows?.length > 0) {
+      const meta = s.data.meta;
+      const newAnalysis = buildAnalysis(s.data.flows, extractKnownSubnets(fortiConfig));
+      newAnalysis.meta = meta;
+      s.data = newAnalysis;
+      s._networkResolutionApplied = true;
+      setSessionData(s.id, newAnalysis);
+    }
 
     const policyMap = new Map();
     for (const pol of fortiConfig.existingPolicies || []) {
@@ -1525,7 +1526,7 @@ app.post('/api/deploy/preflight', (req, res) => {
   }
 
   try {
-    const result = preflightValidation(selectedPolicies, s.fortiConfig);
+    const result = preflightValidation(preserveDestinationServiceAffinity(selectedPolicies), s.fortiConfig);
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1553,6 +1554,7 @@ app.post('/api/deploy/generate', (req, res) => {
 
   try {
     const o = opts || {};
+    const policiesWithAffinity = preserveDestinationServiceAffinity(selectedPolicies);
 
     // Apply user WAN toggles — build a patched config without mutating the session
     let configToUse = s.fortiConfig;
@@ -1567,11 +1569,11 @@ app.post('/api/deploy/generate', (req, res) => {
     }
 
     // SD-WAN zone takes priority; if none, preferredWanIntf falls to null (detectWanCandidates handles it)
-    const analyzed = analyzePolicies(selectedPolicies, configToUse, o.preferredWanIntf || null);
+    const analyzed = analyzePolicies(policiesWithAffinity, configToUse, o.preferredWanIntf || null);
 
     // Re-inject per-policy overrides from frontend (action, log, securityProfiles)
     for (let i = 0; i < analyzed.length; i++) {
-      const src = selectedPolicies[i] || {};
+      const src = policiesWithAffinity[i] || {};
       if (src.action)           analyzed[i].action           = src.action;
       if (src.log)              analyzed[i].log              = src.log;
       if (src.securityProfiles) analyzed[i].securityProfiles = src.securityProfiles;
@@ -1580,7 +1582,7 @@ app.post('/api/deploy/generate', (req, res) => {
     // Inject frontend-merged services (multi-port / range) into each policy's analysis
     // Also re-inject user-set suggestedName for standard services (lost during re-analysis)
     for (let i = 0; i < analyzed.length; i++) {
-      const src = selectedPolicies[i] || {};
+      const src = policiesWithAffinity[i] || {};
 
       // Re-inject port/suggestedName from frontend analysis (perdu lors de la re-analyse)
       const srcServices = src.analysis?.services || [];

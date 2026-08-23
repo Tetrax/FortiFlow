@@ -134,6 +134,35 @@ function fortiSubnetToCIDR(subnet) {
   return null;
 }
 
+// Réseaux connus par la configuration FortiGate, triés du plus spécifique
+// au plus large. Les objets address sont ajoutés avant les interfaces afin
+// qu'ils restent prioritaires lorsque le préfixe est identique.
+function extractKnownSubnets(fortiConfig) {
+  const byCidr = new Map();
+
+  function addCidr(cidr) {
+    if (!cidr || !cidr.includes('/')) return;
+    const slash = cidr.lastIndexOf('/');
+    const ip = cidr.slice(0, slash);
+    const prefix = parseInt(cidr.slice(slash + 1), 10);
+    const parts = ip.split('.').map(Number);
+    if (!Number.isInteger(prefix) || prefix <= 0 || prefix >= 32) return;
+    if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) return;
+
+    const mask = (0xFFFFFFFF << (32 - prefix)) >>> 0;
+    const networkInt = (ip2int(ip) & mask) >>> 0;
+    const normalized = `${int2ip(networkInt)}/${prefix}`;
+    if (!byCidr.has(normalized)) {
+      byCidr.set(normalized, { prefix, networkInt, cidr: normalized });
+    }
+  }
+
+  for (const address of Object.values(fortiConfig?.addresses || {})) addCidr(address.cidr);
+  for (const iface of Object.values(fortiConfig?.interfaces || {})) addCidr(iface.cidr);
+
+  return [...byCidr.values()].sort((a, b) => b.prefix - a.prefix);
+}
+
 function parsePorts(portrange) {
   if (!portrange) return [];
   const ports = [];
@@ -981,6 +1010,110 @@ function suggestAddrName(cidr) {
   return 'FF_' + (cidr || '').replace(/\//g, '_').replace(/\./g, '_');
 }
 
+// Préserve l'affinité destination/service d'une policy multi-destination à
+// partir des policies d'origine conservées dans _mergedFrom.
+function preserveDestinationServiceAffinity(policies) {
+  const serviceKey = (svc) => {
+    if (typeof svc === 'string') return `label:${svc}`;
+    if (svc?.isNamed || svc?.label || svc?.name) return `label:${svc.label || svc.name}`;
+    if (svc?.port != null) return `port:${svc.port}/${String(svc.proto || '').toUpperCase()}`;
+    if (Array.isArray(svc?.ports)) return `ports:${[...svc.ports].sort((a, b) => a - b).join(',')}/${String(svc.proto || '').toUpperCase()}`;
+    return JSON.stringify(svc);
+  };
+
+  const serviceLabel = (svc) => typeof svc === 'string' ? svc : (svc?.label || svc?.name || '');
+
+  return (policies || []).flatMap((policy) => {
+    const origins = (policy._mergedFrom || []).filter(origin =>
+      origin?.dstTarget && Array.isArray(origin.analysis?.services)
+    );
+    const destinations = [...new Set(origins.map(origin => origin.dstTarget))];
+    if (destinations.length < 2) return [policy];
+
+    const servicesByDestination = new Map();
+    for (const destination of destinations) {
+      const map = new Map();
+      for (const origin of origins.filter(item => item.dstTarget === destination)) {
+        for (const svc of origin.analysis.services) map.set(serviceKey(svc), svc);
+      }
+      servicesByDestination.set(destination, map);
+    }
+
+    const [firstDestination, ...remainingDestinations] = destinations;
+    const commonKeys = new Set(servicesByDestination.get(firstDestination).keys());
+    for (const destination of remainingDestinations) {
+      const keys = servicesByDestination.get(destination);
+      for (const key of [...commonKeys]) if (!keys.has(key)) commonKeys.delete(key);
+    }
+
+    const destinationMeta = new Map(
+      (policy._multiDstSubnets || []).map(item => [item.subnet, item])
+    );
+
+    const buildPolicy = (targetDestinations, serviceMap) => {
+      const multiDestination = targetDestinations.length > 1;
+      const metadata = targetDestinations.map(destination =>
+        destinationMeta.get(destination) || {
+          subnet: destination,
+          hosts: [],
+          useSubnet: true,
+          addrName: '',
+          addrFound: false,
+        }
+      );
+      const services = [...serviceMap.values()];
+      const selectedKeys = new Set(serviceMap.keys());
+      return {
+        ...policy,
+        dstTarget: targetDestinations[0],
+        dstTargets: targetDestinations,
+        _isMultiDst: multiDestination,
+        _multiDstSubnets: multiDestination ? metadata : null,
+        _dstUseAll: false,
+        dstHosts: [...new Set(metadata.flatMap(item => item.hosts || []))].sort(),
+        services: services.map(serviceLabel).filter(Boolean),
+        serviceDesc: services.map(serviceLabel).filter(Boolean).join(', '),
+        _mergedCount: targetDestinations.length,
+        _mergedFrom: origins
+          .filter(origin => targetDestinations.includes(origin.dstTarget))
+          .map(origin => ({
+            ...origin,
+            analysis: {
+              ...origin.analysis,
+              services: origin.analysis.services.filter(svc => selectedKeys.has(serviceKey(svc))),
+            },
+          })),
+        analysis: {
+          ...policy.analysis,
+          services,
+          needsWork: services.some(svc => !svc?.found),
+        },
+      };
+    };
+
+    const result = [];
+    if (commonKeys.size > 0) {
+      const commonServices = new Map();
+      for (const key of commonKeys) commonServices.set(key, servicesByDestination.get(firstDestination).get(key));
+      result.push(buildPolicy(destinations, commonServices));
+    }
+
+    const specificGroups = new Map();
+    for (const destination of destinations) {
+      const specificServices = new Map(
+        [...servicesByDestination.get(destination)].filter(([key]) => !commonKeys.has(key))
+      );
+      if (specificServices.size === 0) continue;
+      const signature = [...specificServices.keys()].sort().join('\u0001');
+      if (!specificGroups.has(signature)) specificGroups.set(signature, { destinations: [], services: specificServices });
+      specificGroups.get(signature).destinations.push(destination);
+    }
+    for (const group of specificGroups.values()) result.push(buildPolicy(group.destinations, group.services));
+
+    return result.length > 0 ? result : [policy];
+  });
+}
+
 function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
   const { addresses, customServices, interfaces, zones } = fortiConfig;
 
@@ -1763,6 +1896,8 @@ function formatExistingPolicies(policies) {
 
 module.exports = {
   parseFortiConfig,
+  extractKnownSubnets,
+  preserveDestinationServiceAffinity,
   analyzePolicies,
   generateConfig,
   validateAgainstExisting,
