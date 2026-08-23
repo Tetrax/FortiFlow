@@ -20,7 +20,11 @@ function _save(id) {
     const payload = JSON.stringify({
       id, createdAt: s.createdAt, lastAccess: s.lastAccess, status: s.status,
       data:        s.data        || null,
+      originalFlows: s.originalFlows || null,
       fortiConfig: s.fortiConfig || null,
+      telemetryContextId: s.telemetryContextId || null,
+      telemetryAssociation: s.telemetryAssociation || null,
+      fortiConfigContextId: s.fortiConfigContextId || null,
     });
     const tmp = _cachePath(id) + '.' + Date.now() + '.tmp';
     fs.writeFile(tmp, payload, 'utf8', (err) => {
@@ -53,7 +57,13 @@ function _loadAll() {
           lastAccess:  payload.lastAccess,
           status:      payload.status,
           data:        payload.data,
+          originalFlows: payload.originalFlows || null,
           fortiConfig: payload.fortiConfig,
+          telemetryContextId: payload.telemetryContextId || crypto.randomBytes(16).toString('hex'),
+          telemetryAssociation: payload.telemetryAssociation || null,
+          fortiConfigRawText: null,
+          fortiConfigContextId: payload.fortiConfigContextId || null,
+          pendingFortiConfig: null,
           error:       null,
           emitter:     new EventEmitter(),
           progress:    { lines: 0, linesPerSec: 0, eta: null },
@@ -77,16 +87,22 @@ function evictOldest() {
   if (oldestId) deleteSession(oldestId);
 }
 
-function createSession() {
+function createSession(options = {}) {
   evictOldest();
   const id = crypto.randomBytes(16).toString('hex');
   sessions.set(id, {
     id,
     createdAt:   Date.now(),
     lastAccess:  Date.now(),
+    telemetryContextId: options.telemetryContextId || crypto.randomBytes(16).toString('hex'),
     status:      'parsing',
     data:        null,
+    originalFlows: null,
     error:       null,
+    telemetryAssociation: null,
+    fortiConfigRawText: null,
+    fortiConfigContextId: null,
+    pendingFortiConfig: null,
     emitter:     new EventEmitter(),
     progress:    { lines: 0, linesPerSec: 0, eta: null },
   });
@@ -103,6 +119,7 @@ function setSessionData(id, data, options = {}) {
   const s = sessions.get(id);
   if (s) {
     s.data = data;
+    if (options.originalFlows) s.originalFlows = options.originalFlows;
     s.status = 'ready';
     s.lastAccess = Date.now();
     if (options.persist !== false) _save(id);
@@ -116,6 +133,46 @@ function getSessionCachePath(id) {
 function setFortiConfig(id, fortiConfig) {
   const s = sessions.get(id);
   if (s) { s.fortiConfig = fortiConfig; _save(id); }
+}
+
+function setTelemetryContextId(id, telemetryContextId) {
+  const s = sessions.get(id);
+  if (s && telemetryContextId) {
+    s.telemetryContextId = String(telemetryContextId);
+    _save(id);
+  }
+}
+
+function setTelemetryAssociation(id, telemetryAssociation) {
+  const s = sessions.get(id);
+  if (s) {
+    s.telemetryAssociation = telemetryAssociation || null;
+    _save(id);
+  }
+}
+
+function setPendingFortiConfig(id, pendingFortiConfig) {
+  const s = sessions.get(id);
+  if (s) {
+    s.pendingFortiConfig = pendingFortiConfig || null;
+    _save(id);
+  }
+}
+
+function setFortiConfigRawText(id, rawText) {
+  const s = sessions.get(id);
+  if (s) {
+    s.fortiConfigRawText = rawText || null;
+    _save(id);
+  }
+}
+
+function setFortiConfigContextId(id, configContextId) {
+  const s = sessions.get(id);
+  if (s) {
+    s.fortiConfigContextId = configContextId || null;
+    _save(id);
+  }
 }
 
 function setSessionError(id, error) {
@@ -155,7 +212,7 @@ setInterval(() => {
       try { fs.unlink(_cachePath(id), () => {}); } catch { /* ignore */ }
     }
   }
-}, PURGE_INTERVAL);
+}, PURGE_INTERVAL).unref();
 
 // ─── Load persisted sessions on startup ───────────────────────────────────────
 _loadAll();
@@ -177,6 +234,11 @@ module.exports = {
   getSession,
   setSessionData,
   setFortiConfig,
+  setTelemetryContextId,
+  setTelemetryAssociation,
+  setPendingFortiConfig,
+  setFortiConfigRawText,
+  setFortiConfigContextId,
   setSessionError,
   deleteSession,
   getSessionCachePath,

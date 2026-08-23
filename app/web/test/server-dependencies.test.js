@@ -61,7 +61,7 @@ test('le chargement de configuration passe le gate de cohérence avant toute mut
   assert.match(source, /\.\/lib\/config-consistency/);
   assert.match(source, /CONFIG_TELEMETRY_MISMATCH/);
   const gate = source.indexOf('validateConfigTelemetryConsistency');
-  const mutation = source.indexOf('s.fortiConfig = fortiConfig');
+  const mutation = source.indexOf('session.fortiConfig = fortiConfig');
   assert.ok(gate >= 0, 'le gate de cohérence doit être appelé');
   assert.ok(mutation >= 0, 'la mutation de session doit rester identifiable');
   assert.ok(gate < mutation, 'la configuration ne doit pas muter avant la validation');
@@ -136,6 +136,16 @@ test('l’import workspace ignore networkDecisions avant la restauration de sess
   assert.ok(route.indexOf('stripLegacyNetworkDecisions') < route.indexOf('setSessionData'));
   const deleteIndex = source.indexOf('delete sanitized.networkDecisions');
   assert.ok(deleteIndex >= 0 && deleteIndex < importStart);
+});
+
+test('le serveur expose un état de confirmation télémétrie/configuration persistant', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  assert.match(source, /telemetry-association/);
+  assert.match(source, /CONFIG_TELEMETRY_ASSOCIATION_REQUIRED/);
+  assert.match(source, /app\.post\(['"]\/api\/deploy\/config-association['"]/);
+  assert.match(source, /telemetryAssociation/);
+  assert.match(source, /telemetryContextId/);
+  assert.match(source, /pendingFortiConfig/);
 });
 
 test(

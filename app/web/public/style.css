@@ -1163,6 +1163,25 @@ td.mono { font-family: var(--mono); }
 
 .deploy-wrap { display: flex; flex-direction: column; gap: 20px; padding: 32px 36px; }
 
+.telemetry-association-overlay {
+  position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center;
+  padding: 24px; background: rgba(8, 8, 14, 0.72);
+}
+.telemetry-association-modal {
+  width: min(560px, 100%); padding: 24px; background: var(--bg1); border: 1px solid var(--brand);
+  border-radius: 8px; box-shadow: 0 18px 60px rgba(0, 0, 0, .45); color: var(--text);
+}
+.telemetry-association-modal h3 { margin: 0 0 14px; font-size: 17px; }
+.telemetry-association-modal p { margin: 8px 0; color: var(--text2); font-size: 13px; line-height: 1.5; }
+.telemetry-association-warning { color: var(--warn) !important; font-weight: 600; }
+.telemetry-association-modal dl { display: grid; grid-template-columns: 180px 1fr; gap: 8px 16px; margin: 18px 0; padding: 14px; background: var(--bg2); border-radius: 5px; }
+.telemetry-association-modal dt { color: var(--text2); font-size: 11px; }
+.telemetry-association-modal dd { margin: 0; font-size: 12px; }
+.telemetry-association-field { display: flex; flex-direction: column; gap: 6px; margin: 18px 0; color: var(--text2); font-size: 11px; }
+.telemetry-association-field select { background: var(--bg0); border: 1px solid var(--border2); border-radius: 4px; color: var(--text); padding: 8px; }
+.telemetry-association-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; flex-wrap: wrap; }
+.telemetry-association-inline { margin-top: 14px; padding: 8px 12px; color: var(--success); background: rgba(74,158,114,.08); border: 1px solid rgba(74,158,114,.22); border-radius: 5px; font-size: 11px; }
+
 .deploy-step { background: var(--bg1); border: 1px solid var(--border); border-radius: 6px; min-width: 0; }
 
 .deploy-step-header {
