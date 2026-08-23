@@ -299,8 +299,17 @@ async function loadWsFromHistory(id) {
   try {
     const r = await fetch(`/api/workspaces/${id}`);
     if (!r.ok) { const e = await r.json().catch(() => ({})); alert(e.error || 'Erreur chargement'); return; }
-    const { sessionId } = await r.json();
+    const { sessionId, fortiConfig, telemetryAssociation } = await r.json();
     state.session = sessionId;
+    if (fortiConfig) {
+      deployState.fortiConfig = fortiConfig;
+      deployState.telemetryAssociation = telemetryAssociation || fortiConfig.telemetryAssociation || null;
+      deployState.wizardStep = Math.max(deployState.wizardStep, 2);
+      try {
+        const ir = await fetch(`/api/deploy/interfaces?session=${sessionId}`);
+        if (ir.ok) deployState.interfaces = await ir.json();
+      } catch {}
+    }
     try {
       const sr = await fetch(`/api/stats?session=${sessionId}`);
       if (sr.ok) { const d = await sr.json(); state.stats = d.stats; state.meta = d.meta; }
@@ -2092,6 +2101,7 @@ async function denied() {
 // Deploy state (persists across nav changes within a session)
 const deployState = {
   fortiConfig:   null,
+  telemetryAssociation: null,
   interfaces:    null,
   analyzed:      null,
   searchFilter:  '',
@@ -2273,6 +2283,7 @@ async function exportSession() {
       ...serverData,
       deployState: {
         fortiConfig:          deployState.fortiConfig,
+        telemetryAssociation:  deployState.telemetryAssociation,
         analyzed:             serializeAnalyzed(deployState.analyzed),
         baseAnalyzedPolicies: serializeAnalyzed(deployState.baseAnalyzedPolicies),
         selected:             [...deployState.selected],
@@ -2352,6 +2363,7 @@ function importSession(file) {
         if (data.deployState) {
           const ds = data.deployState;
           deployState.fortiConfig          = ds.fortiConfig                                     || null;
+          deployState.telemetryAssociation = ds.telemetryAssociation                           || data.telemetryAssociation || null;
           deployState.analyzed             = deserializeAnalyzed(ds.analyzed)                   || null;
           deployState.baseAnalyzedPolicies = deserializeAnalyzed(ds.baseAnalyzedPolicies || ds.analyzed) || null;
           deployState.selected             = new Set(ds.selected || []);
@@ -4578,6 +4590,7 @@ async function deploy() {
     deployState.fortiConfig = null;
     deployState.interfaces  = null;
     deployState.analyzed    = null;
+    deployState.telemetryAssociation = null;
     deployState.selected    = new Set();
     deploy();
   });
@@ -4591,12 +4604,18 @@ async function deploy() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ vdom }),
       });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
-      deployState.fortiConfig = data;
-      const ir = await fetch(`/api/deploy/interfaces?session=${state.session}`);
-      if (ir.ok) deployState.interfaces = await ir.json();
-      deploy();
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        if (data.code === 'CONFIG_TELEMETRY_ASSOCIATION_REQUIRED'
+            || data.code === 'CONFIG_TELEMETRY_DEVICE_SELECTION_REQUIRED') {
+          const resolved = await resolveTelemetryAssociation(data);
+          if (resolved && resolved.status !== 'unassociated') await applyConfigSummary(resolved);
+          else resetDeployConfigChoice();
+          return;
+        }
+        throw new Error(data.error || `HTTP ${r.status}`);
+      }
+      await applyConfigSummary(data);
     } catch (err) {
       alert('Erreur changement VDOM : ' + err.message);
     }
@@ -4942,7 +4961,12 @@ function renderConfSummary(cfg) {
         ? `<div class="conf-stat" title="VDOM actif : ${cfg.selectedVdom || ''}"><span class="conf-stat-val">${cfg.selectedVdom || 'root'}</span><span class="conf-stat-lbl">VDOM</span></div>`
         : ''}
     <button class="btn-sm" id="btn-reload-conf" style="margin-left:auto;align-self:center">↺ Recharger</button>
-  </div>`;
+  </div>
+  ${cfg.telemetryAssociation
+    ? `<div class="telemetry-association-inline">✓ Télémétrie associée : <strong>${escHtml(cfg.telemetryAssociation.telemetryDeviceName || '')}</strong> · configuration : <strong>${escHtml(cfg.telemetryAssociation.configHostname || cfg.hostname || '')}</strong></div>`
+    : cfg.hostname
+      ? `<div class="telemetry-association-inline" style="color:var(--text2)">Configuration : <strong>${escHtml(cfg.hostname)}</strong></div>`
+      : ''}`;
 }
 
 // ─── Dynamic routes panel ────────────────────────────────────────────────────
@@ -5123,6 +5147,115 @@ function refreshIfacePanel() {
   if (body) body['innerHTML'] = renderInterfaces(deployState.interfaces);
 }
 
+function resetDeployConfigChoice() {
+  deployState.fortiConfig = null;
+  deployState.interfaces = null;
+  deployState.analyzed = null;
+  deployState.selected = new Set();
+  deployState.telemetryAssociation = null;
+  deployState.wizardStep = 1;
+  deploy();
+}
+
+async function applyConfigSummary(data) {
+  deployState.fortiConfig = data;
+  deployState.telemetryAssociation = data.telemetryAssociation || null;
+  deployState.addressSelectionMismatch = null;
+  const ir = await fetch(`/api/deploy/interfaces?session=${state.session}`);
+  if (ir.ok) {
+    deployState.interfaces = await ir.json();
+    // Auto-select first SDWAN zone as default
+    if (deployState.interfaces?.sdwanEnabled) {
+      const zones = deployState.interfaces.sdwanZoneNames;
+      deployState.selectedSdwan = (zones && zones.length > 0)
+        ? zones[0]
+        : (deployState.interfaces.sdwanIntfName || null);
+    } else {
+      deployState.selectedSdwan = null;
+    }
+  }
+  deploy();
+}
+
+function showTelemetryAssociationModal(details) {
+  return new Promise(resolve => {
+    const selection = details.code === 'CONFIG_TELEMETRY_DEVICE_SELECTION_REQUIRED';
+    const names = details.association?.telemetryDeviceNames || [];
+    const telemetryName = details.association?.telemetryDeviceName || '';
+    const configHostname = details.association?.configHostname || '';
+    const overlay = document.createElement('div');
+    overlay.className = 'telemetry-association-overlay';
+    overlay.innerHTML = selection
+      ? `<div class="telemetry-association-modal" role="dialog" aria-modal="true">
+          <h3>Quel équipement détecté correspond à cette configuration ?</h3>
+          <p>Plusieurs équipements sont présents dans la télémétrie. Aucun mélange automatique ne sera effectué.</p>
+          <label class="telemetry-association-field">Équipement détecté
+            <select id="telemetry-association-device">${names.map(name => `<option value="${escHtml(name)}">${escHtml(name)}</option>`).join('')}</select>
+          </label>
+          <div class="telemetry-association-actions">
+            <button class="btn-sm" id="telemetry-association-refuse">Choisir une autre configuration</button>
+            <button class="btn-accent" id="telemetry-association-select">Continuer avec cet équipement</button>
+          </div>
+        </div>`
+      : `<div class="telemetry-association-modal" role="dialog" aria-modal="true">
+          <h3>Nom d’équipement différent</h3>
+          <p class="telemetry-association-warning">Impossible de confirmer automatiquement cette association.</p>
+          <dl>
+            <dt>Nom télémétrie</dt><dd class="mono">${escHtml(telemetryName)}</dd>
+            <dt>Hostname configuration</dt><dd class="mono">${escHtml(configHostname)}</dd>
+          </dl>
+          <p>Vérifiez qu’il s’agit bien du même équipement avant de continuer.</p>
+          <div class="telemetry-association-actions">
+            <button class="btn-sm" id="telemetry-association-refuse">Choisir une autre configuration</button>
+            <button class="btn-accent" id="telemetry-association-confirm">Confirmer qu’il s’agit du même FortiGate</button>
+          </div>
+        </div>`;
+    document.body.appendChild(overlay);
+    const finish = value => { overlay.remove(); resolve(value); };
+    overlay.querySelector('#telemetry-association-refuse')?.addEventListener('click', () => finish({ action: 'refuse' }));
+    overlay.querySelector('#telemetry-association-select')?.addEventListener('click', () => finish({
+      action: 'select',
+      telemetryDeviceName: overlay.querySelector('#telemetry-association-device')?.value || '',
+    }));
+    overlay.querySelector('#telemetry-association-confirm')?.addEventListener('click', () => finish({
+      action: 'confirm', telemetryDeviceName: telemetryName,
+    }));
+    overlay.addEventListener('click', e => { if (e.target === overlay) finish({ action: 'refuse' }); });
+  });
+}
+
+async function resolveTelemetryAssociation(details) {
+  let current = details;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const choice = await showTelemetryAssociationModal(current);
+    if (!choice) return null;
+    try {
+      const r = await fetch(`/api/deploy/config-association?session=${state.session}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...choice,
+          pendingConfigId: current.pendingConfigId || details.pendingConfigId,
+        }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok) return data;
+      if (data.code === 'CONFIG_TELEMETRY_ASSOCIATION_REQUIRED'
+          && data.status === 'confirmation_required'
+          && choice.action === 'select') {
+        current = data;
+        continue;
+      }
+      alert(data.error || `HTTP ${r.status}`);
+      return null;
+    } catch (err) {
+      alert('Erreur association : ' + err.message);
+      return null;
+    }
+  }
+  return null;
+}
+
 async function uploadConf(file) {
   if (!file) return;
   const form = new FormData();
@@ -5131,30 +5264,19 @@ async function uploadConf(file) {
 
   try {
     const r = await fetch(`/api/deploy/config-upload?session=${state.session}`, { method: 'POST', body: form });
+    const data = await r.json().catch(() => ({}));
     if (!r.ok) {
-      const text = await r.text();
-      const msg  = (() => { try { return JSON.parse(text).error; } catch { return `HTTP ${r.status}`; } })();
-      alert('Erreur upload : ' + msg);
+      if (data.code === 'CONFIG_TELEMETRY_ASSOCIATION_REQUIRED'
+          || data.code === 'CONFIG_TELEMETRY_DEVICE_SELECTION_REQUIRED') {
+        const resolved = await resolveTelemetryAssociation(data);
+        if (resolved && resolved.status !== 'unassociated') await applyConfigSummary(resolved);
+        else resetDeployConfigChoice();
+        return;
+      }
+      alert('Erreur upload : ' + (data.error || `HTTP ${r.status}`));
       return;
     }
-    deployState.fortiConfig = await r.json();
-
-    // Load interfaces
-    const ir = await fetch(`/api/deploy/interfaces?session=${state.session}`);
-    if (ir.ok) {
-      deployState.interfaces = await ir.json();
-      // Auto-select first SDWAN zone as default
-      if (deployState.interfaces?.sdwanEnabled) {
-        const zones = deployState.interfaces.sdwanZoneNames;
-        deployState.selectedSdwan = (zones && zones.length > 0)
-          ? zones[0]
-          : (deployState.interfaces.sdwanIntfName || null);
-      } else {
-        deployState.selectedSdwan = null;
-      }
-    }
-
-    deploy(); // re-render
+    await applyConfigSummary(data);
   } catch (err) {
     alert('Erreur : ' + err.message);
   }

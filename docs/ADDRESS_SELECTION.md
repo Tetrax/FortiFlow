@@ -12,6 +12,15 @@ La télémétrie et la configuration FortiGate ne correspondent pas.
 
 Une identité absente reste inconnue et n’est jamais inventée. Le mode avertissement n’est conservé que lorsqu’une preuve positive indépendante existe (identité concordante ou IP contenue dans un réseau d’interface connu) ; une capture sans preuve positive est refusée. Les flux dont l’identité est partielle sont comptés et signalés, même si d’autres flux sont complets. Un cluster HA ou plusieurs équipements ne passent que si les membres et la sélection technique sont explicites, et le membre observé doit correspondre exactement au membre sélectionné. Plusieurs VDOM sans sélection sont refusés.
 
+## Association télémétrie ↔ configuration
+
+- `devname === hostname` est la seule correspondance automatique ; aucun préfixe, suffixe ou rapprochement approchant n’est utilisé.
+- Pour un seul `devname` différent, le serveur conserve la configuration en attente et renvoie `409 CONFIG_TELEMETRY_ASSOCIATION_REQUIRED` avec les deux noms. La configuration ne devient utilisable qu’après l’action explicite `confirm` sur `/api/deploy/config-association`.
+- Lorsque plusieurs `devname` exacts sont présents, le serveur renvoie `409 CONFIG_TELEMETRY_DEVICE_SELECTION_REQUIRED` et n’effectue aucun mélange. La sélection d’un nom exact est obligatoire ; un hostname différent demande ensuite la confirmation utilisateur.
+- Une association confirmée est stockée côté session avec `telemetryDeviceName`, `configHostname`, `confirmedByUser`, `confirmedAt`, `telemetryContextId` et `configContextId`. Ces champs sont inclus dans le cache serveur, l’export/import `.ffws` et l’historique workspace.
+- Une nouvelle télémétrie, un changement de `devname` ou un nouvel upload de configuration invalide l’association précédente. Toute contradiction serial/devid, HA, VDOM ou interface/réseau reste un `422 CONFIG_TELEMETRY_MISMATCH` ; la confirmation ne la contourne jamais.
+- `refuse` efface la configuration en attente et laisse la session non associée afin de revenir au choix/import d’une configuration.
+
 ## Les trois choix dans le drawer Source/Destination
 
 1. **Objet FortiGate existant** — les objets subnet qui contiennent toutes les IP observées sont affichés directement. Le choix par défaut suit le longest-prefix match : préfixe le plus long, puis nom stable. Le drawer affiche le CIDR, le nombre d’hôtes observés et le nombre d’IP non observées avant `Utiliser cet objet`.

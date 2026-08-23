@@ -73,3 +73,20 @@ test('un mismatch de cohérence reste bloquant avant l’étape Règles', () => 
   assert.ok(appSource.includes('addressSelectionMismatch'));
   assert.ok(appSource.includes('Aucune règle ne peut être construite'));
 });
+
+test('le mismatch de nom reste dans le workflow Déployer avec sélection et confirmation françaises', () => {
+  for (const label of [
+    'Nom d’équipement différent',
+    'Nom télémétrie',
+    'Hostname configuration',
+    'Impossible de confirmer automatiquement',
+    'Confirmer qu’il s’agit du même FortiGate',
+    'Choisir une autre configuration',
+    'Quel équipement détecté correspond à cette configuration',
+  ]) {
+    assert.ok(appSource.includes(label), `libellé absent: ${label}`);
+  }
+  assert.match(appSource, /api\/deploy\/config-association/);
+  assert.ok(appSource.includes('CONFIG_TELEMETRY_DEVICE_SELECTION_REQUIRED'));
+  assert.match(styleSource, /\.telemetry-association/);
+});

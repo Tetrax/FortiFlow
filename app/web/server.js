@@ -4,11 +4,14 @@ const express          = require('express');
 const multer           = require('multer');
 const path             = require('path');
 const fs               = require('fs');
+const crypto           = require('crypto');
 const { WebSocketServer } = require('ws');
 
 const { buildAnalysis, consolidatePolicies, flowDecision, isExpectedOneWayFlow, buildPolicyEngineV2 } = require('./lib/analyzer');
 const { AnalysisPool }                                     = require('./lib/analysis-pool');
 const { createSession, getSession, setSessionData, setFortiConfig,
+        setTelemetryAssociation, setPendingFortiConfig, setFortiConfigRawText,
+        setFortiConfigContextId,
         setSessionError, deleteSession, getSessionCachePath,
         getStats, listSessions } = require('./lib/store');
 const { parseFortiConfig, analyzePolicies,
@@ -22,10 +25,19 @@ const { parseTrafficScopeQuery, trafficScopeKey }          = require('./lib/traf
 const { bindPolicyEngineV2Selections }                     = require('./lib/policy-binding');
 const {
   validateConfigTelemetryConsistency,
+  normalizeConfigIdentity,
   selectTelemetryVdom,
   CONFIG_TELEMETRY_MISMATCH,
   CONFIG_TELEMETRY_MISMATCH_MESSAGE,
 } = require('./lib/config-consistency');
+const {
+  evaluateTelemetryConfigAssociation,
+  createConfirmedTelemetryAssociation,
+  createSelectedTelemetryAssociation,
+  isTelemetryAssociationUsable,
+  CONFIG_TELEMETRY_ASSOCIATION_REQUIRED,
+  CONFIG_TELEMETRY_DEVICE_SELECTION_REQUIRED,
+} = require('./lib/telemetry-association');
 
 const app   = express();
 const TRUST_PROXY = (process.env.FORTIFLOW_TRUST_PROXY || '').trim();
@@ -51,7 +63,7 @@ const isoDay = value => {
 
 // ─── Upload storage ───────────────────────────────────────────────────────────
 
-const UPLOAD_DIR = path.join(__dirname, 'uploads');
+const UPLOAD_DIR = path.resolve(process.env.FORTIFLOW_UPLOAD_DIR || path.join(__dirname, 'uploads'));
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 const configuredUploadMb = Number.parseInt(process.env.MAX_UPLOAD_SIZE_MB || '2048', 10);
@@ -201,6 +213,7 @@ app.use([
   '/api/import/workspace',
   '/api/import/policies-xlsx',
   '/api/deploy/config-upload',
+  '/api/deploy/config-association',
   '/api/deploy/dynamic-routes',
 ], sessionLimiter);
 
@@ -263,19 +276,63 @@ function extractKnownSubnets(fortiConfig) {
   return [...byCidr.values()].sort((a, b) => b.prefix - a.prefix);
 }
 
-function flowsForFortiConfig(flows, fortiConfig) {
+function telemetryFlowDeviceName(flow) {
+  const scope = flow?.scope && typeof flow.scope === 'object' ? flow.scope : {};
+  return String(flow?.devname || scope.devname || '').trim();
+}
+
+function flowsForFortiConfig(flows, fortiConfig, telemetryAssociation = null) {
   const list = Array.isArray(flows) ? flows : [];
   const selectedVdom = fortiConfig?.selectedVdom;
-  if (!selectedVdom) return list;
-  const hasVdomMetadata = list.some(flow => String(flow.vdom || '').trim());
-  if (!hasVdomMetadata) return list;
-  return list.filter(flow => String(flow.vdom || '').trim() === selectedVdom);
+  let scoped = list;
+  if (selectedVdom) {
+    const hasVdomMetadata = list.some(flow => String(flow.vdom || '').trim());
+    if (hasVdomMetadata) scoped = scoped.filter(flow => String(flow.vdom || '').trim() === selectedVdom);
+  }
+  if (telemetryAssociation?.telemetryDeviceName) {
+    scoped = scoped.filter(flow => telemetryFlowDeviceName(flow) === telemetryAssociation.telemetryDeviceName);
+  }
+  return scoped;
+}
+
+function getSessionTelemetryAssociation(session, fortiConfig = session?.fortiConfig) {
+  const association = session?.telemetryAssociation;
+  if (!association) return null;
+  const sourceFlows = session?.originalFlows || session?.data?.flows || [];
+  const observedNames = new Set(sourceFlows.map(telemetryFlowDeviceName).filter(Boolean));
+  const configHostname = normalizeConfigIdentity(fortiConfig || {}).hostname;
+  const context = {
+    telemetryContextId: session.telemetryContextId,
+    configContextId: session.fortiConfigContextId || association.configContextId,
+    telemetryDeviceName: association.telemetryDeviceName,
+    configHostname,
+  };
+  if (!observedNames.has(association.telemetryDeviceName)
+      || !isTelemetryAssociationUsable(association, context)) {
+    session.telemetryAssociation = null;
+    setTelemetryAssociation(session.id, null);
+    return null;
+  }
+  return association;
 }
 
 function validateConfigTelemetryForSession(session, fortiConfig = session?.fortiConfig) {
   const sourceFlows = session?.originalFlows || session?.data?.flows || [];
-  const flows = flowsForFortiConfig(sourceFlows, fortiConfig || {});
-  return validateConfigTelemetryConsistency(flows, fortiConfig || {});
+  const association = getSessionTelemetryAssociation(session, fortiConfig || {});
+  const scopedFlows = flowsForFortiConfig(sourceFlows, fortiConfig, association);
+  const context = {
+    telemetryContextId: session?.telemetryContextId || null,
+    configContextId: session?.fortiConfigContextId || association?.configContextId || null,
+  };
+  const decision = evaluateTelemetryConfigAssociation(scopedFlows, fortiConfig || {}, context, association);
+  const validation = decision.validation || {};
+  return {
+    ...validation,
+    ok: decision.status === 'matched' && validation.ok,
+    association: decision,
+    associationRequired: decision.status === 'confirmation_required'
+      || decision.status === 'selection_required',
+  };
 }
 
 function sendConfigTelemetryMismatch(res, validation) {
@@ -288,9 +345,31 @@ function sendConfigTelemetryMismatch(res, validation) {
   });
 }
 
+function sendTelemetryAssociationRequired(res, validation, pending = null) {
+  const association = validation.association || {};
+  const selectionRequired = association.status === 'selection_required';
+  return res.status(409).json({
+    error: selectionRequired
+      ? 'Plusieurs équipements sont présents dans la télémétrie : sélectionnez celui correspondant à la configuration.'
+      : 'La correspondance entre le nom télémétrie et le hostname de configuration doit être confirmée.',
+    code: association.code || CONFIG_TELEMETRY_ASSOCIATION_REQUIRED,
+    status: association.status,
+    association: {
+      telemetryDeviceNames: association.telemetryDeviceNames || [],
+      telemetryDeviceName: association.telemetryDeviceName || null,
+      configHostname: association.configHostname || null,
+    },
+    pendingConfigId: pending?.id || null,
+    warnings: validation.warnings || [],
+  });
+}
+
 function assertConfigTelemetry(session, fortiConfig, res) {
   const validation = validateConfigTelemetryForSession(session, fortiConfig);
-  if (!validation.ok && res) sendConfigTelemetryMismatch(res, validation);
+  if (!validation.ok && res) {
+    if (validation.associationRequired) sendTelemetryAssociationRequired(res, validation);
+    else sendConfigTelemetryMismatch(res, validation);
+  }
   return validation;
 }
 
@@ -322,8 +401,21 @@ function sendPolicyBindingFailure(res, binding) {
   });
 }
 
-function validateWorkspaceConfigTelemetry(data, fortiConfig) {
-  return validateConfigTelemetryConsistency(data?.flows || [], fortiConfig || {});
+function validateWorkspaceConfigTelemetry(data, fortiConfig, association = null, context = {}) {
+  const decision = evaluateTelemetryConfigAssociation(
+    data?.flows || [],
+    fortiConfig || {},
+    context,
+    association,
+  );
+  const validation = decision.validation || {};
+  return {
+    ...validation,
+    ok: decision.status === 'matched' && validation.ok,
+    association: decision,
+    associationRequired: decision.status === 'confirmation_required'
+      || decision.status === 'selection_required',
+  };
 }
 
 function getPolicyEngineResult(session, profile = 'recommended', fortiConfig = session.fortiConfig || {}, trafficScope = { mode: 'all' }) {
@@ -392,6 +484,12 @@ function validateWorkspaceBody(body) {
   if (body.data.flows != null && !Array.isArray(body.data.flows)) {
     throw new Error('Liste de flux invalide');
   }
+  if (body.originalFlows != null && !Array.isArray(body.originalFlows)) {
+    throw new Error('Liste de flux télémétrie originale invalide');
+  }
+  if ((body.originalFlows?.length || 0) > 2000000) {
+    throw new Error('Workspace trop volumineux : plus de 2 000 000 flux télémétrie');
+  }
   if ((body.data.flows?.length || 0) > 2000000) {
     throw new Error('Workspace trop volumineux : plus de 2 000 000 flux agrégés');
   }
@@ -409,6 +507,127 @@ function stripLegacyNetworkDecisions(data) {
   const sanitized = { ...data };
   delete sanitized.networkDecisions;
   return sanitized;
+}
+
+function newConfigContextId() {
+  return crypto.randomBytes(16).toString('hex');
+}
+
+function buildFortiConfigSummary(fortiConfig, session) {
+  return {
+    addresses:        Object.keys(fortiConfig.addresses || {}).length,
+    addrGroups:       Object.keys(fortiConfig.addressGroups || {}).length,
+    services:         Object.keys(fortiConfig.customServices || {}).length,
+    serviceGroups:    Object.keys(fortiConfig.serviceGroups || {}).length,
+    interfaces:       Object.keys(fortiConfig.interfaces || {}).length,
+    zones:            Object.keys(fortiConfig.zones || {}).length,
+    sdwan:            (fortiConfig.sdwanMembers || []).length > 0,
+    vdom:             fortiConfig.hasVdom || false,
+    vdomList:         fortiConfig.vdomList || [],
+    selectedVdom:     fortiConfig.selectedVdom || null,
+    routes:           (fortiConfig.fullRoutes || fortiConfig.staticRoutes || []).length,
+    bgp:              fortiConfig.hasBgp || false,
+    ospf:             fortiConfig.hasOspf || false,
+    nonDefaultVrf:    fortiConfig.hasNonDefaultVrf || false,
+    existingPolicies: (fortiConfig.existingPolicies || []).length,
+    code:              'CONFIG_TELEMETRY_ASSOCIATED',
+    hostname:         normalizeConfigIdentity(fortiConfig).hostname,
+    telemetryDeviceName: session?.telemetryAssociation?.telemetryDeviceName
+      || session?.pendingFortiConfig?.telemetryDeviceName || null,
+    associationStatus: 'associated',
+    telemetryAssociation: session?.telemetryAssociation || null,
+  };
+}
+
+function clearFortiConfigAssociation(session) {
+  session.fortiConfig = null;
+  session.fortiConfigRawText = null;
+  session.fortiConfigContextId = null;
+  session.telemetryAssociation = null;
+  session.pendingFortiConfig = null;
+  session.policyMap = null;
+  setFortiConfig(session.id, null);
+  setFortiConfigRawText(session.id, null);
+  setFortiConfigContextId(session.id, null);
+  setTelemetryAssociation(session.id, null);
+  setPendingFortiConfig(session.id, null);
+}
+
+function stagePendingFortiConfig(session, fortiConfig, rawText, configContextId, decision) {
+  const pending = {
+    id: crypto.randomBytes(16).toString('hex'),
+    fortiConfig,
+    rawText,
+    configContextId,
+    telemetryDeviceName: decision.telemetryDeviceName || null,
+  };
+  session.pendingFortiConfig = pending;
+  setPendingFortiConfig(session.id, pending);
+  return pending;
+}
+
+function commitFortiConfig(session, fortiConfig, rawText, configContextId, telemetryAssociation = null) {
+  const sourceFlows = session.originalFlows || session.data?.flows || [];
+  if (!session.originalFlows && Array.isArray(session.data?.flows)) session.originalFlows = session.data.flows;
+  session.fortiConfig = fortiConfig;
+  session.fortiConfigRawText = rawText || null;
+  session.fortiConfigContextId = configContextId || telemetryAssociation?.configContextId || null;
+  session.telemetryAssociation = telemetryAssociation || null;
+  session.pendingFortiConfig = null;
+  setFortiConfig(session.id, fortiConfig);
+  setFortiConfigRawText(session.id, rawText || null);
+  setFortiConfigContextId(session.id, session.fortiConfigContextId);
+  setTelemetryAssociation(session.id, telemetryAssociation || null);
+  setPendingFortiConfig(session.id, null);
+
+  if (sourceFlows.length > 0) {
+    const knownSubnets = extractKnownSubnets(fortiConfig);
+    const scopedFlows = flowsForFortiConfig(sourceFlows, fortiConfig, telemetryAssociation);
+    const shouldRebuild = knownSubnets.length > 0
+      || scopedFlows.length !== sourceFlows.length
+      || !session.data?.flows;
+    if (shouldRebuild) {
+      const meta = session.data?.meta;
+      const newAnalysis = buildAnalysis(scopedFlows, knownSubnets);
+      newAnalysis.meta = meta;
+      session.data = newAnalysis;
+      setSessionData(session.id, newAnalysis, { originalFlows: sourceFlows });
+    } else {
+      setSessionData(session.id, session.data, { originalFlows: sourceFlows });
+    }
+  }
+
+  const policyMap = new Map();
+  for (const pol of fortiConfig.existingPolicies || []) {
+    policyMap.set(String(pol.policyid), pol);
+  }
+  session.policyMap = policyMap;
+  return buildFortiConfigSummary(fortiConfig, session);
+}
+
+function associationValidationForConfig(session, fortiConfig, configContextId, telemetryDeviceName = null) {
+  const sourceFlows = session.originalFlows || session.data?.flows || [];
+  const scopedFlows = flowsForFortiConfig(sourceFlows, fortiConfig, telemetryDeviceName
+    ? { telemetryDeviceName }
+    : null);
+  return evaluateTelemetryConfigAssociation(
+    scopedFlows,
+    fortiConfig,
+    {
+      telemetryContextId: session.telemetryContextId,
+      configContextId,
+      telemetryDeviceName,
+    },
+    null,
+  );
+}
+
+function sendPendingAssociation(res, decision, pending = null) {
+  const validation = {
+    association: decision,
+    warnings: decision.validation?.warnings || [],
+  };
+  return sendTelemetryAssociationRequired(res, validation, pending);
 }
 
 function augmentPreflightEvidence(result, sessionData, fortiConfig, policies) {
@@ -1404,10 +1623,14 @@ app.get('/api/export/workspace', (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Content-Disposition', `attachment; filename="fortiflow_workspace_${tsNow()}.ffws"`);
   res.json({
-    _ffws:       2,
-    exportedAt:  new Date().toISOString(),
-    data:        exportData,
-    fortiConfig: s.fortiConfig || null,
+    _ffws:             2,
+    exportedAt:        new Date().toISOString(),
+    data:              exportData,
+    originalFlows:     s.originalFlows || exportData.flows || [],
+    telemetryContextId: s.telemetryContextId || null,
+    telemetryAssociation: s.telemetryAssociation || null,
+    fortiConfigContextId: s.fortiConfigContextId || s.telemetryAssociation?.configContextId || null,
+    fortiConfig:        s.fortiConfig || null,
   });
 });
 
@@ -1418,7 +1641,7 @@ app.post('/api/import/workspace', express.raw({ type: ['application/octet-stream
     // Détecte gzip par magic bytes (1f 8b) ou Content-Type
     const buf = req.body;
     let jsonText;
-    if (buf[0] === 0x1f && buf[1] === 0x8b) {
+    if (Buffer.isBuffer(buf) && buf[0] === 0x1f && buf[1] === 0x8b) {
       jsonText = await new Promise((resolve, reject) =>
         zlib.gunzip(
           buf,
@@ -1426,19 +1649,43 @@ app.post('/api/import/workspace', express.raw({ type: ['application/octet-stream
           (err, out) => err ? reject(err) : resolve(out.toString('utf8'))
         )
       );
-    } else {
+    } else if (Buffer.isBuffer(buf)) {
       jsonText = buf.toString('utf8');
+    } else if (typeof buf === 'string') {
+      jsonText = buf;
+    } else {
+      jsonText = JSON.stringify(buf || {});
     }
     const body = validateWorkspaceBody(parseWorkspaceJson(jsonText));
     const importedData = stripLegacyNetworkDecisions(body.data);
+    const importedFlows = body.originalFlows || importedData.flows || [];
+    const telemetryContextId = body.telemetryContextId || crypto.randomBytes(16).toString('hex');
+    const configContextId = body.fortiConfigContextId || body.telemetryAssociation?.configContextId || null;
     if (body.fortiConfig) {
-      const consistency = validateWorkspaceConfigTelemetry(importedData, body.fortiConfig);
-      if (!consistency.ok) return sendConfigTelemetryMismatch(res, consistency);
+      const consistency = validateWorkspaceConfigTelemetry(
+        { flows: importedFlows },
+        body.fortiConfig,
+        body.telemetryAssociation || null,
+        { telemetryContextId, configContextId },
+      );
+      if (!consistency.ok) {
+        if (consistency.associationRequired) return sendTelemetryAssociationRequired(res, consistency);
+        return sendConfigTelemetryMismatch(res, consistency);
+      }
     }
-    const id = createSession();
-    setSessionData(id, importedData);
-    if (body.fortiConfig) setFortiConfig(id, body.fortiConfig);
-    res.json({ sessionId: id });
+    const id = createSession({ telemetryContextId });
+    const session = getSession(id);
+    session.originalFlows = importedFlows;
+    setSessionData(id, importedData, { originalFlows: importedFlows });
+    if (body.fortiConfig) {
+      session.fortiConfigRawText = null;
+      session.fortiConfigContextId = configContextId;
+      session.telemetryAssociation = body.telemetryAssociation || null;
+      setFortiConfig(id, body.fortiConfig);
+      setFortiConfigContextId(id, configContextId);
+      setTelemetryAssociation(id, session.telemetryAssociation);
+    }
+    res.json({ sessionId: id, telemetryAssociation: session.telemetryAssociation || null });
   } catch (err) {
     res.status(400).json({ error: 'Fichier corrompu ou illisible : ' + err.message });
   }
@@ -1471,10 +1718,14 @@ app.post('/api/workspaces', express.json({ limit: '10kb' }), async (req, res) =>
   }
 
   const payload = JSON.stringify({
-    _ffws: 2,
-    exportedAt: new Date().toISOString(),
-    data: exportData,
-    fortiConfig: s.fortiConfig || null,
+    _ffws:                2,
+    exportedAt:           new Date().toISOString(),
+    data:                 exportData,
+    originalFlows:        s.originalFlows || exportData.flows || [],
+    telemetryContextId:   s.telemetryContextId || null,
+    telemetryAssociation: s.telemetryAssociation || null,
+    fortiConfigContextId: s.fortiConfigContextId || s.telemetryAssociation?.configContextId || null,
+    fortiConfig:          s.fortiConfig || null,
   });
 
   const id = require('crypto').randomBytes(8).toString('hex');
@@ -1507,14 +1758,40 @@ app.get('/api/workspaces/:id', async (req, res) => {
     );
     const body = validateWorkspaceBody(parseWorkspaceJson(json));
     const importedData = stripLegacyNetworkDecisions(body.data);
+    const importedFlows = body.originalFlows || importedData.flows || [];
+    const telemetryContextId = body.telemetryContextId || crypto.randomBytes(16).toString('hex');
+    const configContextId = body.fortiConfigContextId || body.telemetryAssociation?.configContextId || null;
     if (body.fortiConfig) {
-      const consistency = validateWorkspaceConfigTelemetry(importedData, body.fortiConfig);
-      if (!consistency.ok) return sendConfigTelemetryMismatch(res, consistency);
+      const consistency = validateWorkspaceConfigTelemetry(
+        { flows: importedFlows },
+        body.fortiConfig,
+        body.telemetryAssociation || null,
+        { telemetryContextId, configContextId },
+      );
+      if (!consistency.ok) {
+        if (consistency.associationRequired) return sendTelemetryAssociationRequired(res, consistency);
+        return sendConfigTelemetryMismatch(res, consistency);
+      }
     }
-    const newId = createSession();
-    setSessionData(newId, importedData);
-    if (body.fortiConfig) setFortiConfig(newId, body.fortiConfig);
-    res.json({ sessionId: newId, name: entry.name, hasFortiConfig: !!body.fortiConfig });
+    const newId = createSession({ telemetryContextId });
+    const session = getSession(newId);
+    session.originalFlows = importedFlows;
+    setSessionData(newId, importedData, { originalFlows: importedFlows });
+    if (body.fortiConfig) {
+      session.fortiConfigRawText = null;
+      session.fortiConfigContextId = configContextId;
+      session.telemetryAssociation = body.telemetryAssociation || null;
+      setFortiConfig(newId, body.fortiConfig);
+      setFortiConfigContextId(newId, configContextId);
+      setTelemetryAssociation(newId, session.telemetryAssociation);
+    }
+    res.json({
+      sessionId: newId,
+      name: entry.name,
+      hasFortiConfig: !!body.fortiConfig,
+      fortiConfig: body.fortiConfig ? buildFortiConfigSummary(body.fortiConfig, session) : null,
+      telemetryAssociation: session.telemetryAssociation || null,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1789,7 +2066,7 @@ app.get('/api/denied-flows', (req, res) => {
 
 // ─── Deploy routes ────────────────────────────────────────────────────────────
 
-// POST /api/deploy/config-upload — parse a FortiGate .conf and store in session
+// POST /api/deploy/config-upload — parse a FortiGate .conf and associate it to telemetry
 app.post('/api/deploy/config-upload', upload.single('conffile'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Aucun fichier reçu' });
 
@@ -1804,57 +2081,117 @@ app.post('/api/deploy/config-upload', upload.single('conffile'), async (req, res
       initialConfig.vdomList,
     );
     const fortiConfig = telemetryVdom ? parseFortiConfig(text, telemetryVdom) : initialConfig;
-    const consistency = assertConfigTelemetry(s, fortiConfig);
-    if (!consistency.ok) return sendConfigTelemetryMismatch(res, consistency);
+    const configContextId = newConfigContextId();
 
-    s.fortiConfig = fortiConfig;
-    s.fortiConfigRawText = text;
-    setFortiConfig(s.id, fortiConfig);
-
-    // Re-analyze with real CIDR subnets from the FortiGate config (before freeing flows).
-    // This replaces the /24 fallback grouping with actual subnet boundaries.
-    if (s.data?.flows?.length > 0) {
-      const knownSubnets = extractKnownSubnets(fortiConfig);
-      if (knownSubnets.length > 0) {
-        const meta = s.data.meta;
-        if (!s.originalFlows) s.originalFlows = s.data.flows;
-        const scopedFlows = flowsForFortiConfig(s.originalFlows, fortiConfig);
-        const newAnalysis = buildAnalysis(scopedFlows, knownSubnets);
-        newAnalysis.meta = meta;
-        s.data = newAnalysis;
-        setSessionData(s.id, newAnalysis);
-      }
+    // Toute nouvelle configuration invalide l’association précédente avant le gate.
+    clearFortiConfigAssociation(s);
+    const decision = associationValidationForConfig(s, fortiConfig, configContextId);
+    if (decision.status === 'contradiction') {
+      return sendConfigTelemetryMismatch(res, decision.validation);
+    }
+    if (decision.status === 'confirmation_required' || decision.status === 'selection_required') {
+      const pending = stagePendingFortiConfig(s, fortiConfig, text, configContextId, decision);
+      return sendPendingAssociation(res, decision, pending);
     }
 
-    // Build a fast policyid → policy lookup (keyed as string for log compatibility)
-    const policyMap = new Map();
-    for (const pol of fortiConfig.existingPolicies || []) {
-      policyMap.set(String(pol.policyid), pol);
-    }
-    s.policyMap = policyMap;
-
-    res.json({
-      addresses:        Object.keys(fortiConfig.addresses).length,
-      addrGroups:       Object.keys(fortiConfig.addressGroups || {}).length,
-      services:         Object.keys(fortiConfig.customServices).length,
-      serviceGroups:    Object.keys(fortiConfig.serviceGroups || {}).length,
-      interfaces:       Object.keys(fortiConfig.interfaces).length,
-      zones:            Object.keys(fortiConfig.zones).length,
-      sdwan:            fortiConfig.sdwanMembers.length > 0,
-      vdom:             fortiConfig.hasVdom  || false,
-      vdomList:         fortiConfig.vdomList || [],
-      selectedVdom:     fortiConfig.selectedVdom || null,
-      routes:           (fortiConfig.fullRoutes || fortiConfig.staticRoutes).length,
-      bgp:              fortiConfig.hasBgp   || false,
-      ospf:             fortiConfig.hasOspf  || false,
-      nonDefaultVrf:    fortiConfig.hasNonDefaultVrf || false,
-      existingPolicies: (fortiConfig.existingPolicies || []).length,
-    });
+    return res.json(commitFortiConfig(s, fortiConfig, text, configContextId, null));
   } catch (err) {
     res.status(500).json({ error: err.message });
   } finally {
     fs.unlink(req.file.path, () => {});
   }
+});
+
+// POST /api/deploy/config-association — select, confirm or refuse the pending config
+app.post('/api/deploy/config-association', express.json(), (req, res) => {
+  const s = requireSession(req, res);
+  if (!s) return;
+  const pending = s.pendingFortiConfig;
+  if (!pending) {
+    return res.status(409).json({
+      error: 'Aucune configuration en attente d’association.',
+      code: 'CONFIG_TELEMETRY_ASSOCIATION_NOT_PENDING',
+    });
+  }
+
+  const { action, telemetryDeviceName, pendingConfigId } = req.body || {};
+  if (!pendingConfigId || pendingConfigId !== pending.id) {
+    return res.status(409).json({
+      error: 'La configuration en attente n’est plus active.',
+      code: 'CONFIG_TELEMETRY_ASSOCIATION_STALE',
+    });
+  }
+  if (action === 'refuse') {
+    clearFortiConfigAssociation(s);
+    return res.json({
+      ok: false,
+      status: 'unassociated',
+      code: 'CONFIG_TELEMETRY_ASSOCIATION_REFUSED',
+      associationStatus: 'unassociated',
+      association: null,
+    });
+  }
+  const names = new Set((s.originalFlows || s.data?.flows || [])
+    .map(telemetryFlowDeviceName).filter(Boolean));
+  const selected = String(telemetryDeviceName || pending.telemetryDeviceName || '').trim();
+  if (!selected || !names.has(selected)) {
+    return res.status(400).json({
+      error: 'L’équipement télémétrie sélectionné est inconnu.',
+      code: 'CONFIG_TELEMETRY_DEVICE_SELECTION_INVALID',
+      association: { telemetryDeviceNames: [...names].sort() },
+    });
+  }
+
+  if (action !== 'select' && action !== 'confirm') {
+    return res.status(400).json({ error: 'action requis (select|confirm|refuse)' });
+  }
+
+  const decision = associationValidationForConfig(
+    s,
+    pending.fortiConfig,
+    pending.configContextId,
+    selected,
+  );
+  if (decision.status === 'contradiction') {
+    return sendConfigTelemetryMismatch(res, decision.validation);
+  }
+  const hostname = normalizeConfigIdentity(pending.fortiConfig).hostname;
+  const exactName = Boolean(hostname && selected === hostname);
+  const nameResolved = !hostname || exactName;
+  if (action === 'select' && !nameResolved) {
+    return sendPendingAssociation(res, decision, pending);
+  }
+  if (action === 'confirm' && nameResolved) {
+    return res.status(400).json({
+      error: 'La correspondance exacte ne nécessite pas de confirmation.',
+      code: 'CONFIG_TELEMETRY_ASSOCIATION_CONFIRMATION_UNEXPECTED',
+    });
+  }
+  if (action === 'confirm' && decision.status !== 'confirmation_required') {
+    return sendPendingAssociation(res, decision, pending);
+  }
+
+  const telemetryAssociation = nameResolved
+    ? createSelectedTelemetryAssociation({
+      telemetryDeviceName: selected,
+      configHostname: hostname,
+      telemetryContextId: s.telemetryContextId,
+      configContextId: pending.configContextId,
+    })
+    : createConfirmedTelemetryAssociation({
+      telemetryDeviceName: selected,
+      configHostname: hostname,
+      telemetryContextId: s.telemetryContextId,
+      configContextId: pending.configContextId,
+    });
+  const summary = commitFortiConfig(
+    s,
+    pending.fortiConfig,
+    pending.rawText,
+    pending.configContextId,
+    telemetryAssociation,
+  );
+  return res.json(summary);
 });
 
 // POST /api/deploy/config-vdom — re-parse the stored config for a different VDOM
@@ -1867,49 +2204,17 @@ app.post('/api/deploy/config-vdom', express.json(), (req, res) => {
   if (!vdom) return res.status(400).json({ error: 'vdom requis' });
 
   try {
-    const fortiConfig = parseFortiConfig(s.fortiConfigRawText, vdom);
-    const consistency = assertConfigTelemetry(s, fortiConfig);
-    if (!consistency.ok) return sendConfigTelemetryMismatch(res, consistency);
-
-    s.fortiConfig = fortiConfig;
-    setFortiConfig(s.id, fortiConfig);
-
-    // Un changement de VDOM doit aussi recalculer les suggestions et exclure
-    // les logs portant explicitement un autre VDOM.
-    const sourceFlows = s.originalFlows || s.data?.flows || [];
-    if (sourceFlows.length > 0) {
-      const meta = s.data?.meta;
-      const knownSubnets = extractKnownSubnets(fortiConfig);
-      const scopedFlows = flowsForFortiConfig(sourceFlows, fortiConfig);
-      const newAnalysis = buildAnalysis(scopedFlows, knownSubnets);
-      newAnalysis.meta = meta;
-      s.data = newAnalysis;
-      setSessionData(s.id, newAnalysis);
+    const rawText = s.fortiConfigRawText;
+    const fortiConfig = parseFortiConfig(rawText, vdom);
+    const configContextId = newConfigContextId();
+    clearFortiConfigAssociation(s);
+    const decision = associationValidationForConfig(s, fortiConfig, configContextId);
+    if (decision.status === 'contradiction') return sendConfigTelemetryMismatch(res, decision.validation);
+    if (decision.status === 'confirmation_required' || decision.status === 'selection_required') {
+      const pending = stagePendingFortiConfig(s, fortiConfig, rawText, configContextId, decision);
+      return sendPendingAssociation(res, decision, pending);
     }
-
-    const policyMap = new Map();
-    for (const pol of fortiConfig.existingPolicies || []) {
-      policyMap.set(String(pol.policyid), pol);
-    }
-    s.policyMap = policyMap;
-
-    res.json({
-      addresses:        Object.keys(fortiConfig.addresses).length,
-      addrGroups:       Object.keys(fortiConfig.addressGroups || {}).length,
-      services:         Object.keys(fortiConfig.customServices).length,
-      serviceGroups:    Object.keys(fortiConfig.serviceGroups || {}).length,
-      interfaces:       Object.keys(fortiConfig.interfaces).length,
-      zones:            Object.keys(fortiConfig.zones).length,
-      sdwan:            fortiConfig.sdwanMembers.length > 0,
-      vdom:             fortiConfig.hasVdom || false,
-      vdomList:         fortiConfig.vdomList || [],
-      selectedVdom:     fortiConfig.selectedVdom || null,
-      routes:           (fortiConfig.fullRoutes || fortiConfig.staticRoutes).length,
-      bgp:              fortiConfig.hasBgp   || false,
-      ospf:             fortiConfig.hasOspf  || false,
-      nonDefaultVrf:    fortiConfig.hasNonDefaultVrf || false,
-      existingPolicies: (fortiConfig.existingPolicies || []).length,
-    });
+    return res.json(commitFortiConfig(s, fortiConfig, rawText, configContextId, null));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
