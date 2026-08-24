@@ -11,7 +11,7 @@ const { buildAnalysis, consolidatePolicies }             = require('./lib/analyz
 const { createSession, getSession, setSessionData, setFortiConfig,
         setSessionError, deleteSession, getStats, listSessions } = require('./lib/store');
 const { parseFortiConfig, extractKnownSubnets, preserveDestinationServiceAffinity, analyzePolicies,
-        generateConfig, validateAgainstExisting,
+        generateConfig, validateAgainstExisting, applyPolicyUserDecisions, validateGenerationOptions, validatePolicyDecisionShapes,
         preflightValidation,
         parseFullRoutingTable, parseOspfRoutingTable, parseBgpNetworkTable,
         sortRoutes, formatExistingPolicies }             = require('./lib/forticonfig');
@@ -137,6 +137,39 @@ function requireSession(req, res) {
   if (!s)        { res.status(404).json({ error: 'Session introuvable' }); return null; }
   if (!s.data)   { res.status(202).json({ error: 'Parsing en cours…' });   return null; }
   return s;
+}
+
+function preparePolicyDecisions(session, selectedPolicies, opts = {}) {
+  const optionDecision = validateGenerationOptions(opts, session.fortiConfig);
+  const normalizedOpts = optionDecision.opts;
+  let fortiConfig = session.fortiConfig;
+  if (normalizedOpts.wanOverrides.length > 0) {
+    const interfaces = { ...fortiConfig.interfaces };
+    for (const name of normalizedOpts.wanOverrides) {
+      if (interfaces[name]) interfaces[name] = { ...interfaces[name], isWan: true };
+    }
+    fortiConfig = { ...fortiConfig, interfaces };
+  }
+  const submittedPolicies = preserveDestinationServiceAffinity(selectedPolicies);
+  const shapeDecision = validatePolicyDecisionShapes(submittedPolicies);
+  if (!shapeDecision.ok) {
+    return { ok: false, issues: [...optionDecision.issues, ...shapeDecision.issues], policies: [], fortiConfig, opts: normalizedOpts };
+  }
+  const analysisInput = structuredClone(submittedPolicies);
+  for (const policy of analysisInput) delete policy._mergedServices;
+  const authoritativePolicies = analyzePolicies(
+    analysisInput,
+    fortiConfig,
+    normalizedOpts.preferredWanIntf,
+  );
+  const decision = applyPolicyUserDecisions(
+    authoritativePolicies,
+    submittedPolicies,
+    fortiConfig,
+    session.data?.flows || [],
+  );
+  const issues = [...optionDecision.issues, ...decision.issues];
+  return { ...decision, ok: issues.length === 0, issues, fortiConfig, opts: normalizedOpts };
 }
 
 // Vérifie si une valeur IP correspond au terme recherché.
@@ -1520,13 +1553,21 @@ app.post('/api/deploy/preflight', (req, res) => {
   if (!s) return;
   if (!s.fortiConfig) return res.status(404).json({ error: 'Aucune config FortiGate chargée' });
 
-  const { selectedPolicies } = req.body || {};
+  const { selectedPolicies, opts } = req.body || {};
   if (!Array.isArray(selectedPolicies) || selectedPolicies.length === 0) {
     return res.status(400).json({ error: 'selectedPolicies requis' });
   }
 
   try {
-    const result = preflightValidation(preserveDestinationServiceAffinity(selectedPolicies), s.fortiConfig);
+    const decision = preparePolicyDecisions(s, selectedPolicies, opts || {});
+    if (!decision.ok) {
+      return res.status(422).json({ error: 'Décision utilisateur invalide', code: 'POLICY_DECISION_INVALID', issues: decision.issues });
+    }
+    const validatedPolicies = decision.policies;
+    const result = preflightValidation(validatedPolicies, decision.fortiConfig);
+    if (!result.ok) {
+      return res.status(422).json({ error: 'Preflight refusé', preflight: result });
+    }
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1553,71 +1594,27 @@ app.post('/api/deploy/generate', (req, res) => {
   }
 
   try {
-    const o = opts || {};
-    const policiesWithAffinity = preserveDestinationServiceAffinity(selectedPolicies);
-
-    // Apply user WAN toggles — build a patched config without mutating the session
-    let configToUse = s.fortiConfig;
-    if (Array.isArray(o.wanOverrides) && o.wanOverrides.length > 0) {
-      const patchedInterfaces = { ...s.fortiConfig.interfaces };
-      o.wanOverrides.forEach(name => {
-        if (patchedInterfaces[name]) {
-          patchedInterfaces[name] = { ...patchedInterfaces[name], isWan: true };
-        }
-      });
-      configToUse = { ...s.fortiConfig, interfaces: patchedInterfaces };
+    const decision = preparePolicyDecisions(s, selectedPolicies, opts || {});
+    if (!decision.ok) {
+      return res.status(422).json({ error: 'Décision utilisateur invalide', code: 'POLICY_DECISION_INVALID', issues: decision.issues });
     }
-
-    // SD-WAN zone takes priority; if none, preferredWanIntf falls to null (detectWanCandidates handles it)
-    const analyzed = analyzePolicies(policiesWithAffinity, configToUse, o.preferredWanIntf || null);
-
-    // Re-inject per-policy overrides from frontend (action, log, securityProfiles)
-    for (let i = 0; i < analyzed.length; i++) {
-      const src = policiesWithAffinity[i] || {};
-      if (src.action)           analyzed[i].action           = src.action;
-      if (src.log)              analyzed[i].log              = src.log;
-      if (src.securityProfiles) analyzed[i].securityProfiles = src.securityProfiles;
+    const validatedPolicies = decision.policies;
+    const generationPreflight = preflightValidation(validatedPolicies, decision.fortiConfig);
+    if (!generationPreflight.ok) {
+      return res.status(422).json({ error: 'Génération refusée par le preflight', preflight: generationPreflight });
     }
-
-    // Inject frontend-merged services (multi-port / range) into each policy's analysis
-    // Also re-inject user-set suggestedName for standard services (lost during re-analysis)
-    for (let i = 0; i < analyzed.length; i++) {
-      const src = policiesWithAffinity[i] || {};
-
-      // Re-inject port/suggestedName from frontend analysis (perdu lors de la re-analyse)
-      const srcServices = src.analysis?.services || [];
-      for (const reAnalyzed of analyzed[i].analysis.services) {
-        const orig = srcServices.find(s => s.label === reAnalyzed.label);
-        if (orig && !reAnalyzed.found) {
-          if (orig.suggestedName) reAnalyzed.suggestedName = orig.suggestedName;
-          if (orig.port)          reAnalyzed.port          = orig.port;
-          if (orig.proto)         reAnalyzed.proto         = orig.proto;
-          if (orig.ports)         reAnalyzed.ports         = orig.ports;
-          if (orig.portRange)     reAnalyzed.portRange     = orig.portRange;
-        }
-      }
-
-      const merged = src._mergedServices;
-      if (Array.isArray(merged) && merged.length > 0) {
-        for (const ms of merged) {
-          analyzed[i].analysis.services.push({
-            label: ms.name, found: false, name: null, source: null,
-            suggestedName: ms.name, isNamed: false,
-            proto: ms.proto, ports: ms.ports || null, portRange: ms.portRange || null,
-            _isMerged: true,
-          });
-        }
-      }
-    }
+    const analyzed = validatedPolicies;
+    const configToUse = decision.fortiConfig;
+    const o = decision.opts;
 
     const genOpts = {
       natEnabled:        o.nat     || false,
       actionVerb:        o.action  || 'accept',
       logTraffic:        o.log     || 'all',
-      serviceGroups:     s.fortiConfig.serviceGroups || {},
-      addresses:         s.fortiConfig.addresses || {},
-      addressGroups:     s.fortiConfig.addressGroups || {},
-      zones:             s.fortiConfig.zones || {},
+      serviceGroups:     configToUse.serviceGroups || {},
+      addresses:         configToUse.addresses || {},
+      addressGroups:     configToUse.addressGroups || {},
+      zones:             configToUse.zones || {},
       securityProfiles:  o.securityProfiles || {},
     };
     const cli = generateConfig(analyzed, genOpts);

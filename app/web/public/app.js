@@ -2338,7 +2338,7 @@ function collectMissingObjects() {
     }
     // Services manquants
     for (const svc of a.services || []) {
-      if (!svc.found) {
+      if (!svc.found && !svc._isMerged && !isCompatibleServiceSelected(p, svc)) {
         const key = svc.isNamed ? `label:${svc.label}` : `${svc.port}/${svc.proto}`;
         const defaultName = svc.isNamed ? (svc.suggestedName || svc.label) : (svc.suggestedName || `FF_SVC_${svc.port}_${svc.proto}`);
         if (!services.has(key)) services.set(key, { key, port: svc.port, proto: svc.proto, label: svc.label, name: defaultName, policyCount: 0 });
@@ -2512,6 +2512,7 @@ function showObjectsModal() {
         suggestedName: svcName, isNamed: false, proto: proto.toLowerCase(),
         ports: portRange ? null : ports,
         portRange: portRange || null,
+        sourcePorts: ports,
         port: portRange ? null : ports[0],
         portHint: portRange ? `${proto}: ${portRange}` : `${proto}: ${ports.join(', ')}`,
         _isMerged: true,
@@ -2696,7 +2697,7 @@ function _snapDrawer(p) {
   const snap = {};
   const keys = ['_srcAddrName','_dstAddrName','_policyName','_srcMode','_dstMode',
     '_use32Src','_use32Dst','_srcHostNames','_dstHostNames','_useSrcGroup','_useDstGroup',
-    '_srcintf','_dstintf','_nat','_action','_log','_mergeMode','_mergedSvcName','_mergeRange'];
+    '_srcintf','_dstintf','_nat','_action','_log','_mergeMode','_mergedSvcName','_mergeRange','_serviceReuse','_resolvedServiceKeys','_resolvedObjectKeys','_dismissedCompatibleSelection'];
   for (const k of keys) {
     if (!(k in p)) continue;
     const v = p[k];
@@ -2823,6 +2824,59 @@ function mountDrawer() {
       const hint = document.getElementById('drawer-undo-hint');
       if (hint) hint.style.display = '';
     };
+    const useSelectedCompatible = e.target.closest('.svc-use-compatible-selected');
+    if (useSelectedCompatible) {
+      _snapAndShow();
+      if (!p._serviceReuse) p._serviceReuse = {};
+      const proto = useSelectedCompatible.dataset.proto;
+      const name = useSelectedCompatible.dataset.serviceName;
+      useSelectedCompatible.dataset.ports.split(',').filter(Boolean)
+        .forEach(port => {
+          const serviceKey = `${proto}/${port}`;
+          p._serviceReuse[serviceKey] = name;
+          markServiceDecisionResolved(p, serviceKey, `existing:${name}`);
+        });
+      delete p._dismissedCompatibleSelection;
+      populateDrawer(_drawerIdx);
+      syncRowStatus(_drawerIdx);
+      renderDeployPolicies(filterDeployPolicies(), false);
+      return;
+    }
+    const createNewSelected = e.target.closest('.svc-create-new-selected');
+    if (createNewSelected) {
+      _snapAndShow();
+      p._dismissedCompatibleSelection = createNewSelected.dataset.selectionSignature;
+      populateDrawer(_drawerIdx);
+      return;
+    }
+    const useCompatible = e.target.closest('.drawer-use-compatible-service');
+    if (useCompatible) {
+      _snapAndShow();
+      if (!p._serviceReuse) p._serviceReuse = {};
+      p._serviceReuse[useCompatible.dataset.serviceKey] = useCompatible.dataset.serviceName;
+      markServiceDecisionResolved(
+        p, useCompatible.dataset.serviceKey, `existing:${useCompatible.dataset.serviceName}`,
+      );
+      populateDrawer(_drawerIdx);
+      syncRowStatus(_drawerIdx);
+      renderDeployPolicies(filterDeployPolicies(), false);
+      return;
+    }
+    const createSpecific = e.target.closest('.drawer-create-specific-service');
+    if (createSpecific) {
+      _snapAndShow();
+      const serviceKey = createSpecific.dataset.serviceKey;
+      const [proto, port] = serviceKey.split('/');
+      const service = (p.analysis?.services || []).find(item => serviceReuseKey(item) === serviceKey);
+      const typedName = createSpecific.closest('.drawer-service-item')
+        ?.querySelector('.drawer-svc-name')?.value.trim();
+      if (service) service.suggestedName = typedName || `FF_SVC_${proto}_${port}`;
+      markServiceDecisionResolved(p, serviceKey, 'specific');
+      populateDrawer(_drawerIdx);
+      syncRowStatus(_drawerIdx);
+      renderDeployPolicies(filterDeployPolicies(), false);
+      return;
+    }
     if (e.target.closest('.drawer-services-toggle')) {
       p._servicesExpanded = !p._servicesExpanded;
       populateDrawer(_drawerIdx);
@@ -2847,7 +2901,11 @@ function mountDrawer() {
       _snapAndShow();
       const _svcList = p.analysis?.services || [];
       const _getSvcPP = s => { const m = s.label?.match(/^(TCP|UDP)\/(\d+)$/i); return m ? { port: parseInt(m[2],10), proto: m[1].toUpperCase() } : { port: s.port, proto: (s.proto||'').toUpperCase() }; };
-      const _selectable = _svcList.filter(s => { if (s.found) return false; const m = s.label?.match(/^(TCP|UDP)\/(\d+)$/i); return m || (!s.isNamed && s.port); });
+      const _selectable = _svcList.filter(s => {
+        if (s.found || isServiceDecisionResolved(p, s)) return false;
+        const m = s.label?.match(/^(TCP|UDP)\/\d+$/i);
+        return m || (!s.isNamed && s.port);
+      });
       if (!p._selectedSvcKeys) p._selectedSvcKeys = new Set();
       const _allKeys = _selectable.map(s => { const {port, proto} = _getSvcPP(s); return `${port}/${proto}`; });
       const _allSel = _allKeys.every(k => p._selectedSvcKeys.has(k));
@@ -2902,6 +2960,7 @@ function mountDrawer() {
         proto,
         ports: portRange ? null : ports,
         portRange: portRange || null,
+        sourcePorts: ports,
         port: portRange ? null : ports[0],
         portHint: portRange ? `${proto.toUpperCase()}: ${portRange}` : `${proto.toUpperCase()}: ${ports.join(', ')}`,
         _isMerged: true,
@@ -3102,6 +3161,8 @@ function mountDrawer() {
       return k === svcKey;
     });
     if (!svc) return;
+    svc.suggestedName = newName;
+    markServiceDecisionResolved(p, serviceReuseKey(svc), 'specific');
     const _sm = svc.label?.match(/^(TCP|UDP)\/(\d+)$/i);
     const targetPort  = _sm ? parseInt(_sm[2], 10) : svc.port;
     const targetProto = _sm ? _sm[1].toUpperCase() : (svc.proto || '').toUpperCase();
@@ -3124,14 +3185,21 @@ function mountDrawer() {
     }
     if (count > 0) {
       p._propagatePending = { svcKey, newName, port: targetPort, proto: targetProto, label: targetLabel, portHint: svc.portHint || null, count };
-      populateDrawer(_drawerIdx);
     }
+    populateDrawer(_drawerIdx);
+    syncRowStatus(_drawerIdx);
+    renderDeployPolicies(filterDeployPolicies(), false);
   });
 
   // Propagation check on addr name blur
   drawer.addEventListener('focusout', e => {
     const p = _drawerIdx !== null ? deployState.analyzed[_drawerIdx] : null;
     if (!p) return;
+    const resolvedObjectKey = e.target.dataset.objectKey;
+    const resolvedObjectName = typeof e.target.value === 'string' ? e.target.value.trim() : '';
+    if (resolvedObjectKey && resolvedObjectName) {
+      markDrawerObjectResolved(p, resolvedObjectKey, resolvedObjectName);
+    }
 
     // Mode /24 subnet
     let addrType = null;
@@ -3152,8 +3220,10 @@ function mountDrawer() {
       }
       if (count > 0) {
         p._propagateAddrPending = { addrType, cidr, newName, count };
-        populateDrawer(_drawerIdx);
       }
+      populateDrawer(_drawerIdx);
+      syncRowStatus(_drawerIdx);
+      renderDeployPolicies(filterDeployPolicies(), false);
       return;
     }
 
@@ -3177,8 +3247,16 @@ function mountDrawer() {
       }
       if (count > 0) {
         p._propagateAddrPending = { addrType: hostAddrType, hostIp, newName, count, isHost: true };
-        populateDrawer(_drawerIdx);
       }
+      populateDrawer(_drawerIdx);
+      syncRowStatus(_drawerIdx);
+      renderDeployPolicies(filterDeployPolicies(), false);
+      return;
+    }
+    if (resolvedObjectKey && resolvedObjectName) {
+      populateDrawer(_drawerIdx);
+      syncRowStatus(_drawerIdx);
+      renderDeployPolicies(filterDeployPolicies(), false);
     }
   });
 }
@@ -3191,13 +3269,15 @@ function buildDrawerSecProfiles(p, idx) {
     (list || []).map(n => `<option value="${escHtml(n)}" ${cur === n ? 'selected' : ''}>${escHtml(n)}</option>`).join('');
   const row = (label, key, list) => !list?.length ? '' :
     `<div class="drawer-field"><span class="drawer-field-label">${label}</span><select class="drawer-input drawer-sp-sel" data-idx="${idx}" data-sp="${key}" style="font-size:10px">${mkOpts(list, cur[key])}</select></div>`;
-  return `<div class="drawer-section">
-    <div class="drawer-section-title">Profils de sécurité</div>
-    ${row('Antivirus', 'antivirus', sp.antivirus)}
-    ${row('Web Filter', 'webfilter', sp.webfilter)}
-    ${row('IPS', 'ips', sp.ips)}
-    ${row('SSL/SSH', 'sslSsh', sp.sslSsh)}
-  </div>`;
+  return `<details class="drawer-security-profiles">
+    <summary>Security Profiles</summary>
+    <div class="drawer-security-profiles-body">
+      ${row('Antivirus', 'antivirus', sp.antivirus)}
+      ${row('Web Filter', 'webfilter', sp.webfilter)}
+      ${row('IPS', 'ips', sp.ips)}
+      ${row('SSL Inspection', 'sslSsh', sp.sslSsh)}
+    </div>
+  </details>`;
 }
 
 function openDrawer(idx) {
@@ -3232,6 +3312,109 @@ function cleanHostName(h, name) {
   return name.startsWith(prefix) ? name.slice(prefix.length) : name;
 }
 
+function markDrawerObjectResolved(policy, objectKey, name) {
+  if (!objectKey || !name) return;
+  if (!policy._resolvedObjectKeys) policy._resolvedObjectKeys = {};
+  policy._resolvedObjectKeys[objectKey] = name;
+}
+
+function isDrawerObjectResolved(policy, objectKey) {
+  return !!objectKey && !!policy?._resolvedObjectKeys?.[objectKey];
+}
+
+function drawerResolvedObjectHtml(name, title) {
+  return `<span style="color:var(--success);font-size:10px" title="${escHtml(title || name)}">&#10003; ${escHtml(name)}${badgeHtml('config')}</span>`;
+}
+
+function drawerNamedObjectControl(policy, objectKey, name, found, inputHtml, title) {
+  if (found || isDrawerObjectResolved(policy, objectKey)) {
+    return drawerResolvedObjectHtml(name, title);
+  }
+  return inputHtml;
+}
+
+function drawerHostControl(policy, host, type) {
+  const isSrc = type === 'src';
+  const names = isSrc ? policy._srcHostNames : policy._dstHostNames;
+  const found = new Set(isSrc ? (policy._srcHostsFound || []) : (policy._dstHostsFound || [])).has(host);
+  const autoName = `FF_HOST_${host.replace(/\./g, '_')}`;
+  const storedName = cleanHostName(host, names?.[host]);
+  const objectKey = `host:${type}:${host}`;
+  const displayName = storedName || autoName;
+  if (found || isDrawerObjectResolved(policy, objectKey)) {
+    return drawerResolvedObjectHtml(displayName, `${host}/32`);
+  }
+  return `<input class="drawer-host-input" data-object-key="${escHtml(objectKey)}" data-type="${type}" data-host="${escHtml(host)}" value="${escHtml(storedName && storedName !== autoName ? storedName : '')}" placeholder="${escHtml(displayName)}">`;
+}
+
+function serviceReuseKey(svc) {
+  const notation = svc?.label?.match(/^(TCP|UDP)\/(\d+)$/i);
+  const proto = notation ? notation[1] : svc?.proto;
+  const port = notation ? parseInt(notation[2], 10) : svc?.port;
+  if (!proto || !port) return '';
+  return `${String(proto).toUpperCase()}/${port}`;
+}
+
+function isCompatibleServiceSelected(policy, svc) {
+  const key = serviceReuseKey(svc);
+  const matches = svc?.compatibleMatches || (svc?.compatibleMatch ? [svc.compatibleMatch] : []);
+  return !!key && matches.some(match => policy?._serviceReuse?.[key] === match.name);
+}
+
+function selectedCompatibleService(services) {
+  if (!services || services.length < 2) return null;
+  const keys = services.map(serviceReuseKey);
+  const protos = new Set(keys.map(key => key.split('/')[0]).filter(Boolean));
+  if (protos.size !== 1 || keys.some(key => !key)) return null;
+  const candidateLists = services.map(service =>
+    service.compatibleMatches || (service.compatibleMatch ? [service.compatibleMatch] : [])
+  );
+  const common = candidateLists[0].filter(candidate =>
+    candidateLists.slice(1).every(list => list.some(match => match.name === candidate.name))
+  );
+  common.sort((a, b) => a.coverageCount - b.coverageCount || a.name.localeCompare(b.name));
+  if (!common.length) return null;
+  return {
+    ...common[0],
+    ports: keys.map(key => parseInt(key.split('/')[1], 10)).sort((a, b) => a - b),
+    extraPortCount: Math.max(0, common[0].coverageCount - services.length),
+  };
+}
+
+function isServiceDecisionResolved(policy, svc) {
+  const key = serviceReuseKey(svc);
+  const decision = key ? policy?._resolvedServiceKeys?.[key] : null;
+  if (decision === 'specific') return true;
+  if (decision?.startsWith('existing:')) {
+    return policy?._serviceReuse?.[key] === decision.slice('existing:'.length);
+  }
+  return false;
+}
+
+function clearSelectedServiceKey(policy, serviceKey) {
+  const [proto, port] = String(serviceKey || '').split('/');
+  if (proto && port) policy?._selectedSvcKeys?.delete(`${port}/${proto}`);
+}
+
+function markServiceDecisionResolved(policy, serviceKey, decision) {
+  if (!serviceKey) return;
+  if (!policy._resolvedServiceKeys) policy._resolvedServiceKeys = {};
+  if (decision === 'specific' && policy._serviceReuse) {
+    delete policy._serviceReuse[serviceKey];
+  } else if (decision.startsWith('existing:')) {
+    if (!policy._serviceReuse) policy._serviceReuse = {};
+    policy._serviceReuse[serviceKey] = decision.slice('existing:'.length);
+  }
+  policy._resolvedServiceKeys[serviceKey] = decision;
+  clearSelectedServiceKey(policy, serviceKey);
+}
+
+function mergedServicePortLabel(svc) {
+  const proto = String(svc?.proto || '').toUpperCase();
+  const portSpec = svc?.portRange || (svc?.ports || []).join(',');
+  return portSpec ? `${proto}/${portSpec}` : (svc?.portHint || svc?.label || proto);
+}
+
 function syncHostCell(idx, type) {
   const p = deployState.analyzed[idx];
   if (!p) return;
@@ -3264,9 +3447,22 @@ function _buildSvcCellHtml(p, limit = Infinity) {
   const svcList = p.analysis?.services || [];
   const stripPredef = n => (n || '').replace(/PREDEFINED$/i, '');
   const html = svcList.slice(0, limit).map(svc => {
-    if (svc.found) {
-      const dispName = stripPredef(svc.name);
+    if (svc._isMerged) {
+      const mergedName = svc.suggestedName || svc.label;
+      const mergedPortLabel = mergedServicePortLabel(svc);
+      return `<span class="match-ok" style="font-size:10px" title="${escHtml(mergedPortLabel)}">&#10003; ${escHtml(mergedName)}${badgeHtml('config')}</span>`;
+    }
+    const compatibleSelected = isCompatibleServiceSelected(p, svc);
+    const reuseKey = serviceReuseKey(svc);
+    const selectedReuseName = p._serviceReuse?.[reuseKey];
+    const resolvedDecision = p._resolvedServiceKeys?.[reuseKey];
+    if (svc.found || compatibleSelected) {
+      const dispName = stripPredef(compatibleSelected ? selectedReuseName : svc.name);
       return `<span class="match-ok" style="font-size:10px" title="${escHtml(svc.portHint || stripPredef(svc.label) || dispName)}">&#10003; ${escHtml(dispName)}${badgeHtml('config')}</span>`;
+    }
+    if (resolvedDecision === 'specific') {
+      const dispName = svc.suggestedName || svc.label || `FF_SVC_${svc.port}_${svc.proto}`;
+      return `<span class="match-ok" style="font-size:10px" title="${escHtml(svc.portHint || dispName)}">&#10003; ${escHtml(dispName)}${badgeHtml('config')}</span>`;
     }
     const isPortNotation = /^(TCP|UDP)\/\d+$/i.test(svc.suggestedName || '');
     const autoLabel = svc.isNamed ? svc.label : `FF_SVC_${svc.port}_${svc.proto}`;
@@ -3335,8 +3531,9 @@ function populateDrawer(idx) {
     const srcSubs = p._multiSrcSubnets;
     const srcSubRows = srcSubs.map((s, si) => {
       const isSubnet = s.useSubnet !== false;
-      const statusIcon = s.addrFound ? `<span style="color:var(--success)">&#10003;</span>` : `<span style="color:var(--warn)">+</span>`;
-      const nameInput = `<input class="drawer-input drawer-multisrc-name" data-si="${si}" value="${escHtml(inputVal(s.addrName, suggestAddrNameFE(s.subnet)))}" placeholder="${escHtml(s.addrName)}" style="flex:1;font-size:10px">`;
+      const objectKey = `multi-src:${si}`;
+      const statusIcon = (s.addrFound || isDrawerObjectResolved(p, objectKey)) ? `<span style="color:var(--success)">&#10003;</span>` : `<span style="color:var(--warn)">+</span>`;
+      const nameInput = `<input class="drawer-input drawer-multisrc-name" data-object-key="multi-src:${si}" data-si="${si}" value="${escHtml(inputVal(s.addrName, suggestAddrNameFE(s.subnet)))}" placeholder="${escHtml(s.addrName)}" style="flex:1;font-size:10px">`;
       let hostsHtml = '';
       if (!isSubnet && s.hosts?.length > 0) {
         const visibleSrcHosts = s.hosts.filter(h => !p._excludedSrcHosts?.has(h));
@@ -3347,9 +3544,7 @@ function populateDrawer(idx) {
           const hostFound = foundSet.has(h);
           return `<div class="drawer-host-row">
             <span class="drawer-host-ip">${escHtml(h)}</span>
-            ${hostFound
-              ? `<span style="color:var(--success);font-size:10px" title="${escHtml(h)}/32">&#10003; ${escHtml(hostName)}${badgeHtml('config')}</span>`
-              : `<input class="drawer-host-input" data-type="src" data-host="${escHtml(h)}" value="${escHtml(inputVal(cleanHostName(h, p._srcHostNames?.[h]), `FF_HOST_${h.replace(/\./g,'_')}`))}" placeholder="${escHtml(hostName)}">`}
+            ${drawerHostControl(p, h, 'src')}
             <button class="btn-del-item" data-del-type="src-host" data-host="${escHtml(h)}" title="Retirer cet hôte">✕</button>
           </div>`;
         }).join('')}${visibleSrcHosts.length > 8 ? `<button class="drawer-more-toggle drawer-hosts-toggle" data-hosts-type="src">${p._srcHostsExpanded ? 'Réduire' : `+ ${visibleSrcHosts.length - 8} autres`}</button>` : ''}</div>`;
@@ -3358,22 +3553,19 @@ function populateDrawer(idx) {
         <span class="drawer-multisrc-subnet" style="font-family:var(--mono);font-size:11px;min-width:120px">${escHtml(s.subnet)}</span>
         <button class="btn-sm drawer-multisrc-mode" data-si="${si}" style="font-size:9px;padding:2px 8px">${isSubnet ? `/${s.subnet.split('/')[1] || '24'}` : `/32 (${s.hosts?.length || 0}h)`}</button>
         ${isSubnet ? statusIcon : ''}
-        ${isSubnet ? (s.addrFound ? `<span style="color:var(--success);font-size:10px" title="${escHtml(s.subnet)}">${escHtml(s.addrName)}${badgeHtml('config')}</span>` : nameInput) : ''}
+        ${isSubnet ? drawerNamedObjectControl(p, objectKey, s.addrName, s.addrFound, nameInput, s.subnet) : ''}
         <button class="btn-del-item" data-del-type="src-subnet" data-si="${si}" title="Retirer ce subnet">✕</button>
       </div>${hostsHtml}`;
     }).join('');
-    srcSection = `<div class="drawer-section">
+    srcSection = `<div class="drawer-section drawer-network-card drawer-source-card">
       <div class="drawer-section-title">Sources (${srcSubs.length} subnets)</div>
       ${srcSubRows}
       <div class="drawer-toggle-row" style="margin-top:8px">
         <button class="drawer-toggle-btn drawer-grp-toggle ${p._useSrcGroup ? 'active' : ''}" data-type="src">Grouper (addrgrp)</button>
-        ${p._useSrcGroup ? (p._srcAddrGrpFound
-          ? `<span style="color:var(--success);font-size:11px" title="${escHtml(srcSubs.map(s => s.subnet).join(', '))}">&#10003; ${escHtml(p._srcAddrName)}</span>`
-          : `<input class="drawer-input drawer-src-grp-name" value="${escHtml(p._srcAddrName || '')}" placeholder="${escHtml(suggestedSrcGrp)}" style="width:160px">`)
-          : ''}
+        ${p._useSrcGroup ? drawerNamedObjectControl(p, 'group:src', p._srcAddrName, p._srcAddrGrpFound, `<input class="drawer-input drawer-src-grp-name" data-object-key="group:src" value="${escHtml(p._srcAddrName || '')}" placeholder="${escHtml(suggestedSrcGrp)}" style="width:160px">`, srcSubs.map(s => s.subnet).join(', ')) : ''}
       </div>
       ${_addrBanner('src')}
-      <div class="drawer-field drawer-interface-field drawer-source-interface-field"><span class="drawer-field-label">Source</span><select class="drawer-input drawer-srcintf">${ifOpts}</select></div>
+      <div class="drawer-field drawer-interface-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-srcintf">${ifOpts}</select></div>
     </div>`;
   } else {
     // ── Single source subnet ──
@@ -3387,9 +3579,7 @@ function populateDrawer(idx) {
         const name = cleanHostName(h, (p._srcHostNames || {})[h]) || `FF_HOST_${h.replace(/\./g,'_')}`;
         return `<div class="drawer-host-row">
           <span class="drawer-host-ip">${escHtml(h)}</span>
-          ${hostFound
-            ? `<span style="color:var(--success);font-size:10px" title="${escHtml(h)}/32">&#10003; ${escHtml(name)}${badgeHtml('config')}</span>`
-            : `<input class="drawer-host-input" data-type="src" data-host="${escHtml(h)}" value="${escHtml(inputVal(cleanHostName(h, p._srcHostNames?.[h]), `FF_HOST_${h.replace(/\./g,'_')}`))}" placeholder="${escHtml(name)}">`}
+          ${drawerHostControl(p, h, 'src')}
           <button class="btn-del-item" data-del-type="src-host" data-host="${escHtml(h)}" title="Retirer cet hôte">✕</button>
         </div>`;
       }).join('')}${visibleSrcHostsSingle.length > 8 ? `<button class="drawer-more-toggle drawer-hosts-toggle" data-hosts-type="src">${p._srcHostsExpanded ? 'Réduire' : `+ ${visibleSrcHostsSingle.length - 8} autres`}</button>` : ''}</div>`;
@@ -3397,14 +3587,11 @@ function populateDrawer(idx) {
         const srcGrpFound = p._srcAddrGrpFound;
         srcHostsHtml += `<div class="drawer-toggle-row" style="margin-top:4px">
           <button class="drawer-toggle-btn drawer-grp-toggle ${p._useSrcGroup ? 'active' : ''}" data-type="src">Grouper (addrgrp)</button>
-          ${p._useSrcGroup ? (srcGrpFound
-            ? `<span style="color:var(--success);font-size:11px" title="${escHtml(srcHosts.map(h => h + '/32').join(', '))}">&#10003; ${escHtml(p._srcAddrName)}</span>`
-            : `<input class="drawer-input drawer-src-grp-name" value="${escHtml(p._srcAddrName || '')}" placeholder="${escHtml(suggestedSrcGrp)}" style="width:160px">`)
-            : ''}
+          ${p._useSrcGroup ? drawerNamedObjectControl(p, 'group:src', p._srcAddrName, srcGrpFound, `<input class="drawer-input drawer-src-grp-name" data-object-key="group:src" value="${escHtml(p._srcAddrName || '')}" placeholder="${escHtml(suggestedSrcGrp)}" style="width:160px">`, srcHosts.map(h => h + '/32').join(', ')) : ''}
         </div>`;
       }
     }
-    srcSection = `<div class="drawer-section">
+    srcSection = `<div class="drawer-section drawer-network-card drawer-source-card">
       <div class="drawer-section-title">Source</div>
       <div class="drawer-field"><span class="drawer-field-label">Subnet</span><span class="drawer-field-value">${escHtml(p.srcSubnet || '')}</span></div>
       <div class="drawer-toggle-row">
@@ -3414,12 +3601,11 @@ function populateDrawer(idx) {
       </div>
       ${srcMode === 'subnet' ? `<div class="drawer-field drawer-object-field">
         <span class="drawer-field-label">Objet addr</span>
-        ${srcFound ? `<span class="drawer-field-value" style="color:var(--success)" title="${escHtml(a.srcAddr?.cidr || p.srcSubnet || '')}">&#10003; ${escHtml(srcAddrName)}${badgeHtml('config')}</span>`
-          : `<input class="drawer-input drawer-src-name" value="${escHtml(inputVal(srcAddrName, a.srcAddr?.suggestedName || suggestAddrNameFE(p.srcSubnet)))}" placeholder="${escHtml(srcAddrName || 'FF_...')}">${badgeHtml('auto')}`}
+        ${drawerNamedObjectControl(p, 'addr:src', srcAddrName, srcFound, `<input class="drawer-input drawer-src-name" data-object-key="addr:src" value="${escHtml(inputVal(srcAddrName, a.srcAddr?.suggestedName || suggestAddrNameFE(p.srcSubnet)))}" placeholder="${escHtml(srcAddrName || 'FF_...')}">${badgeHtml('auto')}`, a.srcAddr?.cidr || p.srcSubnet || '')}
       </div>` : ''}
       ${srcHostsHtml}
       ${_addrBanner('src')}
-      <div class="drawer-field drawer-interface-field drawer-source-interface-field"><span class="drawer-field-label">Source</span><select class="drawer-input drawer-srcintf">${ifOpts}</select></div>
+      <div class="drawer-field drawer-interface-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-srcintf">${ifOpts}</select></div>
     </div>`;
   }
 
@@ -3429,8 +3615,9 @@ function populateDrawer(idx) {
     const subs = p._multiDstSubnets;
     const subRows = subs.map((s, si) => {
       const isSubnet = s.useSubnet !== false;
-      const statusIcon = s.addrFound ? `<span style="color:var(--success)">&#10003;</span>` : `<span style="color:var(--warn)">+</span>`;
-      const nameInput = `<input class="drawer-input drawer-multidst-name" data-si="${si}" value="${escHtml(inputVal(s.addrName, suggestAddrNameFE(s.subnet)))}" placeholder="${escHtml(s.addrName)}" style="flex:1;font-size:10px">`;
+      const objectKey = `multi-dst:${si}`;
+      const statusIcon = (s.addrFound || isDrawerObjectResolved(p, objectKey)) ? `<span style="color:var(--success)">&#10003;</span>` : `<span style="color:var(--warn)">+</span>`;
+      const nameInput = `<input class="drawer-input drawer-multidst-name" data-object-key="multi-dst:${si}" data-si="${si}" value="${escHtml(inputVal(s.addrName, suggestAddrNameFE(s.subnet)))}" placeholder="${escHtml(s.addrName)}" style="flex:1;font-size:10px">`;
       let hostsHtml = '';
       if (!isSubnet && s.hosts?.length > 0) {
         const visibleDstHosts = s.hosts.filter(h => !p._excludedDstHosts?.has(h));
@@ -3441,9 +3628,7 @@ function populateDrawer(idx) {
           const hostFound = foundSet.has(h);
           return `<div class="drawer-host-row">
             <span class="drawer-host-ip">${escHtml(h)}</span>
-            ${hostFound
-              ? `<span style="color:var(--success);font-size:10px" title="${escHtml(h)}/32">&#10003; ${escHtml(hostName)}${badgeHtml('config')}</span>`
-              : `<input class="drawer-host-input" data-type="dst" data-host="${escHtml(h)}" value="${escHtml(inputVal(cleanHostName(h, p._dstHostNames?.[h]), `FF_HOST_${h.replace(/\./g,'_')}`))}" placeholder="${escHtml(hostName)}">`}
+            ${drawerHostControl(p, h, 'dst')}
             <button class="btn-del-item" data-del-type="dst-host" data-host="${escHtml(h)}" title="Retirer cet hôte">✕</button>
           </div>`;
         }).join('')}${visibleDstHosts.length > 8 ? `<button class="drawer-more-toggle drawer-hosts-toggle" data-hosts-type="dst">${p._dstHostsExpanded ? 'Réduire' : `+ ${visibleDstHosts.length - 8} autres`}</button>` : ''}</div>`;
@@ -3452,13 +3637,13 @@ function populateDrawer(idx) {
         <span class="drawer-multidst-subnet">${escHtml(s.subnet)}</span>
         <button class="btn-sm drawer-multidst-mode" data-si="${si}" style="font-size:9px;padding:2px 8px">${isSubnet ? `/${s.subnet.split('/')[1] || '24'}` : `/32 (${s.hosts?.length || 0}h)`}</button>
         ${isSubnet ? statusIcon : ''}
-        ${isSubnet ? (s.addrFound ? `<span style="color:var(--success);font-size:10px" title="${escHtml(s.subnet)}">${escHtml(s.addrName)}${badgeHtml('config')}</span>` : nameInput) : ''}
+        ${isSubnet ? drawerNamedObjectControl(p, objectKey, s.addrName, s.addrFound, nameInput, s.subnet) : ''}
         <button class="btn-del-item" data-del-type="dst-subnet" data-si="${si}" title="Retirer ce subnet">✕</button>
       </div>${hostsHtml}`;
     }).join('');
     const isMultiDstWan = p._isWan || p.dstTypeSummary === 'public' || subs.some(s => s.subnet === 'all' || (p.dstTypes || {})[s.subnet] === 'public');
     const dstUseAllMulti = p._dstUseAll === true;
-    dstSection = `<div class="drawer-section">
+    dstSection = `<div class="drawer-section drawer-network-card drawer-destination-card">
       <div class="drawer-section-title">Destinations (${subs.length})</div>
       ${isMultiDstWan ? `<div class="drawer-toggle-row" style="margin-bottom:8px">
         <span style="font-size:11px;color:var(--text2)">Mode :</span>
@@ -3471,12 +3656,10 @@ function populateDrawer(idx) {
       </div>` : `${subRows}
       <div class="drawer-toggle-row" style="margin-top:8px">
         <button class="drawer-toggle-btn drawer-grp-toggle ${p._useDstGroup ? 'active' : ''}" data-type="dst">Grouper (addrgrp)</button>
-        ${p._useDstGroup ? (p._dstAddrGrpFound
-          ? `<span style="color:var(--success);font-size:11px" title="${escHtml(subs.map(s => s.subnet).join(', '))}">&#10003; ${escHtml(p._dstAddrName)}</span>`
-          : `<input class="drawer-input drawer-grp-name" value="${escHtml(p._dstAddrName || '')}" placeholder="${escHtml(suggestedDstGrp)}" style="width:160px">`)
-          : ''}
+        ${p._useDstGroup ? drawerNamedObjectControl(p, 'group:dst', p._dstAddrName, p._dstAddrGrpFound, `<input class="drawer-input drawer-grp-name" data-object-key="group:dst" value="${escHtml(p._dstAddrName || '')}" placeholder="${escHtml(suggestedDstGrp)}" style="width:160px">`, subs.map(s => s.subnet).join(', ')) : ''}
       </div>`}
       ${_addrBanner('dst')}
+      <div class="drawer-field drawer-interface-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-dstintf">${ifOptsDst}</select></div>
     </div>`;
   } else {
     const dstAddrName = p._dstAddrName || a.dstAddr?.name || '';
@@ -3493,9 +3676,7 @@ function populateDrawer(idx) {
         const hostFound = dstFoundSet.has(h);
         return `<div class="drawer-host-row">
           <span class="drawer-host-ip">${escHtml(h)}</span>
-          ${hostFound
-            ? `<span style="color:var(--success);font-size:10px" title="${escHtml(h)}/32">&#10003; ${escHtml(name)}${badgeHtml('config')}</span>`
-            : `<input class="drawer-host-input" data-type="dst" data-host="${escHtml(h)}" value="${escHtml(inputVal(cleanHostName(h, p._dstHostNames?.[h]), `FF_HOST_${h.replace(/\./g,'_')}`))}" placeholder="${escHtml(name)}">`}
+          ${drawerHostControl(p, h, 'dst')}
           <button class="btn-del-item" data-del-type="dst-host" data-host="${escHtml(h)}" title="Retirer cet hôte">✕</button>
         </div>`;
       }).join('')}${visibleDstHostsSingle.length > 8 ? `<button class="drawer-more-toggle drawer-hosts-toggle" data-hosts-type="dst">${p._dstHostsExpanded ? 'Réduire' : `+ ${visibleDstHostsSingle.length - 8} autres`}</button>` : ''}</div>`;
@@ -3507,17 +3688,13 @@ function populateDrawer(idx) {
       const autoName = `FF_HOST_${ip.replace(/[\./]/g,'_')}`;
       const customName = p._dstAddrName || '';
       const dstTargetFound = dstFound && dstAddrName !== 'all';
-      dstWanSpecificHtml = dstTargetFound
-        ? `<div class="drawer-field drawer-object-field">
-            <span class="drawer-field-label">Objet addr</span>
-            <span class="drawer-field-value" style="color:var(--success)">&#10003; ${escHtml(dstAddrName)}${badgeHtml('config')}</span>
-          </div>`
-        : `<div class="drawer-field drawer-object-field">
-            <span class="drawer-field-label">Objet addr</span>
-            <input class="drawer-input drawer-dst-name" value="${escHtml(inputVal(customName, autoName))}" placeholder="${escHtml(autoName)}">${badgeHtml('auto')}
-          </div>`;
+      const dstInput = `<input class="drawer-input drawer-dst-name" data-object-key="addr:dst" value="${escHtml(inputVal(customName, autoName))}" placeholder="${escHtml(autoName)}">${badgeHtml('auto')}`;
+      dstWanSpecificHtml = `<div class="drawer-field drawer-object-field">
+        <span class="drawer-field-label">Objet addr</span>
+        ${drawerNamedObjectControl(p, 'addr:dst', dstAddrName || customName, dstTargetFound, dstInput, ip)}
+      </div>`;
     }
-    dstSection = `<div class="drawer-section">
+    dstSection = `<div class="drawer-section drawer-network-card drawer-destination-card">
       <div class="drawer-section-title">Destination</div>
       <div class="drawer-field">
         <span class="drawer-field-label">Target</span>
@@ -3539,12 +3716,12 @@ function populateDrawer(idx) {
       </div>` : ''}
       ${dstMode === 'subnet' ? `<div class="drawer-field drawer-object-field">
         <span class="drawer-field-label">Objet addr</span>
-        ${dstFound ? `<span class="drawer-field-value" style="color:var(--success)" title="${escHtml(a.dstAddr?.cidr || p.dstTarget || '')}">&#10003; ${escHtml(dstAddrName)}${badgeHtml('config')}</span>`
-          : `<input class="drawer-input drawer-dst-name" value="${escHtml(inputVal(dstAddrName, a.dstAddr?.suggestedName || suggestAddrNameFE(p.dstTarget)))}" placeholder="${escHtml(dstAddrName || 'FF_...')}">${badgeHtml('auto')}`}
+        ${drawerNamedObjectControl(p, 'addr:dst', dstAddrName, dstFound, `<input class="drawer-input drawer-dst-name" data-object-key="addr:dst" value="${escHtml(inputVal(dstAddrName, a.dstAddr?.suggestedName || suggestAddrNameFE(p.dstTarget)))}" placeholder="${escHtml(dstAddrName || 'FF_...')}">${badgeHtml('auto')}`, a.dstAddr?.cidr || p.dstTarget || '')}
       </div>` : ''}
       `}
       ${dstHostsHtml}
       ${_addrBanner('dst')}
+      <div class="drawer-field drawer-interface-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-dstintf">${ifOptsDst}</select></div>
     </div>`;
   }
 
@@ -3555,15 +3732,27 @@ function populateDrawer(idx) {
   const selKeys = p._selectedSvcKeys;
   // Compute merge bar state
   const getSvcPortProto = s => { const m = s.label?.match(/^(TCP|UDP)\/(\d+)$/i); return m ? { port: parseInt(m[2],10), proto: m[1].toUpperCase() } : { port: s.port, proto: (s.proto||'').toUpperCase() }; };
-  const selectableSvcs = svcList.filter(s => { if (s.found) return false; const m = s.label?.match(/^(TCP|UDP)\/(\d+)$/i); return m || (!s.isNamed && s.port); });
+  const selectableSvcs = svcList.filter(s => {
+    if (s.found || isServiceDecisionResolved(p, s)) return false;
+    const m = s.label?.match(/^(TCP|UDP)\/\d+$/i);
+    return m || (!s.isNamed && s.port);
+  });
   const selectedSvcs = selectableSvcs.filter(s => { const { port, proto } = getSvcPortProto(s); return selKeys.has(`${port}/${proto}`); });
   const canMerge = selectedSvcs.length >= 2 && new Set(selectedSvcs.map(s => getSvcPortProto(s).proto)).size === 1;
+  const selectionSignature = selectedSvcs.map(serviceReuseKey).sort().join('|');
+  const commonCompatibleService = canMerge ? selectedCompatibleService(selectedSvcs) : null;
+  const compatibleSelectionDismissed = !!selectionSignature
+    && p._dismissedCompatibleSelection === selectionSignature;
+  const showGlobalCompatibleDecision = !!commonCompatibleService && !compatibleSelectionDismissed;
+  const globalCompatibleSelected = !!commonCompatibleService
+    && commonCompatibleService.ports.every(port => p._serviceReuse?.[`${getSvcPortProto(selectedSvcs[0]).proto}/${port}`] === commonCompatibleService.name);
+  const selectedGlobalServiceKeys = new Set(selectedSvcs.map(serviceReuseKey));
   const mergeProto = canMerge ? getSvcPortProto(selectedSvcs[0]).proto : '';
   const mergePorts = canMerge ? selectedSvcs.map(s => getSvcPortProto(s).port).sort((a, b) => a - b) : [];
   const mergeRangeSuggestion = canMerge ? `${mergePorts[0]}-${mergePorts[mergePorts.length - 1]}` : '';
   const mergeName = p._mergedSvcName || (canMerge ? `FF_SVC_${mergeProto}_MULTI` : '');
   const mergeMode = p._mergeMode || 'list';
-  const mergeBar = canMerge ? `
+  const mergeBar = canMerge && !showGlobalCompatibleDecision ? `
     <div class="svc-merge-bar" style="background:var(--bg3);border-radius:6px;padding:8px;margin-top:8px;display:flex;flex-wrap:wrap;gap:6px;align-items:center">
       <span style="font-size:11px;color:var(--text2)">${selectedSvcs.length} ports ${mergeProto} sélectionnés</span>
       <input class="drawer-input svc-merge-name" value="${escHtml(mergeName)}" placeholder="FF_SVC_${mergeProto}_MULTI" style="width:160px;font-size:11px">
@@ -3572,9 +3761,49 @@ function populateDrawer(idx) {
       ${mergeMode === 'range' ? `<input class="drawer-input svc-merge-range" value="${escHtml(p._mergeRange || mergeRangeSuggestion)}" placeholder="${mergeRangeSuggestion}" style="width:100px;font-size:11px">` : `<span style="font-size:10px;color:var(--text2)">${mergePorts.join(', ')}</span>`}
       <button class="btn-sm btn-accent svc-do-merge" style="font-size:10px">Fusionner</button>
     </div>` : '';
+  const compatibleSelectionHtml = showGlobalCompatibleDecision ? `
+    <div class="svc-selected-compatible">
+      <strong>Un service FortiGate existant peut couvrir ces ports :</strong>
+      <span><b>Service existant compatible :</b> ${escHtml(commonCompatibleService.name)} <code>${escHtml(commonCompatibleService.portSpec)}</code></span>
+      <small>Ports sélectionnés : ${commonCompatibleService.ports.map(port => `${mergeProto}/${port}`).join(', ')}</small>
+      <small>${fmtNum(commonCompatibleService.extraPortCount)} ports supplémentaires couverts</small>
+      <div>
+        <button class="btn-sm btn-accent svc-use-compatible-selected ${globalCompatibleSelected ? 'btn-active' : ''}" data-proto="${mergeProto}" data-ports="${commonCompatibleService.ports.join(',')}" data-service-name="${escHtml(commonCompatibleService.name)}">${globalCompatibleSelected ? '✓ Service utilisé' : 'Utiliser ce service'}</button>
+        <button class="btn-sm svc-create-new-selected" data-selection-signature="${escHtml(selectionSignature)}">Créer un nouveau service</button>
+      </div>
+    </div>` : '';
   const stripPd = n => (n || '').replace(/PREDEFINED$/i, '');
-  const visibleSvcList = p._servicesExpanded ? svcList : svcList.slice(0, 6);
-  const svcsHtml = visibleSvcList.map(svc => {
+  const resolvedExistingGroups = new Map();
+  const resolvedExistingKeys = new Set();
+  for (const service of svcList) {
+    const key = serviceReuseKey(service);
+    const decision = key ? p._resolvedServiceKeys?.[key] : null;
+    if (!decision?.startsWith('existing:')) continue;
+    const serviceName = decision.slice('existing:'.length);
+    if (p._serviceReuse?.[key] !== serviceName) continue;
+    if (!resolvedExistingGroups.has(serviceName)) resolvedExistingGroups.set(serviceName, []);
+    resolvedExistingGroups.get(serviceName).push(service);
+    resolvedExistingKeys.add(key);
+  }
+  const resolvedExistingHtml = [...resolvedExistingGroups].map(([serviceName, services]) => `
+    <div class="drawer-field" title="${escHtml(services.map(service => service.label).join(', '))}">
+      <span class="drawer-field-label">Ports couverts</span>
+      <span class="drawer-field-value" style="color:var(--success)">&#10003; ${escHtml(serviceName)}${badgeHtml('config')}</span>
+    </div>`).join('');
+  const servicesWithoutResolvedExisting = svcList.filter(service => !resolvedExistingKeys.has(serviceReuseKey(service)));
+  const visibleSvcList = showGlobalCompatibleDecision
+    ? servicesWithoutResolvedExisting.filter(service => !selectedGlobalServiceKeys.has(serviceReuseKey(service)))
+    : servicesWithoutResolvedExisting;
+  const displayServiceCount = visibleSvcList.length + resolvedExistingGroups.size + (showGlobalCompatibleDecision ? 1 : 0);
+  const svcsHtml = resolvedExistingHtml + visibleSvcList.map(svc => {
+    if (svc._isMerged) {
+      const mergedName = svc.suggestedName || svc.label;
+      const mergedPortLabel = svc.portRange
+        ? `${String(svc.proto || '').toUpperCase()}/${svc.portRange}`
+        : mergedServicePortLabel(svc);
+      const rawKey = svc.label || mergedName;
+      return `<div class="drawer-field" title="${escHtml(svc.portHint || mergedPortLabel)}"><span class="drawer-field-label">${escHtml(mergedPortLabel)}</span><span class="drawer-field-value" style="color:var(--success)">&#10003; ${escHtml(mergedName)}${badgeHtml('config')}</span><button class="btn-del-item" data-del-type="svc" data-svc-key="${escHtml(rawKey)}" title="Retirer ce service de la policy">✕</button></div>`;
+    }
     if (svc.found) {
       const dispLabel = stripPd(svc.label || svc.name);
       const dispName  = stripPd(svc.name);
@@ -3586,10 +3815,20 @@ function populateDrawer(idx) {
     const svcProto = _pnm ? _pnm[1].toUpperCase() : (svc.proto || '').toUpperCase();
     const svcPort  = _pnm ? parseInt(_pnm[2], 10) : svc.port;
     const svcKey = _pnm ? `${svcPort}/${svcProto}` : (svc.isNamed ? `label:${svc.label}` : `${svc.port}/${svc.proto}`);
-    const isSelectable = !svc.found && (_pnm || (!svc.isNamed && svc.port));
+    const reuseKey = serviceReuseKey(svc);
+    const compatibleMatch = svc.compatibleMatch;
+    const usingCompatible = isCompatibleServiceSelected(p, svc);
+    const serviceDecisionResolved = isServiceDecisionResolved(p, svc);
+    const serviceDecision = reuseKey ? p._resolvedServiceKeys?.[reuseKey] : null;
+    const isSelectable = !serviceDecisionResolved && !usingCompatible && !svc.found && (_pnm || (!svc.isNamed && svc.port));
     const isSelected = selKeys.has(svcKey);
-    const svcAutoName = _pnm ? `FF_SVC_${svcPort}_${svcProto}` : (svc.isNamed ? svc.label : `FF_SVC_${svc.port}_${svc.proto}`);
-    const svcDefaultName = svc.suggestedName || svcAutoName;
+    const legacySvcAutoName = _pnm ? `FF_SVC_${svcPort}_${svcProto}` : null;
+    const svcAutoName = _pnm ? `FF_SVC_${svcProto}_${svcPort}` : (svc.isNamed ? svc.label : `FF_SVC_${svc.port}_${svc.proto}`);
+    const hasCustomSuggestedName = svc.suggestedName
+      && svc.suggestedName !== svcAutoName
+      && svc.suggestedName !== legacySvcAutoName;
+    const svcDefaultName = hasCustomSuggestedName ? svc.suggestedName : svcAutoName;
+    const svcInputValue = hasCustomSuggestedName ? svc.suggestedName : '';
     // Show inline port hint only when it's precise (predefined/custom/port-notation resolved)
     // — never when it's the raw multi-port "observé" fallback (misleading for named services)
     const precisHint = svc.portHint && !svc.portHint.includes('observé');
@@ -3597,18 +3836,30 @@ function populateDrawer(idx) {
     const hintText = precisHint
       ? `<span style="font-size:9px;color:var(--text2);margin-left:4px" title="${escHtml(hintTitle)}">${escHtml(svc.portHint)}</span>`
       : '';
-    return `<div class="drawer-field${isSelectable ? ' svc-selectable' : ''}" data-svc-key="${escHtml(svcKey)}" style="cursor:${isSelectable?'pointer':'default'};${isSelected ? 'background:rgba(99,179,237,0.10);border-radius:4px;outline:1px solid var(--accent);' : ''}">
-      ${isSelectable ? `<input type="checkbox" class="svc-sel-chk" ${isSelected?'checked':''} style="margin-right:4px;cursor:pointer;flex-shrink:0">` : ''}
-      <span class="drawer-field-label" title="${escHtml(hintTitle)}">${escHtml(svc.label || `${svc.port}/${svc.proto}`)}</span>
-      ${svc.isNamed && !_pnm ? hintText : ''}
-      <input class="drawer-input drawer-svc-name" data-svc-key="${escHtml(svcKey)}" value="${escHtml(inputVal(svc.suggestedName, svcAutoName))}" placeholder="${escHtml(svcDefaultName)}" onclick="event.stopPropagation()">${badgeHtml('auto')}
-      <button class="btn-del-item" data-del-type="svc" data-svc-key="${escHtml(svcKey)}" title="Retirer ce service de la policy">✕</button>
+    if (serviceDecision === 'specific') {
+      const finalName = svc.suggestedName || svcAutoName;
+      return `<div class="drawer-field" title="${escHtml(`${svcProto}/${svcPort}`)}"><span class="drawer-field-label">${escHtml(svc.label || `${svcProto}/${svcPort}`)}</span><span class="drawer-field-value" style="color:var(--success)">&#10003; ${escHtml(finalName)}${badgeHtml('config')}</span><button class="btn-del-item" data-del-type="svc" data-svc-key="${escHtml(svcKey)}" title="Retirer ce service de la policy">✕</button></div>`;
+    }
+    const compatibilityHtml = compatibleMatch && !serviceDecisionResolved && !commonCompatibleService ? `<div class="drawer-service-compatibility ${usingCompatible ? 'is-selected' : ''}">
+      <div><small>Service observé</small><strong class="mono">${escHtml(`${svcProto}/${svcPort}`)}</strong></div>
+      <div><small>Service compatible</small><strong>${escHtml(compatibleMatch.name)}</strong><span class="mono">${escHtml(compatibleMatch.portSpec)}</span></div>
+      <div><small>Extension possible</small><strong>${fmtNum(compatibleMatch.extraPortCount)} ports supplémentaires</strong></div>
+      <div class="drawer-service-compatibility-actions">
+        <button class="btn-sm drawer-use-compatible-service ${usingCompatible ? 'btn-active' : ''}" data-service-key="${escHtml(reuseKey)}" data-service-name="${escHtml(compatibleMatch.name)}">${usingCompatible ? '✓ Service utilisé' : 'Utiliser ce service'}</button>
+        <button class="btn-sm drawer-create-specific-service ${usingCompatible ? '' : 'btn-active'}" data-service-key="${escHtml(reuseKey)}">Créer un service spécifique</button>
+      </div>
+    </div>` : '';
+    return `<div class="drawer-service-item">
+      <div class="drawer-field${isSelectable ? ' svc-selectable' : ''}" data-svc-key="${escHtml(svcKey)}" style="cursor:${isSelectable?'pointer':'default'};${isSelected ? 'background:rgba(99,179,237,0.10);border-radius:4px;outline:1px solid var(--accent);' : ''}">
+        ${isSelectable ? `<input type="checkbox" class="svc-sel-chk" ${isSelected?'checked':''} style="margin-right:4px;cursor:pointer;flex-shrink:0">` : ''}
+        <span class="drawer-field-label" title="${escHtml(hintTitle)}">${escHtml(svc.label || `${svc.port}/${svc.proto}`)}</span>
+        ${svc.isNamed && !_pnm ? hintText : ''}
+        <input class="drawer-input drawer-svc-name" data-svc-key="${escHtml(svcKey)}" value="${escHtml(svcInputValue)}" placeholder="${escHtml(svcDefaultName)}" onclick="event.stopPropagation()" ${usingCompatible ? 'disabled' : ''}>${badgeHtml('auto')}
+        <button class="btn-del-item" data-del-type="svc" data-svc-key="${escHtml(svcKey)}" title="Retirer ce service de la policy">✕</button>
+      </div>
+      ${compatibilityHtml}
     </div>`;
   }).join('');
-  const servicesMore = svcList.length > 6
-    ? `<button class="drawer-more-toggle drawer-services-toggle">${p._servicesExpanded ? 'Réduire' : `+ ${svcList.length - 6} autres`}</button>`
-    : '';
-
   // Propagation banner (shown after blur on svc name when other policies have same port/proto)
   const pp = p._propagatePending;
   const propagateBanner = pp ? `<div class="svc-propagate-banner">
@@ -3619,6 +3870,7 @@ function populateDrawer(idx) {
 
   const body = document.getElementById('drawer-body');
   body.innerHTML = `
+    <div class="drawer-top-actions"><button class="btn-sm" onclick="filterFlowsByPolicy(${idx})">→ Voir les flux</button></div>
     <div class="drawer-section drawer-general-summary">
       <div class="drawer-section-title">Général</div>
       <div class="drawer-general-grid">
@@ -3626,39 +3878,18 @@ function populateDrawer(idx) {
         <div><span>Sessions</span><strong>${fmtNum(p.sessions || 0)}</strong></div>
         <div><span>Policy ID</span><strong>${(p.policyIds || [])[0] || '—'}</strong></div>
         <div class="drawer-general-action"><span>Action</span><button class="btn-sm drawer-action-btn ${(p._action||'accept')==='accept'?'active':''}" data-action="accept">✓ Accept</button><button class="btn-sm drawer-action-btn ${(p._action||'accept')==='deny'?'active':''}" data-action="deny">✕ Deny</button></div>
+        <div class="drawer-general-control"><span>Log</span><select class="drawer-input drawer-log-sel"><option value="all" ${(p._log||'all')==='all'?'selected':''}>log all</option><option value="utm" ${p._log==='utm'?'selected':''}>log utm</option><option value="disable" ${p._log==='disable'?'selected':''}>log disable</option></select></div>
+        <div class="drawer-general-control"><span>NAT</span><label><input type="checkbox" class="drawer-nat" ${p._nat ? 'checked' : ''}> Activer</label></div>
+        <div class="drawer-general-control drawer-general-name"><span>Nom policy</span><input class="drawer-input drawer-policy-name" value="${escHtml(p._policyName || '')}" placeholder="FF_POLICY_..."></div>
       </div>
     </div>
-    ${srcSection}
-    ${dstSection}
-    <div class="drawer-section" id="drawer-interfaces-section">
-      <div class="drawer-section-title">Interfaces</div>
-      <div id="drawer-interface-fields"><div class="drawer-field drawer-interface-field"><span class="drawer-field-label">Destination</span><select class="drawer-input drawer-dstintf">${ifOptsDst}</select></div></div>
+    <div class="drawer-network-grid">
+      ${srcSection}
+      ${dstSection}
     </div>
-    ${svcList.length ? `<div class="drawer-section"><div class="drawer-section-title">Services (${svcList.length})${selectableSvcs.length > 1 ? `<label style="font-size:10px;color:var(--text2);font-weight:400;margin-left:8px;display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" class="svc-sel-all" ${selectedSvcs.length === selectableSvcs.length ? 'checked':''} style="cursor:pointer;margin:0"> Tout sélectionner</label>` : ''}</div>${svcsHtml}${servicesMore}${mergeBar}${propagateBanner}</div>` : ''}
-    <div class="drawer-section" id="drawer-objects-section">
-      <div class="drawer-section-title">Objets FortiGate</div>
-      <div id="drawer-object-fields"></div>
-    </div>
-    <details class="drawer-advanced">
-      <summary>Options avancées</summary>
-      <div class="drawer-advanced-body">
-        <div class="drawer-field"><span class="drawer-field-label">Log</span><select class="drawer-input drawer-log-sel"><option value="all" ${(p._log||'all')==='all'?'selected':''}>log all</option><option value="utm" ${p._log==='utm'?'selected':''}>log utm</option><option value="disable" ${p._log==='disable'?'selected':''}>log disable</option></select></div>
-        <div class="drawer-field"><span class="drawer-field-label">NAT</span><label style="display:flex;align-items:center;gap:6px"><input type="checkbox" class="drawer-nat" ${p._nat ? 'checked' : ''}> Activer</label></div>
-        <div class="drawer-field"><span class="drawer-field-label">Nom policy</span><input class="drawer-input drawer-policy-name" value="${escHtml(p._policyName || '')}" placeholder="FF_POLICY_..."></div>
-        <div class="drawer-field"><button class="btn-sm" onclick="filterFlowsByPolicy(${idx})" style="width:100%;justify-content:center">→ Voir les flux</button></div>
-        ${buildDrawerSecProfiles(p, idx)}
-      </div>
-    </details>
+    ${svcList.length ? `<div class="drawer-section drawer-services-section"><div class="drawer-section-title">Services (${displayServiceCount})${!showGlobalCompatibleDecision && selectableSvcs.length > 1 ? `<label style="font-size:10px;color:var(--text2);font-weight:400;margin-left:8px;display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" class="svc-sel-all" ${selectedSvcs.length === selectableSvcs.length ? 'checked':''} style="cursor:pointer;margin:0"> Tout sélectionner</label>` : ''}</div>${compatibleSelectionHtml}<div class="drawer-services-grid">${svcsHtml}</div>${mergeBar}${propagateBanner}</div>` : ''}
+    ${buildDrawerSecProfiles(p, idx)}
   `;
-  const interfaceFields = body.querySelector('#drawer-interface-fields');
-  body.querySelectorAll('.drawer-source-interface-field').forEach(field => interfaceFields.prepend(field));
-  const objectFields = body.querySelector('#drawer-object-fields');
-  body.querySelectorAll('.drawer-object-field').forEach(field => objectFields.append(field));
-  [...objectFields.children].forEach((field, index) => {
-    const label = field.querySelector('.drawer-field-label');
-    if (label) label.textContent = index === 0 ? 'Source' : 'Destination';
-  });
-  if (!objectFields.children.length) body.querySelector('#drawer-objects-section').style.display = 'none';
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -6802,7 +7033,7 @@ function isPolicyComplete(p, _debug) {
   // Services — must be found, merged, or explicitly renamed by user
   // Aligné avec svcCells: orange si pas de customName (= suggestedName identique au label auto)
   for (const svc of a.services || []) {
-    if (svc.found || svc._isMerged) continue;
+    if (svc.found || svc._isMerged || isCompatibleServiceSelected(p, svc)) continue;
     const isPortNotation = /^(TCP|UDP)\/\d+$/i.test(svc.suggestedName || '');
     const autoLabel = svc.isNamed ? svc.label : `FF_SVC_${svc.port}_${svc.proto}`;
     const hasCustomName = svc.suggestedName && !isPortNotation && svc.suggestedName !== autoLabel;
@@ -7624,7 +7855,7 @@ async function generateDeployConf() {
     selectedPolicies = aggregated.map(p => ({
       ...p,
       services:        (p.analysis?.services || []).filter(s => !s._isMerged).map(s => s.label),
-      _mergedServices: (p.analysis?.services || []).filter(s => s._isMerged).map(s => ({ name: s.suggestedName, ports: s.ports || null, portRange: s.portRange || null, proto: s.proto })),
+      _mergedServices: (p.analysis?.services || []).filter(s => s._isMerged).map(s => ({ name: s.suggestedName, ports: s.ports || null, portRange: s.portRange || null, proto: s.proto, sourcePorts: s.sourcePorts || [] })),
       srcintf:      p._isAggregated ? (p._srcintfList || []) : (p._srcintf || p.srcintf || ''),
       dstintf:      p._isAggregated ? (p._dstintfList || []) : (p._dstintf || p.dstintf || ''),
       srcAddrName:  p._srcAddrName,
@@ -7646,7 +7877,7 @@ async function generateDeployConf() {
       .map(p => ({
         ...p,
         services:        (p.analysis?.services || []).filter(s => !s._isMerged).map(s => s.label),
-        _mergedServices: (p.analysis?.services || []).filter(s => s._isMerged).map(s => ({ name: s.suggestedName, ports: s.ports || null, portRange: s.portRange || null, proto: s.proto })),
+        _mergedServices: (p.analysis?.services || []).filter(s => s._isMerged).map(s => ({ name: s.suggestedName, ports: s.ports || null, portRange: s.portRange || null, proto: s.proto, sourcePorts: s.sourcePorts || [] })),
         srcintf:      p._srcintf || p.srcintf || '',
         dstintf:      p._dstintf || p.dstintf || '',
         srcAddrName:  p._srcAddrName,
@@ -7657,6 +7888,9 @@ async function generateDeployConf() {
         srcHosts:     (p.srcHosts || []).filter(h => !p._excludedSrcHosts?.has(h)),
         dstHosts:     (p.dstHosts || []).filter(h => !p._excludedDstHosts?.has(h)),
         tags:         p._tags || [],
+        securityProfiles: p._secProfiles || null,
+        action:       p._action || null,
+        log:          p._log    || null,
         disabled:     p._disabled || false,
       }));
   }
@@ -7695,7 +7929,7 @@ async function generateDeployConf() {
     const pfRes = await fetch(`/api/deploy/preflight?session=${state.session}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ selectedPolicies }),
+      body: JSON.stringify({ selectedPolicies, opts }),
     });
     if (pfRes.ok) {
       const pf = await pfRes.json();

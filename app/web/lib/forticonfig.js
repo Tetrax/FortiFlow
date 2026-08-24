@@ -163,19 +163,24 @@ function extractKnownSubnets(fortiConfig) {
   return [...byCidr.values()].sort((a, b) => b.prefix - a.prefix);
 }
 
-function parsePorts(portrange) {
-  if (!portrange) return [];
+function parsePortSpec(portrange) {
   const ports = [];
+  const ranges = [];
+  if (!portrange) return { ports, ranges };
   for (const part of portrange.trim().split(/\s+/)) {
     const clean = part.split(':')[0]; // strip :src_portrange suffix (FortiGate format)
-    let [a, b] = clean.split('-').map(Number);
-    if (b && !isNaN(b)) {
-      if (a > b) { const t = a; a = b; b = t; }
-      for (let i = a; i <= Math.min(b, a + 10000); i++) ports.push(i);
-    }
-    else if (a && !isNaN(a)) ports.push(a);
+    let [start, end] = clean.split('-').map(Number);
+    if (!Number.isInteger(start) || start < 1 || start > 65535) continue;
+    if (!Number.isInteger(end)) end = start;
+    if (end < 1 || end > 65535) continue;
+    if (start > end) [start, end] = [end, start];
+    ranges.push({ start, end });
+    if (start === end) ports.push(start);
   }
-  return ports;
+  return {
+    ports: [...new Set(ports)].sort((a, b) => a - b),
+    ranges,
+  };
 }
 
 // ─── FortiGate predefined services ───────────────────────────────────────────
@@ -415,13 +420,17 @@ function parseFortiConfig(text, selectedVdom = null) {
     const proto = (props.protocol || 'TCP/UDP/SCTP').toUpperCase();
     const icmptype = props.icmptype !== undefined && props.icmptype !== '' ? parseInt(props.icmptype, 10) : null;
     const icmpcode = props.icmpcode !== undefined && props.icmpcode !== '' ? parseInt(props.icmpcode, 10) : null;
-    const tcpPorts = parsePorts(props['tcp-portrange'] || '');
-    const udpPorts = parsePorts(props['udp-portrange'] || '');
+    const tcpSpec = parsePortSpec(props['tcp-portrange'] || '');
+    const udpSpec = parsePortSpec(props['udp-portrange'] || '');
+    const tcpPorts = tcpSpec.ports;
+    const udpPorts = udpSpec.ports;
     customServices[name] = {
       name,
       proto,
       tcpPorts,
       udpPorts,
+      tcpRanges: tcpSpec.ranges,
+      udpRanges: udpSpec.ranges,
       // P1: Sets pré-calculés pour un lookup O(1) dans findService (au lieu de ports.includes O(n))
       _tcpSet: new Set(tcpPorts),
       _udpSet: new Set(udpPorts),
@@ -926,6 +935,53 @@ function findIcmpService(label, customServices) {
   return null;
 }
 
+function serviceRanges(service, isUdp) {
+  const ranges = isUdp ? service.udpRanges : service.tcpRanges;
+  if (Array.isArray(ranges)) return ranges;
+  const ports = isUdp ? service.udpPorts : service.tcpPorts;
+  return (ports || []).map(port => ({ start: port, end: port }));
+}
+
+function mergedRangeCount(ranges) {
+  const sorted = (ranges || [])
+    .map(range => ({ start: range.start, end: range.end }))
+    .sort((a, b) => a.start - b.start || a.end - b.end);
+  let count = 0;
+  let current = null;
+  for (const range of sorted) {
+    if (!current || range.start > current.end + 1) {
+      if (current) count += current.end - current.start + 1;
+      current = range;
+    } else {
+      current.end = Math.max(current.end, range.end);
+    }
+  }
+  if (current) count += current.end - current.start + 1;
+  return count;
+}
+
+function formatRanges(proto, ranges) {
+  const values = (ranges || []).map(range => range.start === range.end
+    ? String(range.start)
+    : `${range.start}-${range.end}`);
+  return values.length ? `${proto}/${values.join(',')}` : '';
+}
+
+function formatCustomServicePortHint(service) {
+  return [
+    formatRanges('TCP', serviceRanges(service, false)),
+    formatRanges('UDP', serviceRanges(service, true)),
+  ].filter(Boolean).join(' / ') || null;
+}
+
+function isCatchAllTransportService(name, ranges) {
+  const normalizedName = String(name || '').toUpperCase().replace(/[-\s]/g, '_');
+  if (normalizedName === 'ALL_TCP' || normalizedName === 'ALL_UDP') return true;
+  return mergedRangeCount(ranges) === 65535
+    && ranges.some(range => range.start <= 1 && range.end >= 1)
+    && ranges.some(range => range.start <= 65535 && range.end >= 65535);
+}
+
 // Fuzzy name match: find a service by label similarity (prefix/contains) + observed ports filter
 function findServiceByName(label, observedPorts, protoName, customServices) {
   // Never fuzzy-match port-notation labels — they have their own resolution path
@@ -935,9 +991,7 @@ function findServiceByName(label, observedPorts, protoName, customServices) {
   // 1. Case-insensitive exact match in custom services
   for (const [name, cs] of Object.entries(customServices)) {
     if (name.toLowerCase() === label.toLowerCase()) {
-      const tcp = (cs.tcpPorts || []).slice(0, 8).join(', ');
-      const udp = (cs.udpPorts || []).slice(0, 8).join(', ');
-      const portHint = [tcp && `TCP: ${tcp}`, udp && `UDP: ${udp}`].filter(Boolean).join(' / ') || null;
+      const portHint = formatCustomServicePortHint(cs);
       return { found: true, name, source: 'custom', portHint };
     }
   }
@@ -978,30 +1032,60 @@ function findServiceByName(label, observedPorts, protoName, customServices) {
   return null;
 }
 
-function findService(port, protoName, customServices, opts) {
+function findService(port, protoName, customServices, _opts) {
   const p     = parseInt(port, 10);
   const isUdp = /^(udp|17)$/i.test(String(protoName));
-  const maxPortCount = opts?.maxPortCount || Infinity;  // skip services broader than this
+  const proto = isUdp ? 'UDP' : 'TCP';
+  const exactMatches = [];
+  const compatibleMatches = [];
 
-  const matches = [];
-
-  // Check predefined
+  // Preserve existing predefined behavior: the static mapping represents an exact service lookup.
   const predef = findPredefinedService(p, protoName);
-  if (predef) matches.push({ name: predef, source: 'predefined', portCount: 1 });
-
-  // Check custom services from config (may be multiple)
-  for (const [name, svc] of Object.entries(customServices)) {
-    const ports   = isUdp ? svc.udpPorts : svc.tcpPorts;
-    const portSet = isUdp ? svc._udpSet  : svc._tcpSet;   // P1: lookup O(1)
-    if (ports.length <= maxPortCount && (portSet ? portSet.has(p) : ports.includes(p))) {
-      matches.push({ name, source: 'custom', portCount: ports.length });
-    }
+  if (predef) {
+    exactMatches.push({
+      name: predef, source: 'predefined', proto,
+      portSpec: `${proto}/${p}`, coverageCount: 1, extraPortCount: 0,
+    });
   }
 
-  if (matches.length === 0) return { found: false };
-  // Prefer most specific match (fewest ports)
-  matches.sort((a, b) => a.portCount - b.portCount);
-  return { found: true, name: matches[0].name, source: matches[0].source, allMatches: matches };
+  // Custom services are evaluated from structural ranges, never expanded port arrays.
+  for (const [name, svc] of Object.entries(customServices)) {
+    const ranges = serviceRanges(svc, isUdp);
+    if (!ranges.some(range => p >= range.start && p <= range.end)) continue;
+    if (isCatchAllTransportService(name, ranges)) continue;
+
+    const relevantCount = mergedRangeCount(ranges);
+    const otherCount = mergedRangeCount(serviceRanges(svc, !isUdp));
+    const coverageCount = relevantCount + otherCount;
+    const candidate = {
+      name, source: 'custom', proto,
+      portSpec: formatRanges(proto, ranges),
+      coverageCount,
+      extraPortCount: Math.max(0, coverageCount - 1),
+    };
+    if (coverageCount === 1) exactMatches.push(candidate);
+    else compatibleMatches.push(candidate);
+  }
+
+  if (exactMatches.length > 0) {
+    const sourceRank = source => source === 'predefined' ? 0 : 1;
+    exactMatches.sort((a, b) => a.coverageCount - b.coverageCount
+      || sourceRank(a.source) - sourceRank(b.source)
+      || a.name.localeCompare(b.name));
+    const exactMatch = exactMatches[0];
+    return {
+      found: true,
+      name: exactMatch.name,
+      source: exactMatch.source,
+      exactMatch,
+      allMatches: exactMatches,
+    };
+  }
+  if (compatibleMatches.length > 0) {
+    compatibleMatches.sort((a, b) => a.extraPortCount - b.extraPortCount || a.name.localeCompare(b.name));
+    return { found: false, compatibleMatch: compatibleMatches[0], compatibleMatches };
+  }
+  return { found: false };
 }
 
 // ─── Policy analysis ──────────────────────────────────────────────────────────
@@ -1131,6 +1215,12 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
     // Services
     const protoLabel = p.protos?.[0] || 'TCP';
     const serviceItems = [];
+    const acceptedCompatibleReuse = (port, proto, compatibleMatches) => {
+      if (!port || !compatibleMatches?.length) return null;
+      const key = `${String(proto || '').toUpperCase()}/${port}`;
+      const requested = p._serviceReuse?.[key];
+      return compatibleMatches.some(match => match.name === requested) ? requested : null;
+    };
 
     if (p.services && p.services.length > 0) {
       for (const svc of p.services) {
@@ -1148,12 +1238,15 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
 
         // Fallback: if name-based lookup failed, try matching by port against custom services
         let portFallback = null;
+        let compatibleMatch = null;
+        let portResolution = null;
         if (!knownPredef && !customMatch && !icmpMatch && !fuzzyMatch) {
           // Port-notation label (e.g. "UDP/11436"): use the port embedded in the label
           const pnm = svc.match(/^(TCP|UDP)\/(\d+)$/i);
           if (pnm) {
-            const m = findService(parseInt(pnm[2], 10), pnm[1], customServices, { maxPortCount: 100 });
-            if (m.found) portFallback = m;
+            portResolution = findService(parseInt(pnm[2], 10), pnm[1], customServices);
+            if (portResolution.found) portFallback = portResolution;
+            else compatibleMatch = portResolution.compatibleMatch || null;
           } else if (p.ports?.length > 0) {
             // Named service (e.g. "NETBIOS-RPC"): try all observed ports, accept only if
             // all matches resolve to the same service (unambiguous single candidate)
@@ -1178,12 +1271,12 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
               ? `${cs.proto} type ${cs.icmptype}${cs.icmpcode !== null ? ` code ${cs.icmpcode}` : ''}`
               : cs.proto;
           } else if (cs) {
-            const tcp = cs.tcpPorts.slice(0, 8).join(', ');
-            const udp = cs.udpPorts.slice(0, 8).join(', ');
-            portHint = [tcp && `TCP: ${tcp}`, udp && `UDP: ${udp}`].filter(Boolean).join(' / ');
+            portHint = formatCustomServicePortHint(cs) || '';
           } else if (portFallback) {
             portHint = `${protoLabel}: ${p.ports[0]} (observé)`;
           }
+        } else if (compatibleMatch) {
+          portHint = `${compatibleMatch.proto}: ${svc.match(/\d+$/)?.[0] || ''} (observé)`;
         } else if (fuzzyMatch) {
           portHint = fuzzyMatch.portHint || '';
         } else if (knownPredef) {
@@ -1194,19 +1287,31 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
           portHint = `${protoLabel}: ${p.ports[0]} (observé)`;
         }
 
-        const found = knownPredef || !!customMatch || !!icmpMatch || !!fuzzyMatch || !!portFallback;
-        const resolvedName = icmpMatch ? icmpMatch.name
+        const portNotation = svc.match(/^(TCP|UDP)\/(\d+)$/i);
+        const reusedCompatibleName = portNotation
+          ? acceptedCompatibleReuse(
+            parseInt(portNotation[2], 10), portNotation[1],
+            portResolution?.compatibleMatches || (compatibleMatch ? [compatibleMatch] : []),
+          )
+          : null;
+        const found = knownPredef || !!customMatch || !!icmpMatch || !!fuzzyMatch || !!portFallback || !!reusedCompatibleName;
+        const resolvedName = reusedCompatibleName || (icmpMatch ? icmpMatch.name
           : fuzzyMatch ? fuzzyMatch.name
           : portFallback ? portFallback.name
-          : (knownPredef || customMatch ? svc : null);
+          : (knownPredef || customMatch ? svc : null));
         serviceItems.push({
           label: svc,
           found,
           name:  resolvedName,
-          source: icmpMatch ? icmpMatch.source : fuzzyMatch ? fuzzyMatch.source : portFallback ? portFallback.source : (knownPredef ? 'predefined' : customMatch ? 'custom' : null),
-          suggestedName: resolvedName || svc,
+          source: reusedCompatibleName ? 'custom-compatible' : icmpMatch ? icmpMatch.source : fuzzyMatch ? fuzzyMatch.source : portFallback ? portFallback.source : (knownPredef ? 'predefined' : customMatch ? 'custom' : null),
+          suggestedName: resolvedName || (portNotation ? `FF_SVC_${portNotation[2]}_${portNotation[1].toUpperCase()}` : svc),
           isNamed: true,
+          port: portNotation ? parseInt(portNotation[2], 10) : undefined,
+          proto: portNotation ? portNotation[1].toUpperCase() : undefined,
           portHint,
+          compatibleMatch: compatibleMatch || undefined,
+          compatibleMatches: portResolution?.compatibleMatches || undefined,
+          compatibilityAccepted: reusedCompatibleName ? true : undefined,
         });
       }
     }
@@ -1221,18 +1326,22 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
     deduped.forEach(i => serviceItems.push(i));
 
     // Fallback sur les ports bruts si aucun service nommé reconnu (ou tous ISDB)
-    if (serviceItems.length === 0 && p.ports?.length) {
+    if (serviceItems.length === 0 && p.ports?.length && !p._mergedServices?.length) {
       for (const port of p.ports.slice(0, 10)) {
         const match = findService(port, protoLabel, customServices);
+        const reusedCompatibleName = acceptedCompatibleReuse(port, protoLabel, match.compatibleMatches);
         serviceItems.push({
           label: `${port}/${protoLabel}`,
           port,
           proto: protoLabel,
           portHint: `${protoLabel}: ${port}`,
-          found: match.found,
-          name:  match.found ? match.name : null,
-          source: match.source || null,
+          found: match.found || !!reusedCompatibleName,
+          name:  match.found ? match.name : reusedCompatibleName,
+          source: match.source || (reusedCompatibleName ? 'custom-compatible' : null),
           suggestedName: `FF_SVC_${port}_${protoLabel}`,
+          compatibleMatch: match.compatibleMatch || undefined,
+          compatibleMatches: match.compatibleMatches || undefined,
+          compatibilityAccepted: reusedCompatibleName ? true : undefined,
         });
       }
     }
@@ -1372,6 +1481,628 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
       },
     };
   });
+}
+
+function normalizedFlowProtocol(flow) {
+  const value = String(flow?.protoName || flow?.proto || '').toUpperCase();
+  if (value === '6' || value === 'TCP') return 'TCP';
+  if (value === '17' || value === 'UDP') return 'UDP';
+  return value;
+}
+
+function flowMatchesPolicySide(ip, subnet, policy, multiField, targetsField, hostsField, targetField, useHosts) {
+  const multi = policy[multiField];
+  if (Array.isArray(multi) && multi.length > 0) {
+    return multi.some(item => item?.useSubnet !== false
+      ? item?.subnet === subnet
+      : (item?.hosts || []).includes(ip));
+  }
+  const hosts = policy[hostsField];
+  if (useHosts) return Array.isArray(hosts) && hosts.includes(ip);
+  return policy[targetField] === subnet || policy[targetField] === ip;
+}
+
+function flowMatchesPolicyScope(flow, policy) {
+  const sourceMatches = flowMatchesPolicySide(
+    flow.srcip, flow.srcSubnet, policy,
+    '_multiSrcSubnets', 'srcSubnets', 'srcHosts', 'srcSubnet',
+    policy._use32Src === true,
+  );
+  const publicAll = policy.dstType === 'public' && (policy.dstTarget === 'all' || policy._dstUseAll === true);
+  const destinationMatches = publicAll
+    ? flow.dstType === 'public'
+    : flowMatchesPolicySide(
+      flow.dstip, flow.dstSubnet, policy,
+      '_multiDstSubnets', 'dstTargets', 'dstHosts', 'dstTarget',
+      policy._use32Dst === true,
+    );
+  return sourceMatches && destinationMatches;
+}
+
+function policySideElementsProven(policy, evidenceFlows, side) {
+  if (side === 'dst' && policy.dstType === 'public'
+      && (policy.dstTarget === 'all' || policy._dstUseAll === true)) return evidenceFlows.length > 0;
+  const multi = policy[side === 'src' ? '_multiSrcSubnets' : '_multiDstSubnets'];
+  const ipField = side === 'src' ? 'srcip' : 'dstip';
+  const subnetField = side === 'src' ? 'srcSubnet' : 'dstSubnet';
+  if (Array.isArray(multi) && multi.length > 0) {
+    return multi.every(item => item?.useSubnet !== false
+      ? evidenceFlows.some(flow => flow[subnetField] === item?.subnet)
+      : (item?.hosts || []).every(host => evidenceFlows.some(flow => flow[ipField] === host)));
+  }
+  const useHosts = side === 'src' ? policy._use32Src === true : policy._use32Dst === true;
+  if (useHosts) {
+    const hosts = policy[side === 'src' ? 'srcHosts' : 'dstHosts'];
+    return Array.isArray(hosts) && hosts.length > 0
+      && hosts.every(host => evidenceFlows.some(flow => flow[ipField] === host));
+  }
+  const target = policy[side === 'src' ? 'srcSubnet' : 'dstTarget'];
+  return evidenceFlows.some(flow => flow[subnetField] === target || flow[ipField] === target);
+}
+
+function policyRepresentationIssue(policy) {
+  for (const field of ['_use32Src', '_use32Dst', '_dstUseAll', '_isWan', '_useSrcGroup', '_useDstGroup', '_isMultiDst']) {
+    if (policy[field] !== undefined && typeof policy[field] !== 'boolean') return `${field} mal formé`;
+  }
+  for (const field of ['_multiSrcSubnets', '_multiDstSubnets']) {
+    if (policy[field] !== undefined && !Array.isArray(policy[field])) return `${field} mal formé`;
+    for (const item of (policy[field] || [])) {
+      if (!item || typeof item !== 'object' || typeof item.useSubnet !== 'boolean') return `${field}.useSubnet mal formé`;
+      if (item.addrFound !== undefined && typeof item.addrFound !== 'boolean') return `${field}.addrFound mal formé`;
+      if (item.hosts !== undefined && !Array.isArray(item.hosts)) return `${field}.hosts mal formé`;
+      if (item.addrName !== undefined && typeof item.addrName !== 'string') return `${field}.addrName mal formé`;
+    }
+  }
+  if (policy._isWan === true && policy.dstType !== 'public') return '_isWan incohérent avec le type destination';
+  if (!policy._multiSrcSubnets?.length && policy.srcSubnets?.length
+      && (policy.srcSubnets.length !== 1 || (policy.srcSubnets[0]?.subnet || policy.srcSubnets[0]) !== policy.srcSubnet)) {
+    return 'srcSubnet/srcSubnets incohérents';
+  }
+  if (!policy._multiDstSubnets?.length && policy.dstTargets?.length
+      && (policy.dstTargets.length !== 1 || (policy.dstTargets[0]?.subnet || policy.dstTargets[0]) !== policy.dstTarget)) {
+    return 'dstTarget/dstTargets incohérents';
+  }
+  if (policy._srcMode === 'hosts' && policy._use32Src !== true) return 'mode source hosts incohérent';
+  if (policy._srcMode === 'subnet' && policy._use32Src === true) return 'mode source subnet incohérent';
+  if (policy._dstMode === 'hosts' && policy._use32Dst !== true) return 'mode destination hosts incohérent';
+  if (policy._dstMode === 'subnet' && policy._use32Dst === true) return 'mode destination subnet incohérent';
+  if (policy.dstTarget === 'all' && policy._dstUseAll !== true) return 'destination all non confirmée';
+  if (policy.dstTarget !== 'all' && policy._dstUseAll === true) return 'destination spécifique marquée all';
+  return null;
+}
+
+function validatePolicyDecisionShapes(policies) {
+  const issues = [];
+  if (!Array.isArray(policies)) {
+    return { ok: false, issues: [{ level: 'error', code: 'SCOPE_DECISION_INVALID', msg: 'Policies mal formées' }] };
+  }
+  policies.forEach((policy, index) => {
+    const issue = policyRepresentationIssue(policy || {});
+    if (issue) issues.push({ level: 'error', code: 'SCOPE_DECISION_INVALID', msg: `Policy #${index + 1}: ${issue}` });
+  });
+  return { ok: issues.length === 0, issues };
+}
+
+function isPolicyEvidenceFlow(flow) {
+  return ['accept', 'deny', 'drop'].includes(String(flow?.action || '').toLowerCase());
+}
+
+function observedServiceTuples(policy, serviceLabel, observedFlows) {
+  const tuples = new Map();
+  for (const flow of (observedFlows || [])) {
+    if (!isPolicyEvidenceFlow(flow) || !flowMatchesPolicyScope(flow, policy)) continue;
+    if (String(flow.service || '').toUpperCase() !== String(serviceLabel || '').toUpperCase()) continue;
+    const port = Number(flow.dstport);
+    const proto = normalizedFlowProtocol(flow);
+    if (!Number.isInteger(port) || port < 1 || port > 65535 || !['TCP', 'UDP'].includes(proto)) continue;
+    tuples.set(`${proto}/${port}`, { proto, port });
+  }
+  return [...tuples.values()];
+}
+
+function serviceNameDecisionIssue(name, fortiConfig) {
+  const reserved = new Set(['ALL', 'ALL_TCP', 'ALL_UDP', 'ALL_ICMP', 'ALL_ICMP6']);
+  if (!name || name.length > 79 || reserved.has(name.toUpperCase())
+      || /["\\?*#\u0000-\u001f\u007f]/.test(name)) {
+    return { code: 'SERVICE_NAME_INVALID', msg: `nom de service invalide "${name}"` };
+  }
+  const existingName = Object.keys(fortiConfig?.customServices || {})
+    .find(candidate => candidate.toLowerCase() === name.toLowerCase());
+  const existingGroup = Object.keys(fortiConfig?.serviceGroups || {})
+    .find(candidate => candidate.toLowerCase() === name.toLowerCase());
+  const predefinedName = Object.values(PREDEFINED)
+    .some(service => service.name.toLowerCase() === name.toLowerCase());
+  if (existingName || existingGroup || predefinedName) {
+    return { code: 'SERVICE_NAME_CONFLICT', msg: `nom de service déjà utilisé "${name}"` };
+  }
+  return null;
+}
+
+function serviceTransportKey(service) {
+  const notation = String(service?.label || '').match(/^(TCP|UDP)\/(\d+)$/i);
+  const proto = String(notation ? notation[1] : service?.proto || '').toUpperCase();
+  const port = Number(notation ? notation[2] : service?.port);
+  return ['TCP', 'UDP'].includes(proto) && Number.isInteger(port) && port >= 1 && port <= 65535
+    ? `${proto}/${port}`
+    : '';
+}
+
+function serviceEvidenceProven(service, evidenceFlows) {
+  const label = String(service?.label || '').toUpperCase();
+  const forward = label.match(/^(TCP|UDP)\/(\d+)$/);
+  const reverse = label.match(/^(\d+)\/(TCP|UDP)$/);
+  const notation = forward
+    ? { proto: forward[1], port: Number(forward[2]) }
+    : reverse ? { proto: reverse[2], port: Number(reverse[1]) } : null;
+  if (!notation) {
+    return evidenceFlows.some(flow => String(flow.service || '').toUpperCase() === label);
+  }
+  const expectedProto = notation.proto;
+  const expectedPort = notation.port;
+  const acceptedLabels = new Set([`${expectedProto}/${expectedPort}`, `${expectedPort}/${expectedProto}`]);
+  return evidenceFlows.some(flow => {
+    const flowLabel = String(flow.service || '').toUpperCase();
+    return normalizedFlowProtocol(flow) === expectedProto
+      && Number(flow.dstport) === expectedPort
+      && (!flowLabel || acceptedLabels.has(flowLabel));
+  });
+}
+
+function foundServiceEvidenceProven(service, evidenceFlows, fortiConfig) {
+  const selectedKey = serviceTransportKey(service);
+  const relevant = evidenceFlows.filter(flow => service.compatibilityAccepted === true
+    ? `${normalizedFlowProtocol(flow)}/${Number(flow.dstport)}` === selectedKey
+    : String(flow.service || '').toUpperCase() === String(service.label || '').toUpperCase());
+  if (relevant.length === 0) return false;
+  const custom = fortiConfig?.customServices?.[service.name];
+  return relevant.every(flow => {
+    const proto = normalizedFlowProtocol(flow);
+    const port = Number(flow.dstport);
+    if (!['TCP', 'UDP'].includes(proto) || !Number.isInteger(port)) return false;
+    if (custom) {
+      const ports = proto === 'TCP' ? (custom.tcpPorts || []) : (custom.udpPorts || []);
+      const ranges = proto === 'TCP' ? (custom.tcpRanges || []) : (custom.udpRanges || []);
+      return ports.includes(port) || ranges.some(range => port >= range.start && port <= range.end);
+    }
+    return Object.entries(PREDEFINED).some(([definedPort, definition]) =>
+      definition.name === service.name
+      && Number(definedPort) === port
+      && (definition.proto === 'both' || definition.proto.toUpperCase() === proto)
+    );
+  });
+}
+
+function observedPolicyTransportKeys(policy, observedFlows) {
+  const keys = new Set();
+  for (const flow of (observedFlows || [])) {
+    if (!isPolicyEvidenceFlow(flow) || !flowMatchesPolicyScope(flow, policy)) continue;
+    const proto = normalizedFlowProtocol(flow);
+    const port = Number(flow.dstport);
+    if (['TCP', 'UDP'].includes(proto) && Number.isInteger(port) && port >= 1 && port <= 65535) {
+      keys.add(`${proto}/${port}`);
+    }
+  }
+  return keys;
+}
+
+function validateGenerationOptions(input, fortiConfig) {
+  const issues = [];
+  const validShape = input == null || (typeof input === 'object' && !Array.isArray(input));
+  if (!validShape) {
+    issues.push({ level: 'error', code: 'OPTIONS_DECISION_INVALID', msg: 'Options globales mal formées' });
+  }
+  const source = validShape && input ? input : {};
+  const action = String(source.action ?? 'accept').toLowerCase();
+  const log = String(source.log ?? 'all').toLowerCase();
+  if (!['accept', 'deny'].includes(action)) {
+    issues.push({ level: 'error', code: 'ACTION_DECISION_INVALID', msg: `Action globale invalide "${source.action}"` });
+  }
+  if (!['all', 'utm', 'disable'].includes(log)) {
+    issues.push({ level: 'error', code: 'LOG_DECISION_INVALID', msg: `Mode de log global invalide "${source.log}"` });
+  }
+  if (source.nat !== undefined && typeof source.nat !== 'boolean') {
+    issues.push({ level: 'error', code: 'NAT_DECISION_INVALID', msg: 'Décision NAT globale invalide' });
+  }
+  const securityProfiles = {};
+  if (source.securityProfiles !== undefined) {
+    if (!source.securityProfiles || typeof source.securityProfiles !== 'object' || Array.isArray(source.securityProfiles)) {
+      issues.push({ level: 'error', code: 'SECURITY_PROFILE_DECISION_INVALID', msg: 'Profils de sécurité globaux invalides' });
+    } else {
+      for (const [key, name] of Object.entries(source.securityProfiles)) {
+        if (!['antivirus', 'webfilter', 'ips', 'sslSsh', 'profileGroup'].includes(key)
+            || !(fortiConfig?.securityProfiles?.[key] || []).includes(name)) {
+          issues.push({ level: 'error', code: 'SECURITY_PROFILE_DECISION_INVALID', msg: `Profil global ${key} inconnu "${name}"` });
+        } else {
+          securityProfiles[key] = name;
+        }
+      }
+    }
+  }
+  const wanOverrides = [];
+  if (source.wanOverrides !== undefined && !Array.isArray(source.wanOverrides)) {
+    issues.push({ level: 'error', code: 'WAN_DECISION_INVALID', msg: 'Overrides WAN invalides' });
+  } else {
+    for (const name of (source.wanOverrides || [])) {
+      if (typeof name !== 'string' || !fortiConfig?.interfaces?.[name]) {
+        issues.push({ level: 'error', code: 'WAN_DECISION_INVALID', msg: `Override WAN inconnu "${name}"` });
+      } else if (!wanOverrides.includes(name)) {
+        wanOverrides.push(name);
+      }
+    }
+  }
+  const validWanNames = new Set([
+    ...Object.values(fortiConfig?.interfaces || {}).filter(iface => iface.isWan).map(iface => iface.name),
+    ...Object.values(fortiConfig?.zones || {}).filter(zone => zone.isWan).map(zone => zone.name),
+    ...(fortiConfig?.sdwanZoneNames || []),
+    fortiConfig?.sdwanIntfName,
+    ...wanOverrides,
+  ].filter(Boolean));
+  const preferredWanIntf = source.preferredWanIntf || null;
+  if (preferredWanIntf !== null
+      && (typeof preferredWanIntf !== 'string' || !validWanNames.has(preferredWanIntf))) {
+    issues.push({ level: 'error', code: 'WAN_DECISION_INVALID', msg: `Interface WAN préférée invalide "${preferredWanIntf}"` });
+  }
+  return {
+    ok: issues.length === 0,
+    issues,
+    opts: {
+      action: ['accept', 'deny'].includes(action) ? action : 'accept',
+      log: ['all', 'utm', 'disable'].includes(log) ? log : 'all',
+      nat: typeof source.nat === 'boolean' ? source.nat : false,
+      securityProfiles,
+      preferredWanIntf: validWanNames.has(preferredWanIntf) ? preferredWanIntf : null,
+      wanOverrides,
+    },
+  };
+}
+
+function applyPolicyUserDecisions(authoritativePolicies, submittedPolicies, fortiConfig, observedFlows) {
+  const policies = structuredClone(authoritativePolicies || []);
+  const issues = [];
+  const serviceDefinitions = new Map();
+  const addressNamesByTarget = new Map();
+  const addressTargetsByName = new Map();
+  const registerServiceDefinition = (name, signature, policyIndex) => {
+    const key = name.toLowerCase();
+    const previous = serviceDefinitions.get(key);
+    if (previous && previous !== signature) {
+      issues.push({ level: 'error', code: 'SERVICE_NAME_CONFLICT', msg: `Policy #${policyIndex + 1}: nom de service "${name}" utilisé pour plusieurs définitions` });
+      return false;
+    }
+    serviceDefinitions.set(key, signature);
+    return true;
+  };
+  const registerAddressDefinition = (name, target, policyIndex) => {
+    if (!name || !target || name.toLowerCase() === 'all'
+        || name.length > 79 || /["\\?*#\u0000-\u001f\u007f]/.test(name)) {
+      issues.push({ level: 'error', code: 'ADDRESS_NAME_INVALID', msg: `Policy #${policyIndex + 1}: nom d’adresse invalide "${name}"` });
+      return false;
+    }
+    const normalizedName = name.toLowerCase();
+    const previousName = addressNamesByTarget.get(target);
+    const previousTarget = addressTargetsByName.get(normalizedName);
+    if ((previousName && previousName !== name) || (previousTarget && previousTarget !== target)
+        || (fortiConfig?.addresses?.[name] && fortiConfig.addresses[name].cidr !== target)
+        || fortiConfig?.addressGroups?.[name]) {
+      issues.push({ level: 'error', code: 'ADDRESS_NAME_CONFLICT', msg: `Policy #${policyIndex + 1}: nom d’adresse "${name}" incompatible avec "${target}"` });
+      return false;
+    }
+    addressNamesByTarget.set(target, name);
+    addressTargetsByName.set(normalizedName, target);
+    return true;
+  };
+  for (let index = 0; index < policies.length; index++) {
+    const policy = policies[index];
+    const submitted = submittedPolicies?.[index] || {};
+    delete policy.serviceNames;
+    delete policy.action;
+    delete policy.log;
+    delete policy.securityProfiles;
+    delete policy.nat;
+    delete policy._srcAddrGrpFound;
+    delete policy._dstAddrGrpFound;
+    const representationIssue = policyRepresentationIssue(submitted);
+    if (representationIssue) {
+      issues.push({ level: 'error', code: 'SCOPE_DECISION_INVALID', msg: `Policy #${index + 1}: ${representationIssue}` });
+      continue;
+    }
+    if (!policy._multiSrcSubnets?.length && !policy._use32Src && policy.analysis?.srcAddr?.found) {
+      delete policy._srcAddrName;
+      delete policy.srcAddrName;
+    }
+    if (!policy._multiDstSubnets?.length && !policy._use32Dst && policy.analysis?.dstAddr?.found) {
+      delete policy._dstAddrName;
+      delete policy.dstAddrName;
+    }
+    for (const [side, multiField, hostFlag] of [
+      ['src', '_multiSrcSubnets', '_use32Src'],
+      ['dst', '_multiDstSubnets', '_use32Dst'],
+    ]) {
+      const address = policy.analysis?.[`${side}Addr`];
+      if (policy[multiField]?.length || policy[hostFlag] || address?.found || !address?.cidr) continue;
+      const field = `${side}AddrName`;
+      const privateField = `_${side}AddrName`;
+      const requestedName = String(submitted[privateField] || submitted[field] || address.suggestedName || '').trim();
+      if (registerAddressDefinition(requestedName, address.cidr, index)) {
+        policy[field] = requestedName;
+        delete policy[privateField];
+      }
+    }
+    for (const [side, multiField, hostFlag, groupFlag] of [
+      ['src', '_multiSrcSubnets', '_use32Src', '_useSrcGroup'],
+      ['dst', '_multiDstSubnets', '_use32Dst', '_useDstGroup'],
+    ]) {
+      const groupName = submitted[`${side}AddrName`] || submitted[`_${side}AddrName`];
+      if (submitted[groupFlag] === true && groupName && fortiConfig?.addressGroups?.[groupName]) {
+        issues.push({ level: 'error', code: 'ADDRESS_NAME_CONFLICT', msg: `Policy #${index + 1}: groupe existant non prouvé "${groupName}"` });
+      }
+      const multi = policy[multiField] || [];
+      for (const item of multi) {
+        if (item.useSubnet === false) continue;
+        const exact = Object.entries(fortiConfig?.addresses || {})
+          .find(([, address]) => address.cidr === item.subnet);
+        if (exact) {
+          item.addrFound = true;
+          item.addrName = exact[0];
+        } else {
+          item.addrFound = false;
+          const name = String(item.addrName || suggestAddrName(item.subnet)).trim();
+          if (registerAddressDefinition(name, item.subnet, index)) item.addrName = name;
+        }
+      }
+      const hosts = policy[hostFlag]
+        ? (policy[side === 'src' ? 'srcHosts' : 'dstHosts'] || [])
+        : multi.filter(item => item.useSubnet === false).flatMap(item => item.hosts || []);
+      if (hosts.length > 0) {
+        const sourceNames = submitted[`_${side}HostNames`] || {};
+        const validatedNames = {};
+        for (const host of hosts) {
+          const exact = Object.entries(fortiConfig?.addresses || {})
+            .find(([, address]) => address.cidr === `${host}/32`);
+          if (exact) {
+            validatedNames[host] = exact[0];
+            continue;
+          }
+          const name = String(sourceNames[host] || `FF_HOST_${host.replace(/\./g, '_')}`).trim();
+          if (registerAddressDefinition(name, `${host}/32`, index)) validatedNames[host] = name;
+        }
+        policy[`_${side}HostNames`] = validatedNames;
+      }
+    }
+    if (policy.dstType === 'public' && policy.dstTarget !== 'all' && policy._dstUseAll === undefined) {
+      policy._dstUseAll = false;
+    }
+    policy._isWan = policy.dstType === 'public';
+    const evidenceFlows = (observedFlows || []).filter(flow =>
+      isPolicyEvidenceFlow(flow) && flowMatchesPolicyScope(flow, policy)
+    );
+    if (evidenceFlows.length === 0
+        || !policySideElementsProven(policy, evidenceFlows, 'src')
+        || !policySideElementsProven(policy, evidenceFlows, 'dst')) {
+      issues.push({ level: 'error', code: 'SCOPE_DECISION_INVALID', msg: `Policy #${index + 1}: scope absent des flux observés` });
+    }
+    const validInterfaces = new Set([
+      ...Object.keys(fortiConfig?.interfaces || {}),
+      ...Object.keys(fortiConfig?.zones || {}),
+      ...(fortiConfig?.sdwanZoneNames || []),
+      fortiConfig?.sdwanIntfName,
+    ].filter(Boolean));
+    const allowedInterfaces = {
+      srcintf: new Set(evidenceFlows.map(flow => flow.srcintf).filter(Boolean)),
+      dstintf: new Set(evidenceFlows.map(flow => flow.dstintf).filter(Boolean)),
+    };
+    for (const [field, zoneField, ifaceField] of [
+      ['srcintf', 'srcZone', 'srcIface'],
+      ['dstintf', 'dstZone', 'dstIface'],
+    ]) {
+      for (const [zoneName, zone] of Object.entries(fortiConfig?.zones || {})) {
+        if ((zone.members || []).some(member => allowedInterfaces[field].has(member))) {
+          allowedInterfaces[field].add(zone.name || zoneName);
+        }
+      }
+      if (field === 'dstintf'
+          && (fortiConfig?.sdwanMembers || []).some(member => allowedInterfaces[field].has(member))) {
+        for (const zoneName of (fortiConfig.sdwanZoneNames || [])) allowedInterfaces[field].add(zoneName);
+        if (fortiConfig.sdwanIntfName) allowedInterfaces[field].add(fortiConfig.sdwanIntfName);
+      }
+      if (allowedInterfaces[field].size === 0) {
+        if (policy.analysis?.[zoneField]) allowedInterfaces[field].add(policy.analysis[zoneField]);
+        if (policy.analysis?.[ifaceField]) allowedInterfaces[field].add(policy.analysis[ifaceField]);
+      }
+    }
+    for (const [field, label] of [['srcintf', 'source'], ['dstintf', 'destination']]) {
+      if (submitted[field] === undefined) continue;
+      const values = (Array.isArray(submitted[field]) ? submitted[field] : [submitted[field]])
+        .map(value => String(value || '').trim()).filter(Boolean);
+      if (values.length === 0 || values.some(value =>
+        !validInterfaces.has(value) || !allowedInterfaces[field].has(value)
+      )) {
+        issues.push({ level: 'error', code: 'INTERFACE_DECISION_INVALID', msg: `Policy #${index + 1}: interface ${label} inconnue "${values.join(', ')}"` });
+      } else {
+        policy[field] = Array.isArray(submitted[field]) ? values : values[0];
+      }
+    }
+    const interfaceMatches = (choice, actual, side) => {
+      if (choice === actual) return true;
+      if ((fortiConfig?.zones?.[choice]?.members || []).includes(actual)) return true;
+      return side === 'dst'
+        && (fortiConfig?.sdwanZoneNames || []).includes(choice)
+        && (fortiConfig?.sdwanMembers || []).includes(actual);
+    };
+    const chosenSrcInterfaces = [].concat(policy.srcintf || policy.analysis?.srcZone || policy.analysis?.srcIface || []).filter(Boolean);
+    const chosenDstInterfaces = [].concat(policy.dstintf || policy.analysis?.dstZone || policy.analysis?.dstIface || []).filter(Boolean);
+    const pairProven = chosenSrcInterfaces.every(srcChoice =>
+      chosenDstInterfaces.every(dstChoice => evidenceFlows.some(flow =>
+        interfaceMatches(srcChoice, flow.srcintf, 'src')
+        && interfaceMatches(dstChoice, flow.dstintf, 'dst')
+      ))
+    );
+    if (!pairProven) {
+      issues.push({ level: 'error', code: 'INTERFACE_DECISION_INVALID', msg: `Policy #${index + 1}: paire d’interfaces absente des flux observés` });
+    }
+    for (const [field, zoneField, ifaceField, label] of [
+      ['srcintf', 'srcZone', 'srcIface', 'source'],
+      ['dstintf', 'dstZone', 'dstIface', 'destination'],
+    ]) {
+      const effective = policy[field] || policy.analysis?.[zoneField] || policy.analysis?.[ifaceField];
+      const values = (Array.isArray(effective) ? effective : [effective]).filter(Boolean).map(String);
+      if (values.length === 0 || values.some(value =>
+        !validInterfaces.has(value) || !allowedInterfaces[field].has(value)
+      )) {
+        issues.push({ level: 'error', code: 'INTERFACE_DECISION_INVALID', msg: `Policy #${index + 1}: interface ${label} effective inconnue "${values.join(', ')}"` });
+      }
+    }
+    if (submitted.action != null) {
+      const action = String(submitted.action).toLowerCase();
+      if (!['accept', 'deny'].includes(action)) {
+        issues.push({ level: 'error', code: 'ACTION_DECISION_INVALID', msg: `Policy #${index + 1}: action invalide "${submitted.action}"` });
+      } else {
+        policy.action = action;
+      }
+    }
+    if (submitted.log != null) {
+      const log = String(submitted.log).toLowerCase();
+      if (!['all', 'utm', 'disable'].includes(log)) {
+        issues.push({ level: 'error', code: 'LOG_DECISION_INVALID', msg: `Policy #${index + 1}: mode de log invalide "${submitted.log}"` });
+      } else {
+        policy.log = log;
+      }
+    }
+    if (submitted.nat != null) {
+      if (typeof submitted.nat !== 'boolean') {
+        issues.push({ level: 'error', code: 'NAT_DECISION_INVALID', msg: `Policy #${index + 1}: décision NAT invalide` });
+      } else {
+        policy.nat = submitted.nat;
+      }
+    }
+    if (submitted.securityProfiles != null) {
+      const selectedProfiles = {};
+      if (typeof submitted.securityProfiles !== 'object' || Array.isArray(submitted.securityProfiles)) {
+        issues.push({ level: 'error', code: 'SECURITY_PROFILE_DECISION_INVALID', msg: `Policy #${index + 1}: profils de sécurité mal formés` });
+      } else {
+        for (const [key, name] of Object.entries(submitted.securityProfiles)) {
+          if (!['antivirus', 'webfilter', 'ips', 'sslSsh', 'profileGroup'].includes(key)
+              || !(fortiConfig?.securityProfiles?.[key] || []).includes(name)) {
+            issues.push({ level: 'error', code: 'SECURITY_PROFILE_DECISION_INVALID', msg: `Policy #${index + 1}: profil ${key} inconnu "${name}"` });
+          } else {
+            selectedProfiles[key] = name;
+          }
+        }
+      }
+      policy.securityProfiles = selectedProfiles;
+    }
+    if (submitted._serviceReuse !== undefined) {
+      const reuseEntries = submitted._serviceReuse && typeof submitted._serviceReuse === 'object'
+        && !Array.isArray(submitted._serviceReuse)
+        ? Object.entries(submitted._serviceReuse)
+        : [];
+      if (reuseEntries.length === 0 && Object.keys(submitted._serviceReuse || {}).length > 0) {
+        issues.push({ level: 'error', code: 'SERVICE_REUSE_DECISION_INVALID', msg: `Policy #${index + 1}: choix de réutilisation invalide` });
+      }
+      for (const [rawKey, requestedName] of reuseEntries) {
+        const key = String(rawKey).toUpperCase();
+        const accepted = (policy.analysis?.services || []).find(service =>
+          serviceTransportKey(service) === key
+          && service.found === true
+          && service.compatibilityAccepted === true
+          && service.name === requestedName
+        );
+        if (!accepted) {
+          issues.push({ level: 'error', code: 'SERVICE_REUSE_DECISION_INVALID', msg: `Policy #${index + 1}: réutilisation stale ou forgée "${rawKey}" → "${requestedName}"` });
+        }
+      }
+    }
+    const submittedServices = submitted.analysis?.services || [];
+    const mergedServices = Array.isArray(submitted._mergedServices) ? submitted._mergedServices : [];
+    for (const service of (policy.analysis?.services || [])) {
+      if (!serviceEvidenceProven(service, evidenceFlows)) {
+        issues.push({ level: 'error', code: 'SERVICE_DECISION_UNPROVEN', msg: `Policy #${index + 1}: service "${service.label || service.name || '?'}" absent des flux observés` });
+        continue;
+      }
+      if (service.found) {
+        if (service.compatibilityAccepted !== true
+            && !foundServiceEvidenceProven(service, evidenceFlows, fortiConfig)) {
+          issues.push({ level: 'error', code: 'SERVICE_DECISION_UNPROVEN', msg: `Policy #${index + 1}: service "${service.name}" incompatible avec le tuple observé` });
+        }
+        continue;
+      }
+      const requested = submittedServices.find(item => item.label === service.label);
+      const suggestedName = typeof requested?.suggestedName === 'string' && requested.suggestedName.trim()
+        ? requested.suggestedName.trim()
+        : String(service.suggestedName || '').trim();
+      if (!service.port || !service.proto) {
+        const tuples = observedServiceTuples(policy, service.label, observedFlows);
+        if (tuples.length !== 1) {
+          issues.push({ level: 'error', code: 'SERVICE_DECISION_AMBIGUOUS', msg: `Policy #${index + 1}: service "${service.label}" sans tuple protocole/port unique` });
+          continue;
+        }
+        service.port = tuples[0].port;
+        service.proto = tuples[0].proto;
+      }
+      const nameIssue = serviceNameDecisionIssue(suggestedName, fortiConfig);
+      if (nameIssue) {
+        issues.push({ level: 'error', code: nameIssue.code, msg: `Policy #${index + 1}: ${nameIssue.msg}` });
+        continue;
+      }
+      if (!registerServiceDefinition(suggestedName, `${service.proto}/${service.port}`, index)) continue;
+      service.suggestedName = suggestedName;
+    }
+    if (mergedServices.length > 0) {
+      const authoritativeKeys = new Set((policy.analysis?.services || []).map(serviceTransportKey).filter(Boolean));
+      const observedKeys = observedPolicyTransportKeys(policy, observedFlows);
+      const consumedKeys = new Set();
+      const validatedMerged = [];
+      const mergedNames = new Set();
+      for (const merged of mergedServices) {
+        const proto = String(merged?.proto || '').toUpperCase();
+        const sourcePorts = [...new Set((merged?.sourcePorts || []).map(Number))].sort((a, b) => a - b);
+        const name = typeof merged?.name === 'string' ? merged.name.trim() : '';
+        const nameIssue = serviceNameDecisionIssue(name, fortiConfig);
+        const sourceKeys = sourcePorts.map(port => `${proto}/${port}`);
+        let invalid = !['TCP', 'UDP'].includes(proto)
+          || sourcePorts.length < 2
+          || (Array.isArray(merged?.ports) && typeof merged?.portRange === 'string')
+          || sourcePorts.some(port => !Number.isInteger(port) || port < 1 || port > 65535)
+          || sourceKeys.some(key => !authoritativeKeys.has(key) || !observedKeys.has(key) || consumedKeys.has(key));
+        let ports = null;
+        let portRange = null;
+        if (Array.isArray(merged?.ports)) {
+          const requestedPorts = [...new Set(merged.ports.map(Number))].sort((a, b) => a - b);
+          invalid ||= requestedPorts.length !== sourcePorts.length
+            || requestedPorts.some((port, offset) => port !== sourcePorts[offset]);
+          ports = sourcePorts;
+        } else if (typeof merged?.portRange === 'string') {
+          const range = merged.portRange.match(/^(\d+)-(\d+)$/);
+          const start = range ? Number(range[1]) : NaN;
+          const end = range ? Number(range[2]) : NaN;
+          invalid ||= !range || start !== sourcePorts[0] || end !== sourcePorts[sourcePorts.length - 1];
+          invalid ||= sourcePorts.some((port, offset) => offset > 0 && port !== sourcePorts[offset - 1] + 1);
+          if (range) portRange = `${start}-${end}`;
+        } else {
+          invalid = true;
+        }
+        if (nameIssue || mergedNames.has(name.toLowerCase())) invalid = true;
+        const definition = portRange ? `${proto}/${portRange}` : `${proto}/${sourcePorts.join(',')}`;
+        if (!invalid && !registerServiceDefinition(name, definition, index)) invalid = true;
+        if (invalid) {
+          issues.push({ level: 'error', code: nameIssue?.code || 'MERGED_SERVICE_DECISION_INVALID', msg: `Policy #${index + 1}: fusion de service invalide "${name}"` });
+          continue;
+        }
+        sourceKeys.forEach(key => consumedKeys.add(key));
+        mergedNames.add(name.toLowerCase());
+        validatedMerged.push({ label: name, found: false, name: null, source: null, suggestedName: name, isNamed: false, proto, ports, portRange, sourcePorts, _isMerged: true });
+      }
+      if (validatedMerged.length > 0) {
+        policy.analysis.services = (policy.analysis.services || [])
+          .filter(service => !consumedKeys.has(serviceTransportKey(service)))
+          .concat(validatedMerged);
+      }
+    }
+    if ((policy.analysis?.services || []).length === 0) {
+      issues.push({ level: 'error', code: 'SERVICE_DECISION_EMPTY', msg: `Policy #${index + 1}: aucun service validé` });
+    }
+  }
+  return { ok: issues.length === 0, policies, issues };
 }
 
 // ─── CLI config generator ─────────────────────────────────────────────────────
@@ -1633,13 +2364,15 @@ function generateConfig(selectedPolicies, opts = {}) {
         } else if (svc.portRange) {
           newServices.set(customName, { name: customName, portRange: svc.portRange, proto: svc.proto });
         } else if (resolvedPort) {
-          newServices.set(`${resolvedPort}/${resolvedProto}`, {
+          newServices.set(customName, {
             name: customName, port: resolvedPort, proto: resolvedProto,
           });
         }
       }
     }
-    if (serviceNames.length === 0) serviceNames.push('ALL');
+    if (serviceNames.length === 0) {
+      throw new Error(`Policy "${p.policyName || p.name || p.id || '?'}" sans service validé`);
+    }
 
     // Check if services match an existing service group
     const svcGrpMatch = opts.serviceGroups ? findServiceGroup(serviceNames, opts.serviceGroups) : null;
@@ -1670,6 +2403,9 @@ function generateConfig(selectedPolicies, opts = {}) {
       serviceDesc: p.serviceDesc, sessions: p.sessions,
       tags: p.tags || [],
       disabled:    p._disabled || false,
+      action:      p.action,
+      log:         p.log,
+      securityProfiles: p.securityProfiles,
     });
   }
 
@@ -1824,8 +2560,8 @@ function preflightValidation(selectedPolicies, config) {
     const label = `Policy #${i + 1}`;
 
     // Missing interfaces
-    const srcIntf = p._srcintf || a.srcIface;
-    const dstIntf = p._dstintf || a.dstIface;
+    const srcIntf = p.srcintf || p._srcintf || a.srcZone || a.srcIface;
+    const dstIntf = p.dstintf || p._dstintf || a.dstZone || a.dstIface;
     if (!srcIntf) issues.push({ level: 'error', msg: `${label}: interface source manquante` });
     if (!dstIntf) issues.push({ level: 'error', msg: `${label}: interface destination manquante` });
     if (srcIntf && dstIntf && srcIntf === dstIntf) {
@@ -1908,6 +2644,9 @@ module.exports = {
   findAddressGroup,
   findService,
   findServiceGroup,
+  applyPolicyUserDecisions,
+  validateGenerationOptions,
+  validatePolicyDecisionShapes,
   PREDEFINED,
   parseFullRoutingTable,
   parseOspfRoutingTable,
