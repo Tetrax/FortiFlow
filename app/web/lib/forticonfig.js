@@ -1268,8 +1268,9 @@ function suggestAddrName(cidr) {
   return 'FF_' + (cidr || '').replace(/\//g, '_').replace(/\./g, '_');
 }
 
-// Préserve l'affinité destination/service d'une policy multi-destination à
-// partir des policies d'origine conservées dans _mergedFrom.
+// Recompose des rectangles sûrs source × destination × service à partir des
+// policies d'origine. Chaque rectangle correspond uniquement à des tuples
+// réellement présents dans _mergedFrom.
 function preserveDestinationServiceAffinity(policies) {
   const serviceKey = (svc) => {
     if (typeof svc === 'string') return `label:${svc}`;
@@ -1285,92 +1286,209 @@ function preserveDestinationServiceAffinity(policies) {
   const serviceLabel = (svc) => typeof svc === 'string' ? svc : (svc?.label || svc?.name || '');
 
   return (policies || []).flatMap((policy) => {
-    const origins = (policy._mergedFrom || []).filter(origin =>
-      origin?.dstTarget && Array.isArray(origin.analysis?.services)
-    );
-    const destinations = [...new Set(origins.map(origin => origin.dstTarget))];
-    if (destinations.length < 2) return [policy];
+    if (!policy || typeof policy !== 'object' || Array.isArray(policy)) return [policy];
+    if ((policy.dstTarget === 'all' || policy._dstUseAll === true)
+        && policy.dstType !== 'public' && policy._isWan !== true) return [policy];
+    if (policy.analysis !== undefined && (!policy.analysis || typeof policy.analysis !== 'object'
+        || Array.isArray(policy.analysis) || !Array.isArray(policy.analysis.services)
+        || policy.analysis.services.length > 1000
+        || policy.analysis.services.some(serviceDecisionMetadataInvalid))) return [policy];
+    const malformedBasicScope = ['srcSubnet', 'dstTarget'].some(field =>
+      policy[field] !== undefined && (typeof policy[field] !== 'string' || !policy[field]))
+      || ['srcHosts', 'dstHosts'].some(field => policy[field] !== undefined
+        && (!Array.isArray(policy[field])
+          || policy[field].some(host => typeof host !== 'string' || !host)));
+    if (malformedBasicScope) return [policy];
+    const malformedListScope = ['srcSubnets', 'dstTargets'].some(field =>
+      policy[field] !== undefined && (!Array.isArray(policy[field]) || policy[field].some(item => {
+        const subnet = typeof item === 'string' ? item : item?.subnet;
+        return typeof subnet !== 'string' || !subnet;
+      })));
+    if (malformedListScope) return [policy];
+    if (['srcSubnets', 'dstTargets'].some(field => Array.isArray(policy[field])
+        && (policy[field].length === 0 || policy[field].length > 1000
+          || new Set(policy[field].map(item => typeof item === 'string' ? item : item?.subnet)).size !== policy[field].length))) return [policy];
+    if (['srcHosts', 'dstHosts'].some(field => policy[field]?.length > 1000)) return [policy];
+    const malformedMultiScope = ['_multiSrcSubnets', '_multiDstSubnets'].some(field =>
+      policy[field] !== undefined && (!Array.isArray(policy[field])
+        || policy[field].some(item => !item || typeof item !== 'object'
+          || typeof item.subnet !== 'string' || !item.subnet
+          || (item.hosts !== undefined && (!Array.isArray(item.hosts)
+            || item.hosts.some(host => typeof host !== 'string' || !host))))));
+    if (malformedMultiScope) return [policy];
+    if (['_multiSrcSubnets', '_multiDstSubnets'].some(field => Array.isArray(policy[field])
+        && (policy[field].length === 0 || policy[field].length > 1000
+          || new Set(policy[field].map(item => item.subnet)).size !== policy[field].length))) return [policy];
+    if (['ports', 'services', 'protos'].some(field => policy[field]?.length > 1000)) return [policy];
+    if (policy.srcAddrNames != null) {
+      if (!Array.isArray(policy.srcAddrNames) || policy.srcAddrNames.length === 0 || policy.srcAddrNames.length > 1000
+          || policy.srcAddrNames.some(name => typeof name !== 'string' || !name)) return [policy];
+      const sourceSubnets = Array.isArray(policy._multiSrcSubnets)
+        ? policy._multiSrcSubnets.map(item => item.subnet)
+        : Array.isArray(policy.srcSubnets)
+          ? policy.srcSubnets.map(item => typeof item === 'string' ? item : item?.subnet)
+          : [policy.srcSubnet];
+      if (policy.srcAddrNames.length !== new Set(sourceSubnets.filter(Boolean)).size) return [policy];
+    }
+    const affinityProduct = policyAffinityScopeCount(policy, 'src')
+      * policyAffinityScopeCount(policy, 'dst')
+      * (new Set((policy.analysis?.services || []).flatMap(serviceTransportKeys)).size || 1);
+    if (affinityProduct > 100000) return [policy];
+    const submittedOrigins = policy._mergedFrom;
+    if (submittedOrigins === undefined) return [policy];
+    if (!Array.isArray(submittedOrigins) || submittedOrigins.length === 0
+        || submittedOrigins.length > 1000
+        || submittedOrigins.some(origin => typeof origin?.srcSubnet !== 'string' || !origin.srcSubnet
+          || typeof origin?.dstTarget !== 'string' || !origin.dstTarget
+          || (origin.action !== undefined && !['accept', 'deny', 'drop'].includes(origin.action))
+          || !Array.isArray(origin.analysis?.services) || origin.analysis.services.length === 0
+          || origin.analysis.services.length > 1000
+          || origin.analysis.services.some(serviceDecisionMetadataInvalid))) {
+      return [policy];
+    }
+    const originActions = new Set(submittedOrigins.map(origin => origin.action).filter(Boolean));
+    if (originActions.size > 1) return [policy];
+    if (policy.dstType === 'public' && (policy.dstTarget === 'all' || policy._dstUseAll === true)) {
+      return [policy];
+    }
+    const origins = submittedOrigins;
+    if (origins.length < 2) return [policy];
 
-    const servicesByDestination = new Map();
-    for (const destination of destinations) {
-      const map = new Map();
-      for (const origin of origins.filter(item => item.dstTarget === destination)) {
-        for (const svc of origin.analysis.services) map.set(serviceKey(svc), svc);
+    const services = new Map();
+    const sourcesByServiceDestination = new Map();
+    for (const origin of origins) {
+      for (const svc of origin.analysis.services) {
+        const key = serviceKey(svc);
+        services.set(key, svc);
+        if (!sourcesByServiceDestination.has(key)) sourcesByServiceDestination.set(key, new Map());
+        const byDestination = sourcesByServiceDestination.get(key);
+        if (!byDestination.has(origin.dstTarget)) byDestination.set(origin.dstTarget, new Set());
+        byDestination.get(origin.dstTarget).add(origin.srcSubnet);
       }
-      servicesByDestination.set(destination, map);
+    }
+    const originsByPair = new Map();
+    for (const origin of origins) {
+      const key = `${origin.srcSubnet}\u0001${origin.dstTarget}`;
+      if (!originsByPair.has(key)) originsByPair.set(key, []);
+      originsByPair.get(key).push(origin);
     }
 
-    const [firstDestination, ...remainingDestinations] = destinations;
-    const commonKeys = new Set(servicesByDestination.get(firstDestination).keys());
-    for (const destination of remainingDestinations) {
-      const keys = servicesByDestination.get(destination);
-      for (const key of [...commonKeys]) if (!keys.has(key)) commonKeys.delete(key);
-    }
-
-    const destinationMeta = new Map(
-      (policy._multiDstSubnets || []).map(item => [item.subnet, item])
-    );
-
-    const buildPolicy = (targetDestinations, serviceMap) => {
-      const multiDestination = targetDestinations.length > 1;
-      const metadata = targetDestinations.map(destination =>
-        destinationMeta.get(destination) || {
-          subnet: destination,
-          hosts: [],
-          useSubnet: true,
-          addrName: '',
-          addrFound: false,
+    const rectangles = new Map();
+    for (const [key, byDestination] of [...sourcesByServiceDestination].sort(([a], [b]) => a.localeCompare(b))) {
+      const destinationsBySources = new Map();
+      for (const [destination, sourceSet] of [...byDestination].sort(([a], [b]) => a.localeCompare(b))) {
+        const sources = [...sourceSet].sort();
+        const signature = sources.join('\u0001');
+        if (!destinationsBySources.has(signature)) destinationsBySources.set(signature, { sources, destinations: [] });
+        destinationsBySources.get(signature).destinations.push(destination);
+      }
+      for (const group of destinationsBySources.values()) {
+        group.destinations.sort();
+        const rectangleKey = `${group.sources.join('\u0001')}\u0002${group.destinations.join('\u0001')}`;
+        if (!rectangles.has(rectangleKey)) {
+          rectangles.set(rectangleKey, { sources: group.sources, destinations: group.destinations, services: new Map() });
         }
-      );
-      const services = [...serviceMap.values()];
-      const selectedKeys = new Set(serviceMap.keys());
+        rectangles.get(rectangleKey).services.set(key, services.get(key));
+      }
+    }
+
+    const sourceMeta = new Map((policy._multiSrcSubnets || []).map(item => [item.subnet, item]));
+    const destinationMeta = new Map((policy._multiDstSubnets || []).map(item => [item.subnet, item]));
+    if (policy.srcSubnet && !sourceMeta.has(policy.srcSubnet)) {
+      sourceMeta.set(policy.srcSubnet, {
+        subnet: policy.srcSubnet,
+        hosts: policy.srcHosts || [],
+        useSubnet: policy._use32Src !== true,
+        addrName: policy._srcAddrName || policy.analysis?.srcAddr?.name || '',
+        addrFound: !!policy.analysis?.srcAddr?.found,
+      });
+    }
+    if (policy.dstTarget && !destinationMeta.has(policy.dstTarget)) {
+      destinationMeta.set(policy.dstTarget, {
+        subnet: policy.dstTarget,
+        hosts: policy.dstHosts || [],
+        useSubnet: policy._use32Dst !== true,
+        addrName: policy._dstAddrName || policy.analysis?.dstAddr?.name || '',
+        addrFound: !!policy.analysis?.dstAddr?.found,
+      });
+    }
+    const metadata = (items, index) => items.map(subnet => index.get(subnet) || {
+      subnet, hosts: [], useSubnet: true, addrName: '', addrFound: false,
+    });
+
+    const result = [...rectangles.values()].map(rectangle => {
+      const sourceMetadata = metadata(rectangle.sources, sourceMeta);
+      const destinationMetadata = metadata(rectangle.destinations, destinationMeta);
+      const selectedKeys = new Set(rectangle.services.keys());
+      const selectedServices = [...rectangle.services]
+        .sort(([a], [b]) => a.localeCompare(b)).map(([, svc]) => svc);
+      const transportKeys = [...new Set(selectedServices.flatMap(serviceTransportKeys))].sort();
+      const ports = transportKeys
+        .filter(key => /^(TCP|UDP)\/\d+$/.test(key))
+        .map(key => Number(key.split('/')[1]));
+      const protos = [...new Set(transportKeys.map(key => key.split('/')[0]))].sort();
+      const selectedOrigins = rectangle.sources.flatMap(source =>
+        rectangle.destinations.flatMap(destination =>
+          originsByPair.get(`${source}\u0001${destination}`) || []))
+        .map(origin => ({
+          ...origin,
+          analysis: {
+            ...origin.analysis,
+            services: origin.analysis.services.filter(svc => selectedKeys.has(serviceKey(svc))),
+          },
+        }))
+        .filter(origin => origin.analysis.services.length > 0)
+        .sort((a, b) => a.srcSubnet.localeCompare(b.srcSubnet)
+          || a.dstTarget.localeCompare(b.dstTarget)
+          || a.analysis.services.map(serviceKey).sort().join('\u0001')
+            .localeCompare(b.analysis.services.map(serviceKey).sort().join('\u0001')));
       return {
         ...policy,
-        dstTarget: targetDestinations[0],
-        dstTargets: targetDestinations,
-        _isMultiDst: multiDestination,
-        _multiDstSubnets: multiDestination ? metadata : null,
+        srcSubnet: rectangle.sources[0],
+        srcSubnets: rectangle.sources,
+        _multiSrcSubnets: rectangle.sources.length > 1 ? sourceMetadata : undefined,
+        dstTarget: rectangle.destinations[0],
+        dstTargets: rectangle.destinations,
+        _isMultiDst: rectangle.destinations.length > 1,
+        _multiDstSubnets: rectangle.destinations.length > 1 ? destinationMetadata : undefined,
         _dstUseAll: false,
-        dstHosts: [...new Set(metadata.flatMap(item => item.hosts || []))].sort(),
-        services: services.map(serviceLabel).filter(Boolean),
-        serviceDesc: services.map(serviceLabel).filter(Boolean).join(', '),
-        _mergedCount: targetDestinations.length,
-        _mergedFrom: origins
-          .filter(origin => targetDestinations.includes(origin.dstTarget))
-          .map(origin => ({
-            ...origin,
-            analysis: {
-              ...origin.analysis,
-              services: origin.analysis.services.filter(svc => selectedKeys.has(serviceKey(svc))),
-            },
-          })),
+        srcHosts: [...new Set(sourceMetadata.flatMap(item => item.hosts || []))].sort(),
+        dstHosts: [...new Set(destinationMetadata.flatMap(item => item.hosts || []))].sort(),
+        _use32Src: rectangle.sources.length === 1 && sourceMetadata[0].useSubnet === false,
+        _use32Dst: rectangle.destinations.length === 1 && destinationMetadata[0].useSubnet === false,
+        services: selectedServices.map(serviceLabel).filter(Boolean),
+        ports,
+        protos,
+        serviceDesc: selectedServices.map(serviceLabel).filter(Boolean).join(', '),
+        _mergedCount: selectedOrigins.length,
+        _mergedFrom: selectedOrigins,
+        _srcAddrName: rectangle.sources.length === 1 && sourceMetadata[0].addrFound ? sourceMetadata[0].addrName : '',
+        _srcAddrGrpFound: false,
+        _useSrcGroup: false,
+        _dstAddrName: rectangle.destinations.length === 1 && destinationMetadata[0].addrFound ? destinationMetadata[0].addrName : '',
+        _dstAddrGrpFound: false,
+        _useDstGroup: false,
         analysis: {
           ...policy.analysis,
-          services,
-          needsWork: services.some(svc => !svc?.found),
+          srcAddr: rectangle.sources.length === 1 ? {
+            ...(policy.analysis?.srcAddr || {}),
+            found: !!sourceMetadata[0].addrFound,
+            name: sourceMetadata[0].addrName || null,
+            cidr: rectangle.sources[0],
+            suggestedName: sourceMetadata[0].addrName || suggestAddrName(rectangle.sources[0]),
+          } : policy.analysis?.srcAddr,
+          dstAddr: rectangle.destinations.length === 1 ? {
+            ...(policy.analysis?.dstAddr || {}),
+            found: !!destinationMetadata[0].addrFound,
+            name: destinationMetadata[0].addrName || null,
+            cidr: rectangle.destinations[0],
+            suggestedName: destinationMetadata[0].addrName || suggestAddrName(rectangle.destinations[0]),
+          } : policy.analysis?.dstAddr,
+          services: selectedServices,
+          needsWork: selectedServices.some(svc => !svc?.found),
         },
       };
-    };
-
-    const result = [];
-    if (commonKeys.size > 0) {
-      const commonServices = new Map();
-      for (const key of commonKeys) commonServices.set(key, servicesByDestination.get(firstDestination).get(key));
-      result.push(buildPolicy(destinations, commonServices));
-    }
-
-    const specificGroups = new Map();
-    for (const destination of destinations) {
-      const specificServices = new Map(
-        [...servicesByDestination.get(destination)].filter(([key]) => !commonKeys.has(key))
-      );
-      if (specificServices.size === 0) continue;
-      const signature = [...specificServices.keys()].sort().join('\u0001');
-      if (!specificGroups.has(signature)) specificGroups.set(signature, { destinations: [], services: specificServices });
-      specificGroups.get(signature).destinations.push(destination);
-    }
-    for (const group of specificGroups.values()) result.push(buildPolicy(group.destinations, group.services));
-
+    });
     return result.length > 0 ? result : [policy];
   });
 }
@@ -1718,7 +1836,8 @@ function policySideElementsProven(policy, evidenceFlows, side) {
   if (Array.isArray(multi) && multi.length > 0) {
     return multi.every(item => item?.useSubnet !== false
       ? evidenceFlows.some(flow => flow[subnetField] === item?.subnet)
-      : (item?.hosts || []).every(host => evidenceFlows.some(flow => flow[ipField] === host)));
+      : Array.isArray(item?.hosts) && item.hosts.length > 0
+        && item.hosts.every(host => evidenceFlows.some(flow => flow[ipField] === host)));
   }
   const useHosts = side === 'src' ? policy._use32Src === true : policy._use32Dst === true;
   if (useHosts) {
@@ -1730,17 +1849,195 @@ function policySideElementsProven(policy, evidenceFlows, side) {
   return evidenceFlows.some(flow => flow[subnetField] === target || flow[ipField] === target);
 }
 
+function policyAffinityScopes(policy, side) {
+  const multi = policy[side === 'src' ? '_multiSrcSubnets' : '_multiDstSubnets'];
+  let scopes;
+  if (Array.isArray(multi) && multi.length > 0) {
+    scopes = multi.flatMap(item => item?.useSubnet !== false
+      ? [{ subnet: item?.subnet }]
+      : (item?.hosts || []).map(host => ({ host })));
+  } else {
+    const useHosts = policy[side === 'src' ? '_use32Src' : '_use32Dst'] === true;
+    scopes = useHosts
+      ? (policy[side === 'src' ? 'srcHosts' : 'dstHosts'] || []).map(host => ({ host }))
+      : [{ subnet: policy[side === 'src' ? 'srcSubnet' : 'dstTarget'] }];
+  }
+  return [...new Map(scopes.map(scope => [scope.host ? `h:${scope.host}` : `s:${scope.subnet}`, scope])).values()];
+}
+
+function policyAffinityScopeCount(policy, side) {
+  const multi = policy[side === 'src' ? '_multiSrcSubnets' : '_multiDstSubnets'];
+  if (Array.isArray(multi) && multi.length > 0) {
+    return multi.reduce((count, item) => count
+      + (item?.useSubnet !== false ? 1 : (Array.isArray(item?.hosts) ? item.hosts.length : 0)), 0);
+  }
+  const useHosts = policy[side === 'src' ? '_use32Src' : '_use32Dst'] === true;
+  return useHosts ? (policy[side === 'src' ? 'srcHosts' : 'dstHosts'] || []).length : 1;
+}
+
+function policyAffinityProven(policy, evidenceFlows) {
+  const publicAll = policy.dstType === 'public' && (policy.dstTarget === 'all' || policy._dstUseAll === true);
+  const sources = policyAffinityScopes(policy, 'src');
+  const destinations = publicAll ? [{ publicAll: true }] : policyAffinityScopes(policy, 'dst');
+  const serviceKeys = [...new Set((policy.analysis?.services || []).flatMap(serviceTransportKeys))];
+  if (sources.length === 0 || destinations.length === 0 || serviceKeys.length === 0) return false;
+  const indexScopes = scopes => ({
+    hosts: new Map(scopes.filter(scope => scope.host).map(scope => [scope.host, `h:${scope.host}`])),
+    subnets: new Map(scopes.filter(scope => scope.subnet).map(scope => [scope.subnet, `s:${scope.subnet}`])),
+  });
+  const sourceIndex = indexScopes(sources);
+  const destinationIndex = indexScopes(destinations);
+  const observed = new Set();
+  for (const flow of evidenceFlows) {
+    const source = sourceIndex.hosts.get(flow.srcip)
+      || sourceIndex.subnets.get(flow.srcSubnet) || sourceIndex.subnets.get(flow.srcip);
+    const destination = publicAll && flow.dstType === 'public' ? 'p:all'
+      : destinationIndex.hosts.get(flow.dstip)
+        || destinationIndex.subnets.get(flow.dstSubnet) || destinationIndex.subnets.get(flow.dstip);
+    const service = flowServiceTechnicalKey(flow);
+    if (source && destination && service) observed.add(`${source}\u0001${destination}\u0001${service}`);
+  }
+  return sources.every(source => destinations.every(destination => serviceKeys.every(service => {
+    const sourceKey = source.host ? `h:${source.host}` : `s:${source.subnet}`;
+    const destinationKey = destination.publicAll ? 'p:all'
+      : destination.host ? `h:${destination.host}` : `s:${destination.subnet}`;
+    return observed.has(`${sourceKey}\u0001${destinationKey}\u0001${service}`);
+  })));
+}
+
+function publicAllProvenanceProven(policy, observedFlows) {
+  const publicAll = policy.dstType === 'public' && (policy.dstTarget === 'all' || policy._dstUseAll === true);
+  if (!publicAll || policy._mergedFrom === undefined) return true;
+  if (!Array.isArray(policy._mergedFrom) || policy._mergedFrom.length === 0) return false;
+  const serviceKeys = [...new Set((policy.analysis?.services || []).flatMap(serviceTransportKeys))];
+  if (serviceKeys.length === 0) return false;
+  const expectedSources = new Set((policy._multiSrcSubnets?.map(item => item.subnet)
+    || policy.srcSubnets || [policy.srcSubnet]).filter(Boolean));
+  const originSources = new Set(policy._mergedFrom.map(origin => origin.srcSubnet).filter(Boolean));
+  if (expectedSources.size !== originSources.size
+      || [...expectedSources].some(source => !originSources.has(source))) return false;
+  return policy._mergedFrom.every(origin => origin.dstTarget && origin.dstTarget !== 'all'
+    && serviceKeys.every(serviceKey => (observedFlows || []).some(flow =>
+      isPolicyEvidenceFlow(flow)
+      && flow.dstType === 'public'
+      && (flow.srcSubnet === origin.srcSubnet || flow.srcip === origin.srcSubnet)
+      && (flow.dstSubnet === origin.dstTarget || flow.dstip === origin.dstTarget)
+      && flowServiceTechnicalKey(flow) === serviceKey)));
+}
+
 function policyRepresentationIssue(policy) {
+  if (!policy || typeof policy !== 'object' || Array.isArray(policy)) return 'policy mal formée';
+  if (policy.analysis !== undefined && (!policy.analysis || typeof policy.analysis !== 'object'
+      || Array.isArray(policy.analysis) || !Array.isArray(policy.analysis.services)
+      || policy.analysis.services.length > 1000
+      || policy.analysis.services.some(serviceDecisionMetadataInvalid))) return 'analysis.services mal formé';
+  for (const field of ['policyName', '_policyName']) {
+    if (policy[field] != null && (typeof policy[field] !== 'string' || policy[field].length > 128)) return `${field} mal formé`;
+  }
+  if (policy.tags != null && (!Array.isArray(policy.tags) || policy.tags.length > 100
+      || policy.tags.some(tag => typeof tag !== 'string' || !tag || tag.length > 128))) return 'tags mal formé';
+  if (policy.srcAddrNames != null) {
+    if (!Array.isArray(policy.srcAddrNames) || policy.srcAddrNames.length > 1000
+        || policy.srcAddrNames.some(name => typeof name !== 'string' || !name)) return 'srcAddrNames mal formé';
+    if (policy.srcAddrNames.length === 0) return 'srcAddrNames vide';
+    const sourceSubnets = Array.isArray(policy._multiSrcSubnets)
+      ? policy._multiSrcSubnets.map(item => item?.subnet)
+      : Array.isArray(policy.srcSubnets)
+        ? policy.srcSubnets.map(item => typeof item === 'string' ? item : item?.subnet)
+        : [policy.srcSubnet];
+    if (policy.srcAddrNames.length > 0
+        && policy.srcAddrNames.length !== new Set(sourceSubnets.filter(Boolean)).size) return 'srcAddrNames désaligné avec les sources';
+  }
+  for (const field of ['srcSubnet', 'dstTarget']) {
+    if (policy[field] !== undefined && (typeof policy[field] !== 'string' || !policy[field])) return `${field} mal formé`;
+  }
   for (const field of ['_use32Src', '_use32Dst', '_dstUseAll', '_isWan', '_useSrcGroup', '_useDstGroup', '_isMultiDst']) {
     if (policy[field] !== undefined && typeof policy[field] !== 'boolean') return `${field} mal formé`;
   }
+  for (const field of ['srcSubnets', 'dstTargets', 'srcHosts', 'dstHosts']) {
+    if (policy[field] !== undefined && !Array.isArray(policy[field])) return `${field} mal formé`;
+  }
+  for (const field of ['srcHosts', 'dstHosts']) {
+    if (Array.isArray(policy[field])
+        && policy[field].some(host => typeof host !== 'string' || !host)) return `${field} contient une valeur mal formée`;
+    if (Array.isArray(policy[field]) && policy[field].length > 1000) return `${field} trop volumineux`;
+  }
+  for (const field of ['srcSubnets', 'dstTargets']) {
+    if (Array.isArray(policy[field]) && policy[field].some(item => {
+      const subnet = typeof item === 'string' ? item : item?.subnet;
+      return typeof subnet !== 'string' || !subnet;
+    })) return `${field} contient une valeur mal formée`;
+    if (Array.isArray(policy[field])) {
+      const subnets = policy[field].map(item => typeof item === 'string' ? item : item?.subnet);
+      if (new Set(subnets).size !== subnets.length) return `${field} contient un doublon`;
+    }
+  }
+  if (Array.isArray(policy.services)
+      && policy.services.some(service => typeof service !== 'string' || !service)) return 'services contient une valeur mal formée';
+  for (const field of ['srcSubnets', 'dstTargets']) {
+    if (Array.isArray(policy[field]) && policy[field].length === 0) return `${field} vide`;
+  }
+  if (policy._use32Src === true && (!Array.isArray(policy.srcHosts) || policy.srcHosts.length === 0)) return 'srcHosts vide en mode hôte';
+  if (policy._use32Dst === true && (!Array.isArray(policy.dstHosts) || policy.dstHosts.length === 0)) return 'dstHosts vide en mode hôte';
+  if (policy._mergedFrom !== undefined) {
+    if (!Array.isArray(policy._mergedFrom) || policy._mergedFrom.length === 0
+        || policy._mergedFrom.length > 1000) return '_mergedFrom mal formé, vide ou trop volumineux';
+    for (const origin of policy._mergedFrom) {
+      if (!origin || typeof origin !== 'object'
+          || typeof origin.srcSubnet !== 'string' || !origin.srcSubnet
+          || typeof origin.dstTarget !== 'string' || !origin.dstTarget
+          || (origin.action !== undefined && !['accept', 'deny', 'drop'].includes(origin.action))
+          || !Array.isArray(origin.analysis?.services) || origin.analysis.services.length === 0
+          || origin.analysis.services.length > 1000
+          || origin.analysis.services.some(serviceDecisionMetadataInvalid)) {
+        return '_mergedFrom contient une origine mal formée';
+      }
+    }
+    const originActions = new Set(policy._mergedFrom.map(origin => origin.action).filter(Boolean));
+    if (originActions.size > 1) {
+      return '_mergedFrom contient des actions incohérentes';
+    }
+    if (policy.dstType === 'public' && (policy.dstTarget === 'all' || policy._dstUseAll === true)) {
+      const signaturesBySource = new Map();
+      for (const origin of policy._mergedFrom) {
+        const signature = [...new Set(origin.analysis.services.flatMap(serviceTransportKeys))].sort().join('\u0001');
+        if (!signaturesBySource.has(origin.srcSubnet)) signaturesBySource.set(origin.srcSubnet, new Set());
+        signaturesBySource.get(origin.srcSubnet).add(signature);
+      }
+      if ([...signaturesBySource.values()].some(signatures => signatures.size > 1)) {
+        return '_mergedFrom incompatible avec une destination Internet all';
+      }
+    }
+  }
   for (const field of ['_multiSrcSubnets', '_multiDstSubnets']) {
     if (policy[field] !== undefined && !Array.isArray(policy[field])) return `${field} mal formé`;
+    if (Array.isArray(policy[field]) && policy[field].length === 0) return `${field} vide`;
+    if (Array.isArray(policy[field]) && policy[field].length > 1000) return `${field} trop volumineux`;
+    const seenSubnets = new Set();
     for (const item of (policy[field] || [])) {
       if (!item || typeof item !== 'object' || typeof item.useSubnet !== 'boolean') return `${field}.useSubnet mal formé`;
+      if (typeof item.subnet !== 'string' || !item.subnet || seenSubnets.has(item.subnet)) return `${field}.subnet dupliqué ou absent`;
+      seenSubnets.add(item.subnet);
       if (item.addrFound !== undefined && typeof item.addrFound !== 'boolean') return `${field}.addrFound mal formé`;
       if (item.hosts !== undefined && !Array.isArray(item.hosts)) return `${field}.hosts mal formé`;
+      if (Array.isArray(item.hosts) && item.hosts.length > 1000) return `${field}.hosts trop volumineux`;
+      if (Array.isArray(item.hosts)
+          && item.hosts.some(host => typeof host !== 'string' || !host)) return `${field}.hosts contient une valeur mal formée`;
+      if (item.useSubnet === false && (!Array.isArray(item.hosts) || item.hosts.length === 0)) return `${field}.hosts vide en mode hôte`;
       if (item.addrName !== undefined && typeof item.addrName !== 'string') return `${field}.addrName mal formé`;
+    }
+    const hostFlag = field === '_multiSrcSubnets' ? '_use32Src' : '_use32Dst';
+    if (policy[field]?.length && policy[hostFlag] === true) return `${field} incohérent avec ${hostFlag}`;
+  }
+  for (const [listField, multiField] of [
+    ['srcSubnets', '_multiSrcSubnets'],
+    ['dstTargets', '_multiDstSubnets'],
+  ]) {
+    if (!Array.isArray(policy[listField]) || !Array.isArray(policy[multiField])) continue;
+    const aliases = new Set(policy[listField].map(item => typeof item === 'string' ? item : item?.subnet));
+    const scoped = new Set(policy[multiField].map(item => item.subnet));
+    if (aliases.size !== scoped.size || [...aliases].some(subnet => !scoped.has(subnet))) {
+      return `${listField}/${multiField} incohérents`;
     }
   }
   if (policy._isWan === true && policy.dstType !== 'public') return '_isWan incohérent avec le type destination';
@@ -1752,12 +2049,22 @@ function policyRepresentationIssue(policy) {
       && (policy.dstTargets.length !== 1 || (policy.dstTargets[0]?.subnet || policy.dstTargets[0]) !== policy.dstTarget)) {
     return 'dstTarget/dstTargets incohérents';
   }
-  if (policy._srcMode === 'hosts' && policy._use32Src !== true) return 'mode source hosts incohérent';
-  if (policy._srcMode === 'subnet' && policy._use32Src === true) return 'mode source subnet incohérent';
-  if (policy._dstMode === 'hosts' && policy._use32Dst !== true) return 'mode destination hosts incohérent';
-  if (policy._dstMode === 'subnet' && policy._use32Dst === true) return 'mode destination subnet incohérent';
+  if (!policy._multiSrcSubnets?.length && policy._srcMode === 'hosts' && policy._use32Src !== true) return 'mode source hosts incohérent';
+  if (!policy._multiSrcSubnets?.length && policy._srcMode === 'subnet' && policy._use32Src === true) return 'mode source subnet incohérent';
+  if (!policy._multiDstSubnets?.length && policy._dstMode === 'hosts' && policy._use32Dst !== true) return 'mode destination hosts incohérent';
+  if (!policy._multiDstSubnets?.length && policy._dstMode === 'subnet' && policy._use32Dst === true) return 'mode destination subnet incohérent';
+  for (const field of ['ports', 'services', 'protos']) {
+    if (Array.isArray(policy[field]) && policy[field].length > 1000) return `${field} trop volumineux`;
+  }
+  if ((policy.dstTarget === 'all' || policy._dstUseAll === true)
+      && policy.dstType !== 'public' && policy._isWan !== true) return 'destination all interdite hors WAN';
   if (policy.dstTarget === 'all' && policy._dstUseAll !== true) return 'destination all non confirmée';
   if (policy.dstTarget !== 'all' && policy._dstUseAll === true) return 'destination spécifique marquée all';
+  const sourceScopes = policyAffinityScopeCount(policy, 'src');
+  const destinationScopes = policyAffinityScopeCount(policy, 'dst');
+  if (sourceScopes > 10000 || destinationScopes > 10000) return 'cardinalité de scope trop volumineuse';
+  const serviceScopes = new Set((policy.analysis?.services || []).flatMap(serviceTransportKeys)).size || 1;
+  if (sourceScopes * destinationScopes * serviceScopes > 100000) return 'produit d’affinité trop volumineux';
   return null;
 }
 
@@ -1767,9 +2074,11 @@ function validatePolicyDecisionShapes(policies) {
     return { ok: false, issues: [{ level: 'error', code: 'SCOPE_DECISION_INVALID', msg: 'Policies mal formées' }] };
   }
   policies.forEach((policy, index) => {
-    const candidate = policy || {};
-    const malformedServiceField = ['ports', 'services', 'protos']
-      .find(field => candidate[field] !== undefined && !Array.isArray(candidate[field]));
+    const candidate = policy;
+    const malformedServiceField = candidate && typeof candidate === 'object' && !Array.isArray(candidate)
+      ? ['ports', 'services', 'protos']
+        .find(field => candidate[field] !== undefined && !Array.isArray(candidate[field]))
+      : null;
     const issue = malformedServiceField
       ? `${malformedServiceField} mal formé`
       : policyRepresentationIssue(candidate);
@@ -1824,9 +2133,38 @@ function serviceTransportKey(service) {
     : '';
 }
 
+function serviceDecisionMetadataInvalid(service) {
+  if (!service || typeof service !== 'object' || Array.isArray(service)
+      || ![service.label, service.name].some(value => typeof value === 'string' && value.trim())) return true;
+  for (const field of ['reuseKeys', 'ports', 'sourcePorts', 'tcpPorts', 'udpPorts', 'tcpRanges', 'udpRanges', 'compatibleMatches', 'allMatches']) {
+    if (service[field] !== undefined && (!Array.isArray(service[field]) || service[field].length > 1000)) return true;
+  }
+  if (service.reuseKeys?.some(key => typeof key !== 'string' || !key.trim())) return true;
+  for (const field of ['ports', 'sourcePorts', 'tcpPorts', 'udpPorts']) {
+    if (service[field]?.some(port => !Number.isInteger(port) || port < 1 || port > 65535)) return true;
+  }
+  for (const field of ['tcpRanges', 'udpRanges']) {
+    if (service[field]?.some(range => !range || typeof range !== 'object' || Array.isArray(range)
+      || !Number.isInteger(range.start) || !Number.isInteger(range.end)
+      || range.start < 1 || range.end > 65535 || range.start > range.end)) return true;
+  }
+  for (const field of ['compatibleMatches', 'allMatches']) {
+    if (service[field]?.some(match => !match || typeof match !== 'object' || Array.isArray(match)
+      || typeof match.name !== 'string' || !match.name.trim())) return true;
+  }
+  return false;
+}
+
 function serviceTransportKeys(service) {
   if (Array.isArray(service?.reuseKeys)) {
     return [...new Set(service.reuseKeys.map(key => String(key).toUpperCase()).filter(Boolean))];
+  }
+  const proto = String(service?.proto || '').toUpperCase();
+  const ports = Array.isArray(service?.sourcePorts) ? service.sourcePorts : service?.ports;
+  if (['TCP', 'UDP'].includes(proto) && Array.isArray(ports)) {
+    return [...new Set(ports.map(Number)
+      .filter(port => Number.isInteger(port) && port >= 1 && port <= 65535)
+      .map(port => `${proto}/${port}`))];
   }
   const key = serviceTransportKey(service);
   return key ? [key] : [];
@@ -2128,6 +2466,15 @@ function applyPolicyUserDecisions(authoritativePolicies, submittedPolicies, fort
     const evidenceFlows = (observedFlows || []).filter(flow =>
       isPolicyEvidenceFlow(flow) && flowMatchesPolicyScope(flow, policy)
     );
+    const evidenceDstTypes = new Set(evidenceFlows.map(flow => flow.dstType)
+      .filter(type => ['private', 'public'].includes(type)));
+    if (evidenceDstTypes.size > 0
+        && (evidenceDstTypes.size !== 1 || !evidenceDstTypes.has(policy.dstType))) {
+      issues.push({ level: 'error', code: 'SCOPE_DECISION_INVALID', msg: `Policy #${index + 1}: type destination absent des flux observés` });
+    }
+    if (!publicAllProvenanceProven(policy, observedFlows)) {
+      issues.push({ level: 'error', code: 'POLICY_AFFINITY_UNPROVEN', msg: `Policy #${index + 1}: provenance destination/service Internet non prouvée` });
+    }
     if (evidenceFlows.length === 0
         || !policySideElementsProven(policy, evidenceFlows, 'src')
         || !policySideElementsProven(policy, evidenceFlows, 'dst')) {
@@ -2371,6 +2718,8 @@ function applyPolicyUserDecisions(authoritativePolicies, submittedPolicies, fort
     }
     if ((policy.analysis?.services || []).length === 0) {
       issues.push({ level: 'error', code: 'SERVICE_DECISION_EMPTY', msg: `Policy #${index + 1}: aucun service validé` });
+    } else if (!policyAffinityProven(policy, evidenceFlows)) {
+      issues.push({ level: 'error', code: 'POLICY_AFFINITY_UNPROVEN', msg: `Policy #${index + 1}: combinaison source/destination/service absente des flux observés` });
     }
   }
   return { ok: issues.length === 0, policies, issues };
@@ -2527,10 +2876,10 @@ function generateConfig(selectedPolicies, opts = {}) {
 
     // Destination address
     let dstAddrName;
-    // ── WAN policy : dstaddr "all" par défaut, ou IPs spécifiques si _dstUseAll=false ──
-    if ((p._isWan || p.dstType === 'public') && p._dstUseAll !== false) {
+    // ── WAN policy : dstaddr "all" uniquement sur décision explicite, sinon destination spécifique ──
+    if ((p._isWan || p.dstType === 'public') && (p._dstUseAll === true || p.dstTarget === 'all')) {
       dstAddrName = 'all';
-    } else if ((p._isWan || p.dstType === 'public') && p._dstUseAll === false) {
+    } else if (p._isWan || p.dstType === 'public') {
       // Mode IPs spécifiques pour policy WAN
       if (p._use32Dst && p.dstHosts?.length > 0) {
         const hostNames = p.dstHosts.map(h => {
@@ -2556,7 +2905,7 @@ function generateConfig(selectedPolicies, opts = {}) {
         dstAddrName = 'all';
       }
     // ── Multi-dst : "all" si _dstUseAll=true ──
-    } else if (p._isMultiDst && p._dstUseAll === true) {
+    } else if (p._isMultiDst && p._dstUseAll === true && (p._isWan || p.dstType === 'public')) {
       dstAddrName = 'all';
     // ── Multi-dst policy : destinations diverses avec seuil /24 vs /32 ──
     } else if (p._isMultiDst && p._multiDstSubnets?.length > 0) {
