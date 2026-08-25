@@ -109,7 +109,7 @@ config ips sensor
     next
 end
 `);
-  const authoritative = analyzePolicies([policy({ services: ['HTTPS'], ports: [443] })], config);
+  const authoritative = analyzePolicies([policy({ services: ['SSH'], ports: [22] })], config);
   const submitted = structuredClone(authoritative);
   submitted[0].action = 'deny';
   submitted[0].log = 'disable';
@@ -119,7 +119,7 @@ end
     authoritative,
     submitted,
     config,
-    [observedFlow({ service: 'HTTPS', dstport: '443' })],
+    [observedFlow({ service: 'SSH', dstport: '22' })],
   );
 
   assert.equal(decision.ok, true, JSON.stringify(decision.issues));
@@ -850,4 +850,16 @@ test('FF2-01 le preflight lit les interfaces normalisées utilisées par le gén
 
   assert.equal(result.warnings, 1);
   assert.ok(result.issues.some(issue => issue.msg.includes('même interface')));
+});
+
+test('FF2-03 refuse un champ ports non-tableau avant toute analyse', () => {
+  const forged = policy({ ports: '443' });
+  const shape = validatePolicyDecisionShapes([forged]);
+  assert.equal(shape.ok, false);
+  assert.ok(shape.issues.some(issue => issue.code === 'SCOPE_DECISION_INVALID'));
+
+  const config = fortiConfig();
+  assert.doesNotThrow(() => analyzePolicies([forged], config));
+  const analyzed = analyzePolicies([forged], config);
+  assert.ok(analyzed[0].analysis.services.every(service => service.found === false));
 });
