@@ -230,6 +230,7 @@ function createDrawerHarness(policy, viewportWidth = 1440) {
     drawer,
     body,
     click(target) { drawer.dispatch('click', target); },
+    blur(target) { drawer.dispatch('focusout', target); },
   };
 }
 
@@ -337,6 +338,121 @@ test('créer un service spécifique retire toute réutilisation compatible du m�
   assert.match(harness.body.innerHTML, /CUSTOM_52980/);
   assert.match(harness.body.innerHTML, />DNS</);
   assert.match(harness.body.innerHTML, />HTTPS</);
+});
+
+test('le drawer applique explicitement un service ICMP compatible sans clé vide', () => {
+  const policy = drawerPolicy([]);
+  const compatible = {
+    name: 'PING-TYPE', source: 'custom', proto: 'ICMP',
+    portSpec: 'ICMP/8/*', coverageCount: 256, extraPortCount: 255,
+  };
+  policy.analysis.services.push({
+    found: false,
+    label: 'ICMP/8/0',
+    proto: 'ICMP',
+    isNamed: true,
+    compatibleMatch: compatible,
+    compatibleMatches: [compatible],
+  });
+  const harness = createDrawerHarness(policy);
+
+  assert.equal(policy._serviceReuse, undefined);
+  assert.match(harness.body.innerHTML, /PING-TYPE/);
+  assert.doesNotMatch(harness.body.innerHTML, /ICMP\/undefined/);
+  assert.doesNotMatch(harness.body.innerHTML, /drawer-create-specific-service/);
+
+  harness.click(new FakeTarget('drawer-use-compatible-service', {
+    serviceKey: 'ICMP/8/0',
+    serviceName: 'PING-TYPE',
+  }));
+
+  assert.equal(policy._serviceReuse['ICMP/8/0'], 'PING-TYPE');
+  assert.equal(policy._resolvedServiceKeys['ICMP/8/0'], 'existing:PING-TYPE');
+  assert.doesNotMatch(harness.body.innerHTML, /drawer-use-compatible-service/);
+});
+
+test('le drawer applique toutes les clés d’un service compatible multiport', () => {
+  const policy = drawerPolicy([]);
+  const compatible = {
+    name: 'APP-WIDE', source: 'custom', proto: 'TCP',
+    portSpec: 'TCP/400-500,8443', coverageCount: 102, extraPortCount: 100,
+  };
+  policy.analysis.services.push({
+    found: false,
+    label: 'APP-WIDE',
+    proto: 'TCP',
+    isNamed: true,
+    reuseKeys: ['TCP/443', 'TCP/8443'],
+    compatibleMatch: compatible,
+    compatibleMatches: [compatible],
+  });
+  const harness = createDrawerHarness(policy);
+
+  assert.equal(policy._serviceReuse, undefined);
+  assert.match(harness.body.innerHTML, /data-service-keys="TCP\/443,TCP\/8443"/);
+  harness.click(new FakeTarget('drawer-use-compatible-service', {
+    serviceKeys: 'TCP/443,TCP/8443',
+    serviceName: 'APP-WIDE',
+  }));
+
+  assert.equal(policy._serviceReuse['TCP/443'], 'APP-WIDE');
+  assert.equal(policy._serviceReuse['TCP/8443'], 'APP-WIDE');
+  assert.equal(policy._resolvedServiceKeys['TCP/443'], 'existing:APP-WIDE');
+  assert.equal(policy._resolvedServiceKeys['TCP/8443'], 'existing:APP-WIDE');
+  assert.equal((harness.body.innerHTML.match(/drawer-field-value[^>]*>[^<]*APP-WIDE/g) || []).length, 1);
+  assert.doesNotMatch(harness.body.innerHTML, /drawer-use-compatible-service/);
+});
+
+test('créer un service spécifique multiport résout toutes ses clés', () => {
+  const policy = drawerPolicy([]);
+  const compatible = {
+    name: 'APP-WIDE', source: 'custom', proto: 'TCP',
+    portSpec: 'TCP/400-500,8443', coverageCount: 102, extraPortCount: 100,
+  };
+  policy.analysis.services.push({
+    found: false,
+    label: 'APP-WIDE',
+    proto: 'TCP',
+    isNamed: true,
+    reuseKeys: ['TCP/443', 'TCP/8443'],
+    compatibleMatch: compatible,
+    compatibleMatches: [compatible],
+  });
+  const harness = createDrawerHarness(policy);
+  const parent = {
+    querySelector(selector) {
+      return selector === '.drawer-svc-name' ? { value: 'APP-SPECIFIC' } : null;
+    },
+  };
+  harness.click(new FakeTarget('drawer-create-specific-service', {
+    serviceKey: 'TCP/443', serviceKeys: 'TCP/443,TCP/8443',
+  }, parent));
+
+  assert.equal(policy._resolvedServiceKeys['TCP/443'], 'specific');
+  assert.equal(policy._resolvedServiceKeys['TCP/8443'], 'specific');
+  assert.deepEqual(Array.from(policy.analysis.services.at(-1).ports), [443, 8443]);
+  assert.equal(policy.analysis.services.at(-1).suggestedName, 'APP-SPECIFIC');
+  assert.doesNotMatch(harness.body.innerHTML, /drawer-service-compatibility/);
+});
+
+test('nommer au blur un service inconnu multiport résout toutes ses clés', () => {
+  const policy = drawerPolicy([]);
+  policy.analysis.services.push({
+    found: false,
+    label: 'APP-MULTI',
+    isNamed: true,
+    proto: 'TCP',
+    reuseKeys: ['TCP/12000', 'TCP/12001'],
+  });
+  const harness = createDrawerHarness(policy);
+  const input = new FakeTarget('drawer-svc-name', { svcKey: 'label:APP-MULTI' });
+  input.value = 'APP-SPECIFIC';
+  harness.blur(input);
+
+  assert.equal(policy._resolvedServiceKeys['TCP/12000'], 'specific');
+  assert.equal(policy._resolvedServiceKeys['TCP/12001'], 'specific');
+  assert.deepEqual(Array.from(policy.analysis.services.at(-1).ports), [12000, 12001]);
+  assert.equal(policy.analysis.services.at(-1).suggestedName, 'APP-SPECIFIC');
 });
 
 test('le contrat responsive garde le drawer et les actions visibles sans chevauchement', () => {

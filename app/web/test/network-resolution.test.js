@@ -148,7 +148,7 @@ test('reanalyzes imported logs with the networks from the selected VDOM', async 
 
   const logForm = new FormData();
   logForm.append('logfile', new Blob([
-    'type=traffic srcip=10.250.16.49 dstip=10.250.7.106 srcport=55000 dstport=443 proto=6 action=accept service=HTTPS srcintf="Stations" dstintf="Admin" policyid=1 sentbyte=100 rcvdbyte=200\n',
+    'type=traffic srcip=10.250.16.49 dstip=10.250.7.106 srcport=55000 dstport=22 proto=6 action=accept service=SSH srcintf="Stations" dstintf="Admin" policyid=1 sentbyte=100 rcvdbyte=200\n',
   ]), 'traffic.log');
   const uploadResponse = await fetch(`${baseUrl}/api/upload`, { method: 'POST', body: logForm });
   assert.equal(uploadResponse.status, 200, serverOutput);

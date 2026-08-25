@@ -2852,11 +2852,13 @@ function mountDrawer() {
     const useCompatible = e.target.closest('.drawer-use-compatible-service');
     if (useCompatible) {
       _snapAndShow();
-      if (!p._serviceReuse) p._serviceReuse = {};
-      p._serviceReuse[useCompatible.dataset.serviceKey] = useCompatible.dataset.serviceName;
-      markServiceDecisionResolved(
-        p, useCompatible.dataset.serviceKey, `existing:${useCompatible.dataset.serviceName}`,
-      );
+      const serviceKeys = String(useCompatible.dataset.serviceKeys || useCompatible.dataset.serviceKey || '')
+        .split(',').filter(Boolean);
+      for (const serviceKey of serviceKeys) {
+        markServiceDecisionResolved(
+          p, serviceKey, `existing:${useCompatible.dataset.serviceName}`,
+        );
+      }
       populateDrawer(_drawerIdx);
       syncRowStatus(_drawerIdx);
       renderDeployPolicies(filterDeployPolicies(), false);
@@ -2865,13 +2867,23 @@ function mountDrawer() {
     const createSpecific = e.target.closest('.drawer-create-specific-service');
     if (createSpecific) {
       _snapAndShow();
-      const serviceKey = createSpecific.dataset.serviceKey;
-      const [proto, port] = serviceKey.split('/');
-      const service = (p.analysis?.services || []).find(item => serviceReuseKey(item) === serviceKey);
+      const serviceKeys = String(createSpecific.dataset.serviceKeys || createSpecific.dataset.serviceKey || '')
+        .split(',').filter(Boolean);
+      const [proto, port] = serviceKeys[0]?.split('/') || [];
+      const service = (p.analysis?.services || []).find(item =>
+        serviceReuseKeys(item).some(key => serviceKeys.includes(key)));
       const typedName = createSpecific.closest('.drawer-service-item')
         ?.querySelector('.drawer-svc-name')?.value.trim();
-      if (service) service.suggestedName = typedName || `FF_SVC_${proto}_${port}`;
-      markServiceDecisionResolved(p, serviceKey, 'specific');
+      if (service) {
+        service.suggestedName = typedName || `FF_SVC_${proto}_${port}`;
+        if (serviceKeys.length > 1 && ['TCP', 'UDP'].includes(proto)
+            && serviceKeys.every(key => key.startsWith(`${proto}/`))) {
+          service.ports = serviceKeys.map(key => Number(key.split('/')[1]));
+          service.sourcePorts = [...service.ports];
+          service.proto = proto;
+        }
+      }
+      serviceKeys.forEach(serviceKey => markServiceDecisionResolved(p, serviceKey, 'specific'));
       populateDrawer(_drawerIdx);
       syncRowStatus(_drawerIdx);
       renderDeployPolicies(filterDeployPolicies(), false);
@@ -3162,7 +3174,15 @@ function mountDrawer() {
     });
     if (!svc) return;
     svc.suggestedName = newName;
-    markServiceDecisionResolved(p, serviceReuseKey(svc), 'specific');
+    const decisionKeys = serviceReuseKeys(svc);
+    decisionKeys.forEach(key => markServiceDecisionResolved(p, key, 'specific'));
+    const decisionProtos = [...new Set(decisionKeys.map(key => key.split('/')[0]))];
+    if (decisionKeys.length > 1 && decisionProtos.length === 1
+        && ['TCP', 'UDP'].includes(decisionProtos[0])) {
+      svc.proto = decisionProtos[0];
+      svc.ports = decisionKeys.map(key => Number(key.split('/')[1])).sort((a, b) => a - b);
+      svc.sourcePorts = [...svc.ports];
+    }
     const _sm = svc.label?.match(/^(TCP|UDP)\/(\d+)$/i);
     const targetPort  = _sm ? parseInt(_sm[2], 10) : svc.port;
     const targetProto = _sm ? _sm[1].toUpperCase() : (svc.proto || '').toUpperCase();
@@ -3347,18 +3367,28 @@ function drawerHostControl(policy, host, type) {
   return `<input class="drawer-host-input" data-object-key="${escHtml(objectKey)}" data-type="${type}" data-host="${escHtml(host)}" value="${escHtml(storedName && storedName !== autoName ? storedName : '')}" placeholder="${escHtml(displayName)}">`;
 }
 
-function serviceReuseKey(svc) {
+function serviceReuseKeys(svc) {
+  if (Array.isArray(svc?.reuseKeys)) {
+    return [...new Set(svc.reuseKeys.map(key => String(key).toUpperCase()).filter(Boolean))];
+  }
+  const icmp = svc?.label?.match(/^(ICMP6?)\/(\d+)\/(\d+)$/i);
+  if (icmp) return [`${icmp[1].toUpperCase()}/${parseInt(icmp[2], 10)}/${parseInt(icmp[3], 10)}`];
   const notation = svc?.label?.match(/^(TCP|UDP)\/(\d+)$/i);
   const proto = notation ? notation[1] : svc?.proto;
   const port = notation ? parseInt(notation[2], 10) : svc?.port;
-  if (!proto || !port) return '';
-  return `${String(proto).toUpperCase()}/${port}`;
+  if (!proto || !port) return [];
+  return [`${String(proto).toUpperCase()}/${port}`];
+}
+
+function serviceReuseKey(svc) {
+  return serviceReuseKeys(svc)[0] || '';
 }
 
 function isCompatibleServiceSelected(policy, svc) {
-  const key = serviceReuseKey(svc);
+  const keys = serviceReuseKeys(svc);
   const matches = svc?.compatibleMatches || (svc?.compatibleMatch ? [svc.compatibleMatch] : []);
-  return !!key && matches.some(match => policy?._serviceReuse?.[key] === match.name);
+  return keys.length > 0 && matches.some(match =>
+    keys.every(key => policy?._serviceReuse?.[key] === match.name));
 }
 
 function selectedCompatibleService(services) {
@@ -3382,13 +3412,15 @@ function selectedCompatibleService(services) {
 }
 
 function isServiceDecisionResolved(policy, svc) {
-  const key = serviceReuseKey(svc);
-  const decision = key ? policy?._resolvedServiceKeys?.[key] : null;
-  if (decision === 'specific') return true;
-  if (decision?.startsWith('existing:')) {
-    return policy?._serviceReuse?.[key] === decision.slice('existing:'.length);
-  }
-  return false;
+  const keys = serviceReuseKeys(svc);
+  return keys.length > 0 && keys.every(key => {
+    const decision = policy?._resolvedServiceKeys?.[key];
+    if (decision === 'specific') return true;
+    if (decision?.startsWith('existing:')) {
+      return policy?._serviceReuse?.[key] === decision.slice('existing:'.length);
+    }
+    return false;
+  });
 }
 
 function clearSelectedServiceKey(policy, serviceKey) {
@@ -3776,23 +3808,29 @@ function populateDrawer(idx) {
   const resolvedExistingGroups = new Map();
   const resolvedExistingKeys = new Set();
   for (const service of svcList) {
-    const key = serviceReuseKey(service);
-    const decision = key ? p._resolvedServiceKeys?.[key] : null;
-    if (!decision?.startsWith('existing:')) continue;
-    const serviceName = decision.slice('existing:'.length);
-    if (p._serviceReuse?.[key] !== serviceName) continue;
+    const keys = serviceReuseKeys(service);
+    if (keys.length === 0) continue;
+    const decisions = keys.map(key => p._resolvedServiceKeys?.[key]);
+    if (!decisions.every(decision => decision?.startsWith('existing:'))) continue;
+    const serviceName = decisions[0].slice('existing:'.length);
+    if (!decisions.every(decision => decision === `existing:${serviceName}`)
+        || !keys.every(key => p._serviceReuse?.[key] === serviceName)) continue;
     if (!resolvedExistingGroups.has(serviceName)) resolvedExistingGroups.set(serviceName, []);
     resolvedExistingGroups.get(serviceName).push(service);
-    resolvedExistingKeys.add(key);
+    keys.forEach(key => resolvedExistingKeys.add(key));
   }
   const resolvedExistingHtml = [...resolvedExistingGroups].map(([serviceName, services]) => `
     <div class="drawer-field" title="${escHtml(services.map(service => service.label).join(', '))}">
       <span class="drawer-field-label">Ports couverts</span>
       <span class="drawer-field-value" style="color:var(--success)">&#10003; ${escHtml(serviceName)}${badgeHtml('config')}</span>
     </div>`).join('');
-  const servicesWithoutResolvedExisting = svcList.filter(service => !resolvedExistingKeys.has(serviceReuseKey(service)));
+  const servicesWithoutResolvedExisting = svcList.filter(service => {
+    const keys = serviceReuseKeys(service);
+    return keys.length === 0 || !keys.every(key => resolvedExistingKeys.has(key));
+  });
   const visibleSvcList = showGlobalCompatibleDecision
-    ? servicesWithoutResolvedExisting.filter(service => !selectedGlobalServiceKeys.has(serviceReuseKey(service)))
+    ? servicesWithoutResolvedExisting.filter(service =>
+      !serviceReuseKeys(service).some(key => selectedGlobalServiceKeys.has(key)))
     : servicesWithoutResolvedExisting;
   const displayServiceCount = visibleSvcList.length + resolvedExistingGroups.size + (showGlobalCompatibleDecision ? 1 : 0);
   const svcsHtml = resolvedExistingHtml + visibleSvcList.map(svc => {
@@ -3812,8 +3850,13 @@ function populateDrawer(idx) {
     }
     // Detect port-notation labels like "UDP/11436" from FortiGate logs
     const _pnm = svc.label?.match(/^(TCP|UDP)\/(\d+)$/i);
+    const _icmp = svc.label?.match(/^(ICMP6?)\/(\d+)\/(\d+)$/i);
     const svcProto = _pnm ? _pnm[1].toUpperCase() : (svc.proto || '').toUpperCase();
     const svcPort  = _pnm ? parseInt(_pnm[2], 10) : svc.port;
+    const reuseKeys = serviceReuseKeys(svc);
+    const observedServiceLabel = _icmp
+      ? `${_icmp[1].toUpperCase()}/${parseInt(_icmp[2], 10)}/${parseInt(_icmp[3], 10)}`
+      : reuseKeys.length > 1 ? reuseKeys.join(', ') : `${svcProto}/${svcPort}`;
     const svcKey = _pnm ? `${svcPort}/${svcProto}` : (svc.isNamed ? `label:${svc.label}` : `${svc.port}/${svc.proto}`);
     const reuseKey = serviceReuseKey(svc);
     const compatibleMatch = svc.compatibleMatch;
@@ -3838,15 +3881,15 @@ function populateDrawer(idx) {
       : '';
     if (serviceDecision === 'specific') {
       const finalName = svc.suggestedName || svcAutoName;
-      return `<div class="drawer-field" title="${escHtml(`${svcProto}/${svcPort}`)}"><span class="drawer-field-label">${escHtml(svc.label || `${svcProto}/${svcPort}`)}</span><span class="drawer-field-value" style="color:var(--success)">&#10003; ${escHtml(finalName)}${badgeHtml('config')}</span><button class="btn-del-item" data-del-type="svc" data-svc-key="${escHtml(svcKey)}" title="Retirer ce service de la policy">✕</button></div>`;
+      return `<div class="drawer-field" title="${escHtml(observedServiceLabel)}"><span class="drawer-field-label">${escHtml(svc.label || observedServiceLabel)}</span><span class="drawer-field-value" style="color:var(--success)">&#10003; ${escHtml(finalName)}${badgeHtml('config')}</span><button class="btn-del-item" data-del-type="svc" data-svc-key="${escHtml(svcKey)}" title="Retirer ce service de la policy">✕</button></div>`;
     }
     const compatibilityHtml = compatibleMatch && !serviceDecisionResolved && !commonCompatibleService ? `<div class="drawer-service-compatibility ${usingCompatible ? 'is-selected' : ''}">
-      <div><small>Service observé</small><strong class="mono">${escHtml(`${svcProto}/${svcPort}`)}</strong></div>
+      <div><small>Service observé</small><strong class="mono">${escHtml(observedServiceLabel)}</strong></div>
       <div><small>Service compatible</small><strong>${escHtml(compatibleMatch.name)}</strong><span class="mono">${escHtml(compatibleMatch.portSpec)}</span></div>
       <div><small>Extension possible</small><strong>${fmtNum(compatibleMatch.extraPortCount)} ports supplémentaires</strong></div>
       <div class="drawer-service-compatibility-actions">
-        <button class="btn-sm drawer-use-compatible-service ${usingCompatible ? 'btn-active' : ''}" data-service-key="${escHtml(reuseKey)}" data-service-name="${escHtml(compatibleMatch.name)}">${usingCompatible ? '✓ Service utilisé' : 'Utiliser ce service'}</button>
-        <button class="btn-sm drawer-create-specific-service ${usingCompatible ? '' : 'btn-active'}" data-service-key="${escHtml(reuseKey)}">Créer un service spécifique</button>
+        <button class="btn-sm drawer-use-compatible-service ${usingCompatible ? 'btn-active' : ''}" data-service-key="${escHtml(reuseKey)}" data-service-keys="${escHtml(reuseKeys.join(','))}" data-service-name="${escHtml(compatibleMatch.name)}">${usingCompatible ? '✓ Service utilisé' : 'Utiliser ce service'}</button>
+        ${_icmp ? '' : `<button class="btn-sm drawer-create-specific-service ${usingCompatible ? '' : 'btn-active'}" data-service-key="${escHtml(reuseKey)}" data-service-keys="${escHtml(reuseKeys.join(','))}">Créer un service spécifique</button>`}
       </div>
     </div>` : '';
     return `<div class="drawer-service-item">
@@ -3854,7 +3897,7 @@ function populateDrawer(idx) {
         ${isSelectable ? `<input type="checkbox" class="svc-sel-chk" ${isSelected?'checked':''} style="margin-right:4px;cursor:pointer;flex-shrink:0">` : ''}
         <span class="drawer-field-label" title="${escHtml(hintTitle)}">${escHtml(svc.label || `${svc.port}/${svc.proto}`)}</span>
         ${svc.isNamed && !_pnm ? hintText : ''}
-        <input class="drawer-input drawer-svc-name" data-svc-key="${escHtml(svcKey)}" value="${escHtml(svcInputValue)}" placeholder="${escHtml(svcDefaultName)}" onclick="event.stopPropagation()" ${usingCompatible ? 'disabled' : ''}>${badgeHtml('auto')}
+        <input class="drawer-input drawer-svc-name" data-svc-key="${escHtml(svcKey)}" value="${escHtml(svcInputValue)}" placeholder="${escHtml(svcDefaultName)}" onclick="event.stopPropagation()" ${usingCompatible || _icmp ? 'disabled' : ''}>${badgeHtml('auto')}
         <button class="btn-del-item" data-del-type="svc" data-svc-key="${escHtml(svcKey)}" title="Retirer ce service de la policy">✕</button>
       </div>
       ${compatibilityHtml}

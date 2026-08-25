@@ -87,3 +87,27 @@ end
   assert.ok(blocks.some(block => block.includes('set dstaddr "Serveur-B"') && block.includes('set service "SMB"')));
   assert.ok(blocks.every(block => block.includes('set srcintf "Z-Stations"') && block.includes('set dstintf "Z-Serveurs"')));
 });
+
+test('keeps identical service labels separate when their technical tuples differ', () => {
+  const tcp443 = { label: 'APP', name: null, found: false, isNamed: true, port: 443, proto: 'TCP', reuseKeys: ['TCP/443'] };
+  const tcp8443 = { label: 'APP', name: null, found: false, isNamed: true, port: 8443, proto: 'TCP', reuseKeys: ['TCP/8443'] };
+  const policy = {
+    srcSubnet: '10.0.0.0/24',
+    dstTarget: '10.0.1.0/24',
+    dstTargets: ['10.0.1.0/24', '10.0.2.0/24'],
+    dstType: 'private',
+    analysis: { services: [tcp443, tcp8443] },
+    services: ['APP'],
+    _mergedFrom: [
+      { srcSubnet: '10.0.0.0/24', dstTarget: '10.0.1.0/24', analysis: { services: [tcp443] } },
+      { srcSubnet: '10.0.0.0/24', dstTarget: '10.0.2.0/24', analysis: { services: [tcp8443] } },
+    ],
+  };
+
+  const result = preserveDestinationServiceAffinity([policy]);
+  assert.equal(result.length, 2);
+  assert.deepEqual(result.map(item => [item.dstTargets, item.analysis.services[0].reuseKeys]), [
+    [['10.0.1.0/24'], ['TCP/443']],
+    [['10.0.2.0/24'], ['TCP/8443']],
+  ]);
+});

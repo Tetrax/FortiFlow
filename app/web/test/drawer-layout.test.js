@@ -100,7 +100,7 @@ test('la sélection manuelle propose un service FortiGate commun sans remplacer 
 test('la décision globale masque les ports et cartes compatibles individuels jusqu’au choix utilisateur', () => {
   assert.ok(appSource.includes('showGlobalCompatibleDecision'));
   assert.ok(appSource.includes('selectedGlobalServiceKeys'));
-  assert.match(appSource, /visibleSvcList\s*=\s*showGlobalCompatibleDecision[\s\S]*servicesWithoutResolvedExisting\.filter\(service\s*=>\s*!selectedGlobalServiceKeys\.has\(serviceReuseKey\(service\)\)\)/);
+  assert.match(appSource, /visibleSvcList\s*=\s*showGlobalCompatibleDecision[\s\S]*servicesWithoutResolvedExisting\.filter\(service\s*=>[\s\S]*serviceReuseKeys\(service\)\.some\(key\s*=>\s*selectedGlobalServiceKeys\.has\(key\)\)/);
   assert.match(appSource, /compatibilityHtml\s*=\s*compatibleMatch[\s\S]*!commonCompatibleService/);
   assert.ok(appSource.includes('Ports sélectionnés'));
   assert.ok(appSource.includes('Service existant compatible'));
@@ -127,13 +127,13 @@ test('les décisions validées sont projetées en vert CONFIG et dédupliquées'
 test('les chemins service existant et service spécifique sont mutuellement exclusifs', () => {
   assert.match(appSource, /markServiceDecisionResolved[\s\S]*decision === 'specific'[\s\S]*delete policy\._serviceReuse\[serviceKey\]/);
   assert.match(appSource, /markServiceDecisionResolved[\s\S]*decision\.startsWith\('existing:'\)[\s\S]*policy\._serviceReuse\[serviceKey\]/);
-  assert.match(appSource, /resolvedExistingGroups[\s\S]*p\._serviceReuse\?\.\[key\] !== serviceName/);
+  assert.match(appSource, /resolvedExistingGroups[\s\S]*keys\.every\(key\s*=>\s*p\._serviceReuse\?\.\[key\]\s*===\s*serviceName\)/);
   assert.ok(appSource.includes('FF_SVC_${proto}_${port}'));
 });
 
 test('nommer manuellement un port sans suggestion valide immédiatement le service spécifique', () => {
-  assert.match(appSource, /focusout[\s\S]*drawer-svc-name[\s\S]*markServiceDecisionResolved\(p, serviceReuseKey\(svc\), 'specific'\)/);
-  assert.match(appSource, /markServiceDecisionResolved\(p, serviceReuseKey\(svc\), 'specific'\)[\s\S]*populateDrawer\(_drawerIdx\)/);
+  assert.match(appSource, /focusout[\s\S]*drawer-svc-name[\s\S]*serviceReuseKeys\(svc\)[\s\S]*decisionKeys\.forEach\(key\s*=>\s*markServiceDecisionResolved\(p, key, 'specific'\)\)/);
+  assert.match(appSource, /decisionKeys\.forEach\(key\s*=>\s*markServiceDecisionResolved\(p, key, 'specific'\)\)[\s\S]*populateDrawer\(_drawerIdx\)/);
 });
 
 test('tous les objets créés depuis le drawer deviennent des valeurs vertes CONFIG', () => {

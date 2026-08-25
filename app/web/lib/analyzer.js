@@ -51,10 +51,17 @@ function getSubnetForIP(ip, knownSubnets) {
 
 // ─── Proto labels ─────────────────────────────────────────────────────────────
 
-const PROTO_MAP = { '1': 'ICMP', '6': 'TCP', '17': 'UDP', '47': 'GRE', '50': 'ESP', '89': 'OSPF' };
+const PROTO_MAP = { '1': 'ICMP', '6': 'TCP', '17': 'UDP', '47': 'GRE', '50': 'ESP', '58': 'ICMP6', '89': 'OSPF' };
 
 function protoName(proto) {
   return PROTO_MAP[String(proto)] || (proto ? `PROTO${proto}` : '');
+}
+
+function observedPort(value) {
+  const text = String(value ?? '').trim();
+  if (!/^\d+$/.test(text)) return null;
+  const port = Number(text);
+  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null;
 }
 
 // ─── Main analysis ────────────────────────────────────────────────────────────
@@ -90,7 +97,8 @@ function buildAllSubnetGroupsAndPorts(flows, topN = 25, knownSubnets = []) {
       sg.dsts[dstKey] = { key: dstKey, type: dstType, ports: new Set(), protos: new Set(), services: new Set(), policyIds: new Set(), dstIPs: new Set(), srcIPs: new Set(), count: 0, sentBytes: 0, rcvdBytes: 0, noRcvdFlows: 0, noRcvdSrcIPs: new Set() };
     }
     const dst = sg.dsts[dstKey];
-    if (flow.dstport)  dst.ports.add(flow.dstport);
+    const port = observedPort(flow.dstport);
+    if (port)          dst.ports.add(port);
     if (flow.proto)    dst.protos.add(protoName(flow.proto));
     if (flow.service)  dst.services.add(flow.service.toUpperCase());
     if (flow.policyid) dst.policyIds.add(String(flow.policyid));
@@ -119,8 +127,8 @@ function buildAllSubnetGroupsAndPorts(flows, topN = 25, knownSubnets = []) {
     if (isDeny)     addToGroup(deny, f);
 
     // Port stats
-    const port = parseInt(f.dstport, 10);
-    if (port > 0 && port <= 65535) {
+    const port = observedPort(f.dstport);
+    if (port) {
       const pn = String(f.proto);
       if (pn === '17' || pn.toUpperCase() === 'UDP') {
         udpMap.set(port, (udpMap.get(port) || 0) + f.count);
@@ -325,7 +333,7 @@ function buildPolicies(subnetGroups) {
         dstTarget:   dstKey,
         dstType:     dst.type,
         services,
-        ports:       ports.slice(0, 20),
+        ports,
         protos,
         serviceDesc,
         policyIds:   [...dst.policyIds].sort((a, b) => Number(a) - Number(b)),
@@ -403,15 +411,11 @@ function buildMatrix(subnetGroups) {
 //  2. grouper par (sources triées + empreinte service) → fusionner les destinations
 
 function serviceFingerprint(p) {
-  if (p.services && p.services.length > 0)
-    return 'S:' + [...p.services].sort().join(',');
-  if (p.ports && p.ports.length > 0) {
-    const proto = (p.protos && p.protos[0]) || 'TCP';
-    return 'P:' + [...p.ports].sort((a, b) => a - b).map(pt => `${pt}/${proto}`).join(',');
-  }
-  if (p.protos && p.protos.length > 0)
-    return 'T:' + [...p.protos].sort().join(',');
-  return 'ANY';
+  const services = [...new Set(p.services || [])].sort();
+  const ports = [...new Set(p.ports || [])].map(Number).sort((a, b) => a - b);
+  const protos = [...new Set(p.protos || [])].map(String).sort();
+  if (services.length === 0 && ports.length === 0 && protos.length === 0) return 'ANY';
+  return `S:${services.join(',')}|P:${ports.join(',')}|T:${protos.join(',')}`;
 }
 
 function consolidatePolicies(rawPolicies) {
