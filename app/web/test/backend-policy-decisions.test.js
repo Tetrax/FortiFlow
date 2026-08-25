@@ -863,3 +863,40 @@ test('FF2-03 refuse un champ ports non-tableau avant toute analyse', () => {
   const analyzed = analyzePolicies([forged], config);
   assert.ok(analyzed[0].analysis.services.every(service => service.found === false));
 });
+
+test('FF2-02 refuse de reclasser une destination privée en WAN', () => {
+  const config = fortiConfig();
+  const forged = policy({ dstType: 'public', _isWan: true, _dstUseAll: false });
+  const authoritative = analyzePolicies([forged], config);
+  const submitted = structuredClone(authoritative);
+  submitted[0].dstType = 'public';
+  submitted[0]._isWan = true;
+  submitted[0]._dstUseAll = false;
+  const decision = applyPolicyUserDecisions(authoritative, submitted, config, [observedFlow()]);
+  assert.equal(decision.ok, false);
+  assert.ok(decision.issues.some(issue => issue.code === 'SCOPE_DECISION_INVALID'));
+});
+
+test('FF2-02 refuse une provenance Internet all qui forge les services par destination', () => {
+  const config = fortiConfig();
+  const selected = policy({
+    dstTarget: 'all', dstType: 'public', _isWan: true, _dstUseAll: true,
+    services: ['TCP/443', 'TCP/22'], ports: [22, 443], protos: ['TCP'],
+  });
+  const bothServices = analyzePolicies([selected], config)[0].analysis.services;
+  selected._mergedFrom = [
+    { srcSubnet: '10.0.0.0/24', dstTarget: '203.0.113.10', analysis: { services: bothServices } },
+    { srcSubnet: '10.0.0.0/24', dstTarget: '198.51.100.20', analysis: { services: bothServices } },
+  ];
+  const authoritative = analyzePolicies([selected], config);
+  const submitted = structuredClone(authoritative);
+  authoritative[0].srcintf = submitted[0].srcintf = 'LAN';
+  authoritative[0].dstintf = submitted[0].dstintf = 'DMZ';
+  const flows = [
+    observedFlow({ dstip: '203.0.113.10', dstSubnet: null, dstType: 'public', service: 'TCP/443', dstport: '443' }),
+    observedFlow({ dstip: '198.51.100.20', dstSubnet: null, dstType: 'public', service: 'TCP/22', dstport: '22' }),
+  ];
+  const decision = applyPolicyUserDecisions(authoritative, submitted, config, flows);
+  assert.equal(decision.ok, false);
+  assert.ok(decision.issues.some(issue => issue.code === 'POLICY_AFFINITY_UNPROVEN'), JSON.stringify(decision.issues));
+});
