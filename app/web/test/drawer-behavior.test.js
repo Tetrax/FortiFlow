@@ -307,6 +307,50 @@ test('le choix compatible global exige un clic et conserve DNS/HTTPS après rere
   assert.match(harness.body.innerHTML, />HTTPS</);
 });
 
+test('DCE-RPC-RANGE couvre trois ports sélectionnés mais pas une sélection mixte avec 8530', () => {
+  const ports = [52121, 52134, 62966];
+  const candidate = {
+    name: 'DCE-RPC-RANGE', source: 'custom', proto: 'TCP',
+    portSpec: 'TCP/10000-65535', coverageCount: 55536, extraPortCount: 55535,
+  };
+  const policy = drawerPolicy(ports);
+  for (const service of policy.analysis.services.filter(item => ports.includes(item.port))) {
+    service.compatibleMatch = candidate;
+    service.compatibleMatches = [candidate];
+  }
+  const harness = createDrawerHarness(policy);
+  ports.forEach(port => harness.click(serviceRow(`${port}/TCP`)));
+
+  assert.match(harness.body.innerHTML, /svc-selected-compatible/);
+  assert.match(harness.body.innerHTML, /DCE-RPC-RANGE/);
+  assert.match(harness.body.innerHTML, /TCP\/10000-65535/);
+  assert.match(harness.body.innerHTML, /TCP\/52121, TCP\/52134, TCP\/62966/);
+  assert.doesNotMatch(harness.body.innerHTML, /FF_SVC_TCP_MULTI/);
+
+  harness.click(new FakeTarget('svc-use-compatible-selected', {
+    proto: 'TCP',
+    ports: ports.join(','),
+    serviceName: 'DCE-RPC-RANGE',
+  }));
+  for (const port of ports) {
+    assert.equal(policy._serviceReuse[`TCP/${port}`], 'DCE-RPC-RANGE');
+    assert.equal(policy._resolvedServiceKeys[`TCP/${port}`], 'existing:DCE-RPC-RANGE');
+  }
+  assert.equal((harness.body.innerHTML.match(/DCE-RPC-RANGE/g) || []).length, 1);
+  assert.doesNotMatch(harness.body.innerHTML, /FF_SVC_TCP_MULTI/);
+
+  const mixedPolicy = drawerPolicy([...ports, 8530]);
+  for (const service of mixedPolicy.analysis.services.filter(item => ports.includes(item.port))) {
+    service.compatibleMatch = candidate;
+    service.compatibleMatches = [candidate];
+  }
+  const mixedHarness = createDrawerHarness(mixedPolicy);
+  [...ports, 8530].forEach(port => mixedHarness.click(serviceRow(`${port}/TCP`)));
+  assert.doesNotMatch(mixedHarness.body.innerHTML, /svc-selected-compatible/);
+  assert.match(mixedHarness.body.innerHTML, /FF_SVC_TCP_MULTI/);
+  assert.match(mixedHarness.body.innerHTML, /svc-do-merge/);
+});
+
 test('_serviceReuse est créé uniquement par l’action utiliser service existant', () => {
   const policy = drawerPolicy([52980]);
   const harness = createDrawerHarness(policy);

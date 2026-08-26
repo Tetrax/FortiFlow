@@ -7,6 +7,7 @@ const {
   parseFortiConfig,
   findService,
   analyzePolicies,
+  applyPolicyUserDecisions,
   generateConfig,
 } = require('../lib/forticonfig');
 
@@ -237,6 +238,108 @@ test('réutilise un service compatible couvrant tous les ports sélectionnés sa
   });
   assert.doesNotMatch(cli, /config firewall service custom/);
   assert.match(cli, /set service "MS-RPC-DYNAMIC"/);
+});
+
+test('propose un range compatible commun aux ports sélectionnés dans une policy multi-protocoles', () => {
+  const config = parseFortiConfig(`
+config firewall address
+    edit "SRC"
+        set subnet 10.0.0.0 255.255.255.0
+    next
+    edit "DST"
+        set subnet 10.0.1.0 255.255.255.0
+    next
+end
+config system interface
+    edit "LAN"
+        set ip 10.0.0.1 255.255.255.0
+    next
+    edit "DMZ"
+        set ip 10.0.1.1 255.255.255.0
+    next
+end
+config firewall service custom
+    edit "DNS"
+        set tcp-portrange 53
+        set udp-portrange 53
+    next
+    edit "DCE-RPC-RANGE"
+        set tcp-portrange 10000-65535
+    next
+end
+  `);
+  const ports = [52121, 52134, 62966];
+  const policy = {
+    srcSubnet: '10.0.0.0/24', dstTarget: '10.0.1.0/24', dstType: 'private',
+    services: ['DNS', ...ports.map(port => `TCP/${port}`)],
+    ports: [53, ...ports], protos: ['UDP', 'TCP'],
+    srcHosts: ['10.0.0.10'], dstHosts: ['10.0.1.20'],
+  };
+  const flows = [
+    { srcip: '10.0.0.10', dstip: '10.0.1.20', srcSubnet: '10.0.0.0/24', dstSubnet: '10.0.1.0/24', dstType: 'private', srcintf: 'LAN', dstintf: 'DMZ', service: 'DNS', dstport: '53', proto: '17', protoName: 'UDP', action: 'accept' },
+    ...ports.map(port => ({
+      srcip: '10.0.0.10', dstip: '10.0.1.20', srcSubnet: '10.0.0.0/24', dstSubnet: '10.0.1.0/24', dstType: 'private',
+      srcintf: 'LAN', dstintf: 'DMZ', service: `TCP/${port}`, dstport: String(port), proto: '6', protoName: 'TCP', action: 'accept',
+    })),
+  ];
+
+  const analyzed = analyzePolicies([policy], config, undefined, flows)[0];
+  const selected = analyzed.analysis.services.filter(service => ports.includes(service.port));
+  assert.equal(selected.length, 3);
+  assert.ok(selected.every(service =>
+    Array.isArray(service.compatibleMatches)
+      && service.compatibleMatches.some(match => match.name === 'DCE-RPC-RANGE')
+  ));
+  const commonNames = selected[0].compatibleMatches.map(match => match.name)
+    .filter(name => selected.slice(1).every(service =>
+      service.compatibleMatches.some(match => match.name === name)));
+  assert.deepEqual(commonNames, ['DCE-RPC-RANGE']);
+
+  const mixedPort = 8530;
+  const mixedPolicy = {
+    ...policy,
+    services: [...policy.services, `TCP/${mixedPort}`],
+    ports: [...policy.ports, mixedPort],
+  };
+  const mixedFlows = [...flows, {
+    srcip: '10.0.0.10', dstip: '10.0.1.20', srcSubnet: '10.0.0.0/24', dstSubnet: '10.0.1.0/24', dstType: 'private',
+    srcintf: 'LAN', dstintf: 'DMZ', service: `TCP/${mixedPort}`, dstport: String(mixedPort), proto: '6', protoName: 'TCP', action: 'accept',
+  }];
+  const mixed = analyzePolicies([mixedPolicy], config, undefined, mixedFlows)[0];
+  const mixedSelected = mixed.analysis.services.filter(service => [...ports, mixedPort].includes(service.port));
+  assert.equal(mixedSelected.length, 4);
+  assert.equal(mixedSelected.find(service => service.port === mixedPort).compatibleMatches, undefined);
+
+  const contradictoryPolicy = {
+    ...policy,
+    services: ['TCP/52121'],
+    ports: [52121],
+    protos: ['UDP'],
+  };
+  const contradictory = analyzePolicies(
+    [contradictoryPolicy],
+    config,
+    undefined,
+    flows.filter(flow => Number(flow.dstport) === 52121),
+  )[0].analysis.services[0];
+  assert.equal(contradictory.found, false);
+  assert.equal(contradictory.technicalConflict, true);
+  assert.equal(contradictory.compatibleMatches, undefined);
+
+  const submitted = structuredClone(policy);
+  submitted._serviceReuse = Object.fromEntries(ports.map(port => [`TCP/${port}`, 'DCE-RPC-RANGE']));
+  const authoritative = analyzePolicies([submitted], config, undefined, flows);
+  assert.equal(authoritative[0].analysis.services.filter(service => service.name === 'DCE-RPC-RANGE').length, 1);
+  assert.equal(authoritative[0].analysis.services.find(service => service.name === 'DCE-RPC-RANGE').compatibilityAccepted, true);
+  const decision = applyPolicyUserDecisions(authoritative, [submitted], config, flows);
+  assert.equal(decision.ok, true, JSON.stringify(decision.issues));
+  const cli = generateConfig(decision.policies, {
+    addresses: config.addresses,
+    addressGroups: config.addressGroups,
+    zones: config.zones,
+  });
+  assert.match(cli, /set service "DNS" "DCE-RPC-RANGE"/);
+  assert.doesNotMatch(cli, /FF_SVC_TCP_MULTI|FF_SVC_52121_TCP|FF_SVC_52134_TCP|FF_SVC_62966_TCP/);
 });
 
 test('ne propose jamais ALL_TCP comme service compatible', () => {

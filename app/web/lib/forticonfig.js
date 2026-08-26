@@ -1597,9 +1597,16 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf, observedFlows 
         const icmpNotation = svc.match(/^(ICMP6?)\/(\d+)\/(\d+)$/i);
         const declaredTransportProto = normalizedTransportProtocol(protoLabel);
         const declaredIcmpProto = normalizedIcmpProtocol(protoLabel);
+        const observedPortNotationMatches = !!portNotation
+          && serviceTransportNeed?.tuples?.length === 1
+          && (!declaredTransportProto
+            || declaredTransportProto === portNotation[1].toUpperCase())
+          && serviceTransportNeed.tuples[0].proto === portNotation[1].toUpperCase()
+          && serviceTransportNeed.tuples[0].port === parseInt(portNotation[2], 10);
         const portNotationConsistent = !!portNotation
-          && declaredTransportProto === portNotation[1].toUpperCase()
-          && notationSetMatchesPolicy;
+          && (observedPortNotationMatches
+            || (declaredTransportProto === portNotation[1].toUpperCase()
+              && notationSetMatchesPolicy));
         const icmpNotationConsistent = !!icmpNotation
           && declaredIcmpProto === icmpNotation[1].toUpperCase();
         const technicalConflict = (portNotation && !portNotationConsistent)
