@@ -5,6 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { validatePolicyDecisionShapes } = require('../lib/forticonfig');
 
 const appSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
 const styleSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'style.css'), 'utf8');
@@ -86,6 +87,7 @@ class FakeDocument {
   constructor() {
     this.elements = new Map();
     this.listeners = new Map();
+    this.selectors = new Map();
     this.body = new FakeElement(this, 'body');
   }
 
@@ -99,7 +101,7 @@ class FakeDocument {
 
   createElement(tagName) { return new FakeElement(this, tagName); }
   getElementById(id) { return this.elements.get(id) || null; }
-  querySelector() { return null; }
+  querySelector(selector) { return this.selectors.get(selector) || null; }
 
   addEventListener(type, handler) {
     if (!this.listeners.has(type)) this.listeners.set(type, []);
@@ -229,6 +231,7 @@ function createDrawerHarness(policy, viewportWidth = 1440) {
     policy,
     drawer,
     body,
+    setInput(selector, value) { document.selectors.set(selector, { value }); },
     click(target) { drawer.dispatch('click', target); },
     blur(target) { drawer.dispatch('focusout', target); },
   };
@@ -305,6 +308,29 @@ test('le choix compatible global exige un clic et conserve DNS/HTTPS après rere
   assert.equal((harness.body.innerHTML.match(/MS-RPC-DYNAMIC/g) || []).length, 1);
   assert.match(harness.body.innerHTML, />DNS</);
   assert.match(harness.body.innerHTML, />HTTPS</);
+});
+
+test('une fusion range du drawer produit un analysis.services valide', () => {
+  const rangePorts = [10080, 52121, 52134, 62966];
+  const policy = drawerPolicy([...rangePorts, 3268, 8530]);
+  const harness = createDrawerHarness(policy);
+
+  harness.click(specificButton('TCP/3268', 'tcp3268'));
+  harness.click(specificButton('TCP/8530', 'tcp8530'));
+  rangePorts.forEach(port => harness.click(serviceRow(`${port}/TCP`)));
+  harness.click(new FakeTarget('svc-merge-type', { mode: 'range' }));
+  harness.setInput('.svc-merge-name', 'dcp-rpc-range');
+  harness.setInput('.svc-merge-range', '10080-62966');
+  harness.click(new FakeTarget('svc-do-merge'));
+
+  const merged = policy.analysis.services.find(service => service._isMerged);
+  assert.equal(policy.analysis.services.length, 5);
+  assert.equal(merged.suggestedName, 'dcp-rpc-range');
+  assert.equal(merged.portRange, '10080-62966');
+  assert.deepEqual(merged.sourcePorts, rangePorts);
+  assert.equal(Object.hasOwn(merged, 'ports'), false);
+  assert.equal(validatePolicyDecisionShapes([policy]).ok, true);
+  assert.doesNotMatch(appSource, /ports:\s*portRange\s*\?\s*null\s*:\s*ports/);
 });
 
 test('DCE-RPC-RANGE couvre trois ports sélectionnés mais pas une sélection mixte avec 8530', () => {

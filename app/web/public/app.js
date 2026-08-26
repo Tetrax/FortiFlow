@@ -2510,10 +2510,9 @@ function showObjectsModal() {
       applyGlobalSvcMerge(state.selSvcs, {
         label: svcName, found: false, name: null, source: null,
         suggestedName: svcName, isNamed: false, proto: proto.toLowerCase(),
-        ports: portRange ? null : ports,
+        ...(portRange ? {} : { ports, port: ports[0] }),
         portRange: portRange || null,
         sourcePorts: ports,
-        port: portRange ? null : ports[0],
         portHint: portRange ? `${proto}: ${portRange}` : `${proto}: ${ports.join(', ')}`,
         _isMerged: true,
       });
@@ -2975,10 +2974,9 @@ function mountDrawer() {
         suggestedName: svcName,
         isNamed: false,
         proto,
-        ports: portRange ? null : ports,
+        ...(portRange ? {} : { ports, port: ports[0] }),
         portRange: portRange || null,
         sourcePorts: ports,
-        port: portRange ? null : ports[0],
         portHint: portRange ? `${proto.toUpperCase()}: ${portRange}` : `${proto.toUpperCase()}: ${ports.join(', ')}`,
         _isMerged: true,
       });
