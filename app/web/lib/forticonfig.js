@@ -2501,6 +2501,25 @@ function applyPolicyUserDecisions(authoritativePolicies, submittedPolicies, fort
   for (let index = 0; index < policies.length; index++) {
     const policy = policies[index];
     const submitted = submittedPolicies?.[index] || {};
+    const acceptedRiskInput = submitted._acceptedRisks;
+    const acceptedRisks = new Set();
+    if (acceptedRiskInput !== undefined) {
+      const valid = Array.isArray(acceptedRiskInput)
+        && acceptedRiskInput.every(code => code === 'POLICY_AFFINITY_UNPROVEN');
+      if (!valid) {
+        issues.push({ level: 'error', code: 'RISK_DECISION_INVALID', msg: `Policy #${index + 1}: acceptation de risque invalide` });
+      } else {
+        acceptedRiskInput.forEach(code => acceptedRisks.add(code));
+      }
+    }
+    const addRisk = (code, msg, detail, recommendation) => {
+      const accepted = acceptedRisks.has(code);
+      issues.push({
+        level: accepted ? 'warn' : 'risk', code, msg, detail, recommendation,
+        overridable: true,
+        accepted: accepted || undefined,
+      });
+    };
     delete policy.serviceNames;
     delete policy.action;
     delete policy.log;
@@ -2590,7 +2609,12 @@ function applyPolicyUserDecisions(authoritativePolicies, submittedPolicies, fort
       issues.push({ level: 'error', code: 'SCOPE_DECISION_INVALID', msg: `Policy #${index + 1}: type destination absent des flux observés` });
     }
     if (!publicAllProvenanceProven(policy, observedFlows)) {
-      issues.push({ level: 'error', code: 'POLICY_AFFINITY_UNPROVEN', msg: `Policy #${index + 1}: provenance destination/service Internet non prouvée` });
+      addRisk(
+        'POLICY_AFFINITY_UNPROVEN',
+        `Policy #${index + 1}: provenance destination/service Internet non prouvée`,
+        'Cette policy Internet regroupe des destinations et services dont l’association exacte n’est pas démontrée par les logs.',
+        'Séparer les policies par destination et services observés, ou accepter explicitement cette permission plus large.',
+      );
     }
     if (evidenceFlows.length === 0
         || !policySideElementsProven(policy, evidenceFlows, 'src')
@@ -2836,10 +2860,26 @@ function applyPolicyUserDecisions(authoritativePolicies, submittedPolicies, fort
     if ((policy.analysis?.services || []).length === 0) {
       issues.push({ level: 'error', code: 'SERVICE_DECISION_EMPTY', msg: `Policy #${index + 1}: aucun service validé` });
     } else if (!policyAffinityProven(policy, evidenceFlows)) {
-      issues.push({ level: 'error', code: 'POLICY_AFFINITY_UNPROVEN', msg: `Policy #${index + 1}: combinaison source/destination/service absente des flux observés` });
+      const summarize = values => {
+        const unique = [...new Set(values.filter(Boolean))];
+        return `${unique.slice(0, 8).join(', ')}${unique.length > 8 ? `, … (+${unique.length - 8})` : ''}`;
+      };
+      const sources = policyAffinityScopes(policy, 'src').map(scope => scope.host || scope.subnet);
+      const destinations = policyAffinityScopes(policy, 'dst').map(scope => scope.host || scope.subnet);
+      const services = (policy.analysis?.services || []).flatMap(serviceTransportKeys);
+      addRisk(
+        'POLICY_AFFINITY_UNPROVEN',
+        `Policy #${index + 1}: combinaison source/destination/service absente des flux observés`,
+        `Périmètre concerné — sources: ${summarize(sources)}; destinations: ${summarize(destinations)}; services: ${summarize(services)}. Toutes les combinaisons de ce produit n’ont pas été observées.`,
+        'Séparer les policies selon les associations destination/service observées, ou accepter explicitement cette permission plus large.',
+      );
     }
   }
-  return { ok: issues.length === 0, policies, issues };
+  return {
+    ok: !issues.some(issue => issue.level === 'error' || issue.level === 'risk'),
+    policies,
+    issues,
+  };
 }
 
 // ─── CLI config generator ─────────────────────────────────────────────────────

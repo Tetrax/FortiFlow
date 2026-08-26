@@ -192,11 +192,28 @@ function preparePolicyDecisions(session, selectedPolicies, opts = {}) {
   const issues = [...analysis.issues, ...decision.issues];
   return {
     ...decision,
-    ok: issues.length === 0,
+    ok: !issues.some(issue => issue.level === 'error' || issue.level === 'risk'),
     issues,
     fortiConfig: analysis.fortiConfig,
     opts: analysis.opts,
   };
+}
+
+function sendPolicyDecisionFailure(res, decision) {
+  const risks = decision.issues.filter(issue => issue.level === 'risk' && issue.overridable);
+  const errors = decision.issues.filter(issue => issue.level === 'error');
+  if (risks.length > 0 && errors.length === 0) {
+    return res.status(409).json({
+      error: 'Confirmation de risque requise',
+      code: 'POLICY_RISK_CONFIRMATION_REQUIRED',
+      issues: risks,
+    });
+  }
+  return res.status(422).json({
+    error: 'Décision utilisateur invalide',
+    code: 'POLICY_DECISION_INVALID',
+    issues: decision.issues,
+  });
 }
 
 function buildDeployAnalysisResult(session, analyzed) {
@@ -1654,14 +1671,17 @@ app.post('/api/deploy/preflight', (req, res) => {
   try {
     const decision = preparePolicyDecisions(s, selectedPolicies, opts || {});
     if (!decision.ok) {
-      return res.status(422).json({ error: 'Décision utilisateur invalide', code: 'POLICY_DECISION_INVALID', issues: decision.issues });
+      return sendPolicyDecisionFailure(res, decision);
     }
     const validatedPolicies = decision.policies;
     const result = preflightValidation(validatedPolicies, decision.fortiConfig);
     if (!result.ok) {
       return res.status(422).json({ error: 'Preflight refusé', preflight: result });
     }
-    res.json(result);
+    res.json({
+      ...result,
+      acceptedRisks: decision.issues.filter(issue => issue.accepted === true),
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1701,7 +1721,7 @@ app.post('/api/deploy/generate', (req, res) => {
 
     const decision = preparePolicyDecisions(s, selectedPolicies, opts || {});
     if (!decision.ok) {
-      return res.status(422).json({ error: 'Décision utilisateur invalide', code: 'POLICY_DECISION_INVALID', issues: decision.issues });
+      return sendPolicyDecisionFailure(res, decision);
     }
     const validatedPolicies = decision.policies;
     const generationPreflight = preflightValidation(validatedPolicies, decision.fortiConfig);
@@ -1781,7 +1801,11 @@ app.post('/api/deploy/generate', (req, res) => {
       res.send(cli);
     } else {
       const existingPoliciesCli = formatExistingPolicies(s.fortiConfig?.existingPolicies || []);
-      res.json({ cli, analyzed, addrGroups: s.fortiConfig.addressGroups || {}, warnings, resolvedHosts, existingPoliciesCli, hostPairServices });
+      res.json({
+        cli, analyzed, addrGroups: s.fortiConfig.addressGroups || {}, warnings,
+        resolvedHosts, existingPoliciesCli, hostPairServices,
+        acceptedRisks: decision.issues.filter(issue => issue.accepted === true),
+      });
     }
   } catch (err) {
     res.status(500).json({ error: err.message });

@@ -2715,6 +2715,8 @@ function _snapDrawer(p) {
   delete p._backendIssues;
   delete p._backendIssueKind;
   delete p._backendValidated;
+  delete p._acceptedRisks;
+  delete p._acceptedRiskIssues;
 }
 
 function mountDrawer() {
@@ -7121,7 +7123,10 @@ function isPolicyComplete(p, _debug) {
   const a = p.analysis || {};
   const dbg = msg => { if (_debug) console.log('[complete]', msg, 'dstMode:', p._dstMode, '_use32Dst:', p._use32Dst, '_isMultiDst:', p._isMultiDst, 'dstHosts:', p.dstHosts, '_dstHostsFound:', p._dstHostsFound, '_dstHostNames:', p._dstHostNames, '_multiDstSubnets:', JSON.stringify(p._multiDstSubnets)); };
 
-  if (p._backendIssues?.length) { dbg(`FAIL: ${p._backendIssues.join('; ')}`); return false; }
+  if (p._backendIssues?.length && p._backendIssueKind !== 'risk') {
+    dbg(`FAIL: ${p._backendIssues.join('; ')}`);
+    return false;
+  }
 
   // Interfaces must be explicitly selected
   if (!p._srcintf) { dbg('FAIL: no _srcintf'); return false; }
@@ -7827,14 +7832,19 @@ function renderDeployPolicies(analyzed, resetPage = true) {
 
     const backendIssues = p._backendIssues || [];
     const backendIncomplete = p._backendIssueKind === 'incomplete';
+    const riskIssues = p._acceptedRiskIssues
+      || (p._backendIssueKind === 'risk' ? backendIssues : []);
+    const technicalIssues = p._backendIssueKind === 'risk' ? [] : backendIssues;
     const fieldComplete = p._disabled || isPolicyComplete(p);
-    const rowStatus = backendIssues.length > 0 ? 'error' : fieldComplete ? 'ok' : 'warn';
-    const statusTitle = backendIssues.join('\n') || (p.analysis?.missingFields || []).join(', ') || '';
+    const rowStatus = technicalIssues.length > 0 ? 'error' : riskIssues.length > 0 ? 'warn' : fieldComplete ? 'ok' : 'warn';
+    const statusTitle = [...technicalIssues, ...riskIssues].join('\n') || (p.analysis?.missingFields || []).join(', ') || '';
     const isHighlighted = !isAgg && idx === deployState._highlightIdx;
     if (isHighlighted) deployState._highlightIdx = null; // consommer une seule fois
     const isScan = isScanPolicy(p);
-    const objectState = backendIssues.length > 0
-      ? `<span class="policy-needs-work" title="${escHtml(statusTitle)}">${backendIncomplete ? 'À compléter' : 'Bloquée sécurité'}</span>`
+    const objectState = technicalIssues.length > 0
+      ? `<span class="policy-needs-work" title="${escHtml(statusTitle)}">${backendIncomplete ? 'À compléter' : 'Erreur technique'}</span>`
+      : riskIssues.length > 0
+      ? `<span class="policy-needs-work" title="${escHtml(statusTitle)}">À risque</span>`
       : fieldComplete
       ? p._backendValidated
         ? '<span class="policy-ready">Prête</span>'
@@ -8010,18 +8020,21 @@ function formatPolicyValidationError(payload) {
     : Array.isArray(payload?.preflight?.issues) ? payload.preflight.issues : [];
   const title = payload?.error || 'Validation backend refusée';
   if (issues.length === 0) return title;
-  const prefix = payload?.code === 'POLICY_DECISION_INVALID' ? 'Blocage sécurité'
+  const prefix = payload?.code === 'POLICY_RISK_CONFIRMATION_REQUIRED' ? 'À risque'
+    : payload?.code === 'POLICY_DECISION_INVALID' ? 'Erreur technique'
     : payload?.preflight ? 'À compléter' : 'Validation bloquante';
   return `${prefix} — ${title}\n\n${issues.map(issue =>
     `• ${issue.msg || issue.code || 'Cause non précisée'}`).join('\n')}`;
 }
 
 function markSelectedPolicyIssues(issues, selectedIndexes, kind = 'security') {
-  for (const index of selectedIndexes) delete deployState.analyzed[index]._backendIssues;
+  const groups = Array.isArray(selectedIndexes[0])
+    ? selectedIndexes : selectedIndexes.map(index => [index]);
+  for (const index of groups.flat()) delete deployState.analyzed[index]._backendIssues;
   for (const issue of issues) {
     const position = String(issue?.msg || '').match(/^Policy #(\d+):/);
-    const indexes = position && selectedIndexes[Number(position[1]) - 1] !== undefined
-      ? [selectedIndexes[Number(position[1]) - 1]] : selectedIndexes;
+    const indexes = position && groups[Number(position[1]) - 1]
+      ? groups[Number(position[1]) - 1] : groups.flat();
     const detail = `[${issue?.code || 'VALIDATION'}] ${issue?.msg || 'Cause non précisée'}`;
     for (const index of indexes) {
       const policy = deployState.analyzed[index];
@@ -8032,6 +8045,27 @@ function markSelectedPolicyIssues(issues, selectedIndexes, kind = 'security') {
     }
   }
   renderDeployPolicies(filterDeployPolicies(), false);
+}
+
+function acceptSelectedPolicyRisks(issues, selectedIndexes, selectedPolicies) {
+  const groups = Array.isArray(selectedIndexes[0])
+    ? selectedIndexes : selectedIndexes.map(index => [index]);
+  for (const issue of issues) {
+    const position = String(issue?.msg || '').match(/^Policy #(\d+):/);
+    const offset = position ? Number(position[1]) - 1 : 0;
+    const submitted = selectedPolicies[offset];
+    if (!submitted || !issue?.code) continue;
+    submitted._acceptedRisks = [...new Set([...(submitted._acceptedRisks || []), issue.code])];
+    const detail = [issue.msg, issue.detail, issue.recommendation].filter(Boolean).join(' — ');
+    for (const sourceIndex of groups[offset] || []) {
+      const source = deployState.analyzed[sourceIndex];
+      if (!source) continue;
+      source._acceptedRiskIssues = [...new Set([...(source._acceptedRiskIssues || []), detail])];
+      delete source._backendIssues;
+      delete source._backendIssueKind;
+      delete source._backendValidated;
+    }
+  }
 }
 
 async function generateDeployConf() {
@@ -8059,12 +8093,15 @@ async function generateDeployConf() {
   }
 
   let selectedPolicies;
+  let selectedPolicyIndexGroups;
   const selectedCompleteIndexes = selectedIndexes
     .filter(index => isPolicyComplete(deployState.analyzed[index]));
   if (deployState.viewMode === 'sequence') {
     // In sequence mode, aggregate selected policies before sending
     const selected = selectedCompleteIndexes.map(index => deployState.analyzed[index]);
     const aggregated = buildSequenceAggregated(selected);
+    selectedPolicyIndexGroups = aggregated.map(policy => policy._isAggregated
+      ? policy._sequenceMembers : [deployState.analyzed.indexOf(policy)]);
     selectedPolicies = aggregated.map(p => ({
       ...p,
       services:        (p.analysis?.services || []).filter(s => !s._isMerged).map(s => s.label),
@@ -8085,6 +8122,7 @@ async function generateDeployConf() {
       disabled:     p._disabled || false,
     }));
   } else {
+    selectedPolicyIndexGroups = selectedCompleteIndexes.map(index => [index]);
     selectedPolicies = selectedCompleteIndexes
       .map(index => deployState.analyzed[index])
       .map(p => ({
@@ -8147,24 +8185,36 @@ async function generateDeployConf() {
 
   // Preflight validation
   try {
-    const pfRes = await fetch(`/api/deploy/preflight?session=${state.session}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    const submitPreflight = () => fetch(`/api/deploy/preflight?session=${state.session}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ selectedPolicies, opts }),
     });
-    const pf = await pfRes.json().catch(() => ({}));
+    let pfRes = await submitPreflight();
+    let pf = await pfRes.json().catch(() => ({}));
+    if (!pfRes.ok && pf.code === 'POLICY_RISK_CONFIRMATION_REQUIRED') {
+      markSelectedPolicyIssues(pf.issues || [], selectedPolicyIndexGroups, 'risk');
+      const accepted = await showRiskOverrideModal(pf.issues || []);
+      if (!accepted) {
+        if (selectedPolicyIndexGroups.length === 1) openDrawer(selectedPolicyIndexGroups[0][0]);
+        resetGenerateButton();
+        return;
+      }
+      acceptSelectedPolicyRisks(pf.issues || [], selectedPolicyIndexGroups, selectedPolicies);
+      pfRes = await submitPreflight();
+      pf = await pfRes.json().catch(() => ({}));
+    }
     if (!pfRes.ok) {
       const pfIssues = pf.issues || pf.preflight?.issues || [];
       markSelectedPolicyIssues(
         pfIssues,
-        selectedCompleteIndexes,
+        selectedPolicyIndexGroups,
         pf.code === 'POLICY_DECISION_INVALID' ? 'security' : 'incomplete',
       );
       alert(formatPolicyValidationError(pf));
       resetGenerateButton();
       return;
     }
-    for (const index of selectedCompleteIndexes) {
+    for (const index of selectedPolicyIndexGroups.flat()) {
       deployState.analyzed[index]._backendValidated = true;
       delete deployState.analyzed[index]._backendIssues;
       delete deployState.analyzed[index]._backendIssueKind;
@@ -8194,13 +8244,13 @@ async function generateDeployConf() {
       const issues = e.issues || e.preflight?.issues || [];
       markSelectedPolicyIssues(
         issues,
-        selectedCompleteIndexes,
+        selectedPolicyIndexGroups,
         e.code === 'POLICY_DECISION_INVALID' ? 'security' : 'incomplete',
       );
       alert(formatPolicyValidationError(e));
       return;
     }
-    const { cli, existingPoliciesCli } = await r.json();
+    const { cli, existingPoliciesCli, acceptedRisks = [] } = await r.json();
 
     deployState.generatedCli      = cli;
     deployState.existingPoliciesCli = existingPoliciesCli || '';
@@ -8211,7 +8261,7 @@ async function generateDeployConf() {
     const info = el('deploy-gen-info');
     if (pre)  pre.value = cli;
     if (wrap) wrap.style.display = '';
-    if (info) info.textContent = `${selectedPolicies.length} policies · ${cli.split('\n').length} lignes`;
+    if (info) info.textContent = `${selectedPolicies.length} policies · ${cli.split('\n').length} lignes${acceptedRisks.length ? ` · ${acceptedRisks.length} risque${acceptedRisks.length > 1 ? 's' : ''} accepté${acceptedRisks.length > 1 ? 's' : ''}` : ''}`;
 
     // Show diff button only if existing config available
     const diffBtn = el('btn-diff-toggle');
@@ -8285,6 +8335,36 @@ async function generateDeployConf() {
 }
 
 // ─── Preflight modal ─────────────────────────────────────────────────────────
+
+function showRiskOverrideModal(issues) {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'preflight-overlay';
+    const items = issues.map(issue => `
+      <div class="preflight-item pf-warn">
+        <strong>${escHtml(issue.code || 'RISQUE')}</strong><br>
+        ${escHtml(issue.msg || 'Permission plus large détectée')}
+        ${issue.detail ? `<details open><summary>Voir le détail</summary><div>${escHtml(issue.detail)}</div></details>` : ''}
+        ${issue.recommendation ? `<div><b>Recommandation :</b> ${escHtml(issue.recommendation)}</div>` : ''}
+      </div>`).join('');
+    overlay.innerHTML = `
+      <div class="preflight-modal">
+        <div class="preflight-title">⚠ Risque détecté</div>
+        <p>Cette policy peut autoriser des combinaisons qui n’ont pas été observées dans les logs.</p>
+        <div class="preflight-section">${items}</div>
+        <div class="preflight-actions">
+          <button class="btn-sm" id="risk-correct">Corriger</button>
+          <button class="btn-accent" id="risk-accept">Générer quand même</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    overlay.querySelector('#risk-correct').addEventListener('click', () => { overlay.remove(); resolve(false); });
+    overlay.querySelector('#risk-accept').addEventListener('click', () => { overlay.remove(); resolve(true); });
+    overlay.addEventListener('click', event => {
+      if (event.target === overlay) { overlay.remove(); resolve(false); }
+    });
+  });
+}
 
 function showPreflightModal(pf) {
   return new Promise(resolve => {

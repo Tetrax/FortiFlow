@@ -229,6 +229,13 @@ test('la génération restitue les causes backend et marque uniquement les polic
   });
   assert.match(incompleteMessage, /À compléter/);
   assert.match(incompleteMessage, /Policy #1: interface destination manquante/);
+  const riskMessage = context.formatPolicyValidationError({
+    error: 'Confirmation de risque requise',
+    code: 'POLICY_RISK_CONFIRMATION_REQUIRED',
+    issues: [{ level: 'risk', msg: 'Policy #1: combinaison non prouvée' }],
+  });
+  assert.match(riskMessage, /À risque/);
+  assert.match(riskMessage, /Policy #1: combinaison non prouvée/);
 
   const markStart = source.indexOf('function markSelectedPolicyIssues');
   const markEnd = source.indexOf('\nasync function generateDeployConf', markStart);
@@ -248,6 +255,14 @@ test('la génération restitue les causes backend et marque uniquement les polic
   );
   assert.equal(markContext.deployState.analyzed[1]._backendIssues, undefined);
 
+  markContext.deployState.analyzed = [{}, {}, {}];
+  markContext.markSelectedPolicyIssues([
+    { code: 'POLICY_AFFINITY_UNPROVEN', msg: 'Policy #1: combinaison non prouvée' },
+  ], [[0, 2], [1]], 'risk');
+  assert.ok(markContext.deployState.analyzed[0]._backendIssues);
+  assert.equal(markContext.deployState.analyzed[1]._backendIssues, undefined);
+  assert.ok(markContext.deployState.analyzed[2]._backendIssues);
+
   const generateStart = source.indexOf('async function generateDeployConf()');
   const generateEnd = source.indexOf('\n// ─── Preflight modal', generateStart);
   const generate = source.slice(generateStart, generateEnd);
@@ -261,9 +276,32 @@ test('la génération restitue les causes backend et marque uniquement les polic
   assert.match(generate, /const selectedIndexes = \[\.\.\.deployState\.selected\]/);
   assert.match(generate, /selectedPolicies = selectedCompleteIndexes[\s\S]*\.map\(index => deployState\.analyzed\[index\]\)/);
   assert.doesNotMatch(generate, /selectedPolicies\s*=\s*deployState\.analyzed\.map/);
-  assert.match(source, /_backendIssues[\s\S]*Bloquée sécurité/);
+  assert.match(source, /_backendIssues[\s\S]*Erreur technique/);
+  assert.match(source, /_acceptedRiskIssues[\s\S]*À risque/);
   assert.match(source, /_backendValidated[\s\S]*Prête[\s\S]*Complète/);
   assert.match(source, /delete p\._backendIssues/);
+});
+
+test('le frontend demande un override explicite avant de générer une policy à risque', () => {
+  const appSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const generateStart = appSource.indexOf('async function generateDeployConf()');
+  const generateEnd = appSource.indexOf('\n// ─── Preflight modal', generateStart);
+  const generate = appSource.slice(generateStart, generateEnd);
+
+  assert.match(serverSource, /POLICY_RISK_CONFIRMATION_REQUIRED/);
+  assert.match(serverSource, /overridable/);
+  assert.match(appSource, /function showRiskOverrideModal/);
+  assert.match(appSource, />Corriger</);
+  assert.match(appSource, />Générer quand même</);
+  assert.match(appSource, /À risque/);
+  assert.match(generate, /POLICY_RISK_CONFIRMATION_REQUIRED/);
+  assert.match(generate, /showRiskOverrideModal/);
+  assert.match(generate, /if \(!accepted\)[\s\S]*openDrawer/);
+  assert.match(appSource, /_acceptedRisks/);
+  assert.match(generate, /acceptSelectedPolicyRisks/);
+  assert.match(generate, /selectedPolicyIndexGroups/);
+  assert.doesNotMatch(appSource, /source\._acceptedRisks\s*=/);
 });
 
 test('FF2-01 refuse une interface utilisateur absente de la configuration', () => {
@@ -457,8 +495,10 @@ test('FF2-01 applique le validateur autoritatif au preflight et à la générati
     assert.ok(start >= 0 && end > start);
     const route = source.slice(start, end);
     assert.match(route, /preparePolicyDecisions\(/);
-    assert.match(route, /POLICY_DECISION_INVALID/);
+    assert.match(route, /sendPolicyDecisionFailure\(/);
   }
+  assert.match(source, /POLICY_DECISION_INVALID/);
+  assert.match(source, /POLICY_RISK_CONFIRMATION_REQUIRED/);
   const generateStart = source.indexOf("app.post('/api/deploy/generate'");
   const generateEnd = source.indexOf('\n});', generateStart);
   const generateRoute = source.slice(generateStart, generateEnd);
@@ -1014,5 +1054,43 @@ test('FF2-02 refuse une provenance Internet all qui forge les services par desti
   ];
   const decision = applyPolicyUserDecisions(authoritative, submitted, config, flows);
   assert.equal(decision.ok, false);
-  assert.ok(decision.issues.some(issue => issue.code === 'POLICY_AFFINITY_UNPROVEN'), JSON.stringify(decision.issues));
+  const risk = decision.issues.find(issue => issue.code === 'POLICY_AFFINITY_UNPROVEN');
+  assert.equal(risk.level, 'risk');
+  assert.equal(risk.overridable, true);
+  assert.match(risk.detail, /destination/i);
+  assert.match(risk.recommendation, /sépar/i);
+
+  submitted[0]._acceptedRisks = ['POLICY_AFFINITY_UNPROVEN'];
+  const accepted = applyPolicyUserDecisions(authoritative, submitted, config, flows);
+  assert.equal(accepted.ok, true, JSON.stringify(accepted.issues));
+  assert.ok(accepted.issues.some(issue =>
+    issue.code === 'POLICY_AFFINITY_UNPROVEN' && issue.accepted === true && issue.level === 'warn'
+  ));
+  const cli = generateConfig(accepted.policies, {
+    addresses: config.addresses,
+    addressGroups: config.addressGroups,
+    zones: config.zones,
+  });
+  assert.match(cli, /config firewall policy/);
+  assert.match(cli, /set dstaddr "all"/);
+});
+
+test('refuse un override de risque mal formé ou inconnu', () => {
+  const config = fortiConfig(`
+config firewall service custom
+    edit "APPX"
+        set tcp-portrange 5555
+    next
+end
+  `);
+  const selected = policy({ srcintf: 'LAN', dstintf: 'DMZ' });
+  const authoritative = analyzePolicies([selected], config, undefined, [observedFlow()]);
+
+  for (const invalid of ['POLICY_AFFINITY_UNPROVEN', ['UNKNOWN_RISK']]) {
+    const submitted = structuredClone(authoritative);
+    submitted[0]._acceptedRisks = invalid;
+    const decision = applyPolicyUserDecisions(authoritative, submitted, config, [observedFlow()]);
+    assert.equal(decision.ok, false);
+    assert.ok(decision.issues.some(issue => issue.code === 'RISK_DECISION_INVALID'));
+  }
 });
