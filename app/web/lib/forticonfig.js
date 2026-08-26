@@ -1190,7 +1190,32 @@ function findServiceByName(label, observedPorts, protoName, customServices, obse
   const exactCustom = Object.entries(customServices || {})
     .find(([name]) => name.toLowerCase() === normalizedLabel);
   if (exactCustom) {
-    return classifyCustomTransportService(exactCustom[0], exactCustom[1], observedPorts, protoName, observedTuples);
+    const resolution = classifyCustomTransportService(
+      exactCustom[0], exactCustom[1], observedPorts, protoName, observedTuples,
+    );
+    const configuredRanges = [
+      ...serviceRanges(exactCustom[1], false),
+      ...serviceRanges(exactCustom[1], true),
+    ];
+    if (observedTuples.length > 0 && resolution?.compatibleMatch
+        && configuredRanges.length > 0
+        && configuredRanges.every(range => range.start === range.end)) {
+      const exactMatch = {
+        ...resolution.compatibleMatch,
+        portSpec: formatCustomServicePortHint(exactCustom[1]),
+        extraPortCount: 0,
+      };
+      return {
+        found: true,
+        name: exactCustom[0],
+        source: 'custom',
+        portHint: formatCustomServicePortHint(exactCustom[1]),
+        exactMatch,
+        allMatches: [exactMatch],
+        namedObjectMatch: true,
+      };
+    }
+    return resolution;
   }
 
   const exactPredefined = Object.values(PREDEFINED)
@@ -1648,6 +1673,7 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf, observedFlows 
           compatibleMatch: resolution?.compatibleMatch || undefined,
           compatibleMatches: compatibleMatches.length > 0 ? compatibleMatches : undefined,
           compatibilityAccepted: reusedCompatibleName ? true : undefined,
+          namedObjectMatch: resolution?.namedObjectMatch || undefined,
         });
       }
     }
@@ -2302,6 +2328,14 @@ function foundServiceEvidenceProven(service, evidenceFlows, fortiConfig) {
   if (!custom) {
     return !service.exactMatch?.coverageCount
       || service.exactMatch.coverageCount === transportKeys.size;
+  }
+  if (service.namedObjectMatch === true) {
+    const configuredRanges = [
+      ...serviceRanges(custom, false),
+      ...serviceRanges(custom, true),
+    ];
+    return configuredRanges.length > 0
+      && configuredRanges.every(range => range.start === range.end);
   }
   const coverageCount = (serviceAllowsTransport(custom, 'TCP')
     ? mergedRangeCount(serviceRanges(custom, false)) : 0)
