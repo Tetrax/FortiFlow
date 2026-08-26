@@ -168,6 +168,7 @@ function preparePolicyAnalysis(session, selectedPolicies, opts = {}) {
     analysisInput,
     fortiConfig,
     normalizedOpts.preferredWanIntf,
+    session.data?.flows || [],
   );
   return {
     ok: optionDecision.issues.length === 0,

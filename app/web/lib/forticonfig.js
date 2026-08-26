@@ -1050,41 +1050,54 @@ function normalizedTransportProtocol(protoName) {
   return null;
 }
 
-function observedTransportNeed(observedPorts, protoName) {
-  if (!Array.isArray(observedPorts)) return null;
-  const proto = normalizedTransportProtocol(protoName);
-  const parsedPorts = (observedPorts || []).map(port => {
-    const text = String(port).trim();
-    return /^\d+$/.test(text) ? Number(text) : NaN;
-  });
-  if (parsedPorts.some(port => !Number.isInteger(port) || port < 1 || port > 65535)) return null;
-  const ports = [...new Set(parsedPorts)].sort((a, b) => a - b);
-  return proto && ports.length > 0 ? { proto, ports } : null;
+function observedTransportNeed(observedPorts, protoName, observedTuples = []) {
+  let tuples;
+  if (observedTuples.length > 0) {
+    tuples = observedTuples.map(tuple => ({
+      proto: normalizedTransportProtocol(tuple?.proto),
+      port: Number(tuple?.port),
+    }));
+  } else {
+    if (!Array.isArray(observedPorts)) return null;
+    const proto = normalizedTransportProtocol(protoName);
+    tuples = (observedPorts || []).map(port => {
+      const text = String(port).trim();
+      return { proto, port: /^\d+$/.test(text) ? Number(text) : NaN };
+    });
+  }
+  if (tuples.some(tuple => !tuple.proto || !Number.isInteger(tuple.port)
+      || tuple.port < 1 || tuple.port > 65535)) return null;
+  const unique = [...new Map(tuples.map(tuple => [`${tuple.proto}/${tuple.port}`, tuple])).values()]
+    .sort((a, b) => a.proto.localeCompare(b.proto) || a.port - b.port);
+  const protos = [...new Set(unique.map(tuple => tuple.proto))];
+  const ports = [...new Set(unique.map(tuple => tuple.port))].sort((a, b) => a - b);
+  return unique.length > 0 ? { proto: protos.length === 1 ? protos[0] : null, ports, tuples: unique } : null;
 }
 
-function classifyCustomTransportService(name, service, observedPorts, protoName) {
-  const need = observedTransportNeed(observedPorts, protoName);
+function classifyCustomTransportService(name, service, observedPorts, protoName, observedTuples = []) {
+  const need = observedTransportNeed(observedPorts, protoName, observedTuples);
   if (!need || !service || service.proto === 'ICMP' || service.proto === 'ICMP6') return null;
-  if (!serviceAllowsTransport(service, need.proto)) return null;
-  const isUdp = need.proto === 'UDP';
-  const ranges = serviceRanges(service, isUdp);
-  if (ranges.length === 0 || isCatchAllTransportService(name, ranges)) return null;
-  if (!need.ports.every(port => ranges.some(range => port >= range.start && port <= range.end))) return null;
-
-  const relevantCount = mergedRangeCount(ranges);
-  const otherProto = isUdp ? 'TCP' : 'UDP';
-  const otherCount = serviceAllowsTransport(service, otherProto)
-    ? mergedRangeCount(serviceRanges(service, !isUdp)) : 0;
-  const coverageCount = relevantCount + otherCount;
+  for (const tuple of need.tuples) {
+    if (!serviceAllowsTransport(service, tuple.proto)) return null;
+    const ranges = serviceRanges(service, tuple.proto === 'UDP');
+    if (ranges.length === 0 || isCatchAllTransportService(name, ranges)
+        || !ranges.some(range => tuple.port >= range.start && tuple.port <= range.end)) return null;
+  }
+  const coverageCount = (serviceAllowsTransport(service, 'TCP')
+    ? mergedRangeCount(serviceRanges(service, false)) : 0)
+    + (serviceAllowsTransport(service, 'UDP')
+      ? mergedRangeCount(serviceRanges(service, true)) : 0);
   const candidate = {
     name,
     source: 'custom',
-    proto: need.proto,
-    portSpec: formatRanges(need.proto, ranges),
+    proto: need.proto || 'TCP/UDP',
+    portSpec: need.proto
+      ? formatRanges(need.proto, serviceRanges(service, need.proto === 'UDP'))
+      : formatCustomServicePortHint(service),
     coverageCount,
-    extraPortCount: Math.max(0, coverageCount - need.ports.length),
+    extraPortCount: Math.max(0, coverageCount - need.tuples.length),
   };
-  if (coverageCount === need.ports.length) {
+  if (coverageCount === need.tuples.length) {
     return {
       found: true,
       name,
@@ -1102,8 +1115,8 @@ function classifyCustomTransportService(name, service, observedPorts, protoName)
   };
 }
 
-function classifyPredefinedService(name, observedPorts, protoName) {
-  const need = observedTransportNeed(observedPorts, protoName);
+function classifyPredefinedService(name, observedPorts, protoName, observedTuples = []) {
+  const need = observedTransportNeed(observedPorts, protoName, observedTuples);
   if (!need) return null;
   const canonical = Object.values(PREDEFINED).find(entry => entry.name.toLowerCase() === String(name).toLowerCase())?.name;
   if (!canonical) return null;
@@ -1117,12 +1130,12 @@ function classifyPredefinedService(name, observedPorts, protoName) {
       coverage.add(`${entry.proto.toUpperCase()}/${port}`);
     }
   }
-  const required = need.ports.map(port => `${need.proto}/${port}`);
+  const required = need.tuples.map(tuple => `${tuple.proto}/${tuple.port}`);
   if (!required.every(key => coverage.has(key))) return null;
   const candidate = {
     name: canonical,
     source: 'predefined',
-    proto: need.proto,
+    proto: need.proto || 'TCP/UDP',
     portSpec: [...coverage].sort().join(', '),
     coverageCount: coverage.size,
     extraPortCount: Math.max(0, coverage.size - required.length),
@@ -1169,7 +1182,7 @@ function selectNamedResolution(resolutions) {
 
 // Name similarity only discovers candidates. Technical protocol/port coverage
 // decides whether a candidate is exact, compatible, or unrelated.
-function findServiceByName(label, observedPorts, protoName, customServices) {
+function findServiceByName(label, observedPorts, protoName, customServices, observedTuples = []) {
   if (/^(TCP|UDP)\/\d+$/i.test(label)) return null;
   const normalizedLabel = String(label || '').toLowerCase();
   const norm = normalizedLabel.replace(/[-_\s]/g, '');
@@ -1177,12 +1190,12 @@ function findServiceByName(label, observedPorts, protoName, customServices) {
   const exactCustom = Object.entries(customServices || {})
     .find(([name]) => name.toLowerCase() === normalizedLabel);
   if (exactCustom) {
-    return classifyCustomTransportService(exactCustom[0], exactCustom[1], observedPorts, protoName);
+    return classifyCustomTransportService(exactCustom[0], exactCustom[1], observedPorts, protoName, observedTuples);
   }
 
   const exactPredefined = Object.values(PREDEFINED)
     .find(entry => entry.name.toLowerCase() === normalizedLabel)?.name;
-  if (exactPredefined) return classifyPredefinedService(exactPredefined, observedPorts, protoName);
+  if (exactPredefined) return classifyPredefinedService(exactPredefined, observedPorts, protoName, observedTuples);
 
   const resolutions = [];
   const predefinedNames = [...new Set(Object.values(PREDEFINED).map(entry => entry.name))];
@@ -1190,14 +1203,14 @@ function findServiceByName(label, observedPorts, protoName, customServices) {
     const candidateNorm = name.toLowerCase().replace(/[-_\s]/g, '');
     if ((candidateNorm.startsWith(norm) || norm.startsWith(candidateNorm))
         && norm.length >= 5 && candidateNorm.length >= 5) {
-      resolutions.push(classifyPredefinedService(name, observedPorts, protoName));
+      resolutions.push(classifyPredefinedService(name, observedPorts, protoName, observedTuples));
     }
   }
   for (const [name, service] of Object.entries(customServices || {})) {
     const candidateNorm = name.toLowerCase().replace(/[-_\s]/g, '');
     if ((candidateNorm.startsWith(norm) || norm.startsWith(candidateNorm))
         && norm.length >= 5 && candidateNorm.length >= 5) {
-      resolutions.push(classifyCustomTransportService(name, service, observedPorts, protoName));
+      resolutions.push(classifyCustomTransportService(name, service, observedPorts, protoName, observedTuples));
     }
   }
   return selectNamedResolution(resolutions.filter(Boolean));
@@ -1493,7 +1506,7 @@ function preserveDestinationServiceAffinity(policies) {
   });
 }
 
-function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
+function analyzePolicies(policies, fortiConfig, preferredWanIntf, observedFlows = []) {
   const { addresses, customServices, interfaces, zones } = fortiConfig;
 
   return policies.map(p => {
@@ -1528,6 +1541,8 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
 
     if (p.services && p.services.length > 0) {
       for (const svc of p.services) {
+        const serviceObservedTuples = observedServiceTuples(p, svc, observedFlows);
+        const serviceTransportNeed = observedTransportNeed([], null, serviceObservedTuples);
         const portNotation = svc.match(/^(TCP|UDP)\/(\d+)$/i);
         const icmpNotation = svc.match(/^(ICMP6?)\/(\d+)\/(\d+)$/i);
         const declaredTransportProto = normalizedTransportProtocol(protoLabel);
@@ -1539,37 +1554,59 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
           && declaredIcmpProto === icmpNotation[1].toUpperCase();
         const technicalConflict = (portNotation && !portNotationConsistent)
           || (icmpNotation && !icmpNotationConsistent)
-          || (!portNotation && !icmpNotation && p.ports?.length > 0 && !policyTransportNeed);
+          || (!portNotation && !icmpNotation && p.ports?.length > 0
+            && !policyTransportNeed && !serviceTransportNeed);
         const icmpResolution = icmpNotationConsistent
           ? findIcmpService(svc, protoLabel, customServices) : null;
         const nameResolution = !portNotation && !icmpNotation && !technicalConflict
-          ? findServiceByName(svc, policyTransportNeed?.ports || [], protoLabel, customServices)
+          ? findServiceByName(
+            svc,
+            serviceTransportNeed?.ports || policyTransportNeed?.ports || [],
+            serviceTransportNeed?.proto || protoLabel,
+            customServices,
+            serviceTransportNeed?.tuples || [],
+          )
           : null;
         let technicalResolution = portNotationConsistent
           ? findService(parseInt(portNotation[2], 10), portNotation[1], customServices)
           : null;
 
+        const effectiveTransportNeed = serviceTransportNeed || policyTransportNeed;
         if (!portNotation && !icmpNotation && !technicalConflict
-            && !nameResolution && policyTransportNeed) {
-          const perPort = policyTransportNeed.ports.map(port => findService(port, protoLabel, customServices));
-          const exactNames = perPort.every(resolution => resolution.found)
-            ? [...new Set(perPort.map(resolution => resolution.name))]
-            : [];
-          if (exactNames.length === 1) {
-            technicalResolution = perPort[0];
+            && !nameResolution && effectiveTransportNeed) {
+          if (serviceTransportNeed) {
+            const predefinedNames = [...new Set(Object.values(PREDEFINED).map(entry => entry.name))];
+            technicalResolution = selectNamedResolution([
+              ...Object.entries(customServices).map(([name, service]) => classifyCustomTransportService(
+                name, service, serviceTransportNeed.ports, serviceTransportNeed.proto,
+                serviceTransportNeed.tuples,
+              )),
+              ...predefinedNames.map(name => classifyPredefinedService(
+                name, serviceTransportNeed.ports, serviceTransportNeed.proto,
+                serviceTransportNeed.tuples,
+              )),
+            ].filter(Boolean));
           } else {
-            const commonCompatibleNames = perPort.length > 0
-              ? (perPort[0].compatibleMatches || []).map(candidate => candidate.name)
-                .filter(name => perPort.slice(1).every(resolution =>
-                  (resolution.compatibleMatches || []).some(candidate => candidate.name === name)))
+            const perPort = policyTransportNeed.ports.map(port => findService(port, protoLabel, customServices));
+            const exactNames = perPort.every(resolution => resolution.found)
+              ? [...new Set(perPort.map(resolution => resolution.name))]
               : [];
-            technicalResolution = selectNamedResolution(commonCompatibleNames
-              .map(name => customServices[name]
-                ? classifyCustomTransportService(
-                  name, customServices[name], policyTransportNeed.ports, protoLabel,
-                )
-                : classifyPredefinedService(name, policyTransportNeed.ports, protoLabel))
-              .filter(Boolean));
+            if (exactNames.length === 1) {
+              technicalResolution = perPort[0];
+            } else {
+              const commonCompatibleNames = perPort.length > 0
+                ? (perPort[0].compatibleMatches || []).map(candidate => candidate.name)
+                  .filter(name => perPort.slice(1).every(resolution =>
+                    (resolution.compatibleMatches || []).some(candidate => candidate.name === name)))
+                : [];
+              technicalResolution = selectNamedResolution(commonCompatibleNames
+                .map(name => customServices[name]
+                  ? classifyCustomTransportService(
+                    name, customServices[name], policyTransportNeed.ports, protoLabel,
+                  )
+                  : classifyPredefinedService(name, policyTransportNeed.ports, protoLabel))
+                .filter(Boolean));
+            }
           }
         }
 
@@ -1577,17 +1614,23 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
         const compatibleMatches = resolution?.compatibleMatches || [];
         const observedNeed = portNotationConsistent
           ? { proto: portNotation[1].toUpperCase(), ports: [parseInt(portNotation[2], 10)] }
-          : policyTransportNeed;
-        const singleTransport = observedNeed?.ports.length === 1 ? observedNeed : null;
+          : effectiveTransportNeed;
+        const singleTransport = observedNeed?.tuples?.length === 1
+          ? observedNeed.tuples[0]
+          : observedNeed?.ports.length === 1 && observedNeed.proto ? observedNeed : null;
         const decisionKeys = icmpNotationConsistent
           ? [`${icmpNotation[1].toUpperCase()}/${parseInt(icmpNotation[2], 10)}/${parseInt(icmpNotation[3], 10)}`]
-          : observedNeed ? observedNeed.ports.map(port => `${observedNeed.proto}/${port}`) : [];
+          : observedNeed?.tuples
+            ? observedNeed.tuples.map(tuple => `${tuple.proto}/${tuple.port}`)
+            : observedNeed ? observedNeed.ports.map(port => `${observedNeed.proto}/${port}`) : [];
         const reusedCompatibleName = acceptedCompatibleReuse(decisionKeys, compatibleMatches);
         const found = resolution?.found === true || !!reusedCompatibleName;
         const resolvedName = reusedCompatibleName || (resolution?.found ? resolution.name : null);
         const portHint = resolution?.portHint
           || resolution?.compatibleMatch?.portSpec
-          || (singleTransport ? `${singleTransport.proto}: ${singleTransport.ports[0]} (observé)` : '');
+          || (singleTransport
+            ? `${singleTransport.proto}: ${singleTransport.port ?? singleTransport.ports?.[0]} (observé)`
+            : '');
         serviceItems.push({
           label: svc,
           found,
@@ -1595,7 +1638,7 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf) {
           source: reusedCompatibleName ? 'custom-compatible' : (resolution?.found ? resolution.source : null),
           suggestedName: resolvedName || (portNotation ? `FF_SVC_${portNotation[2]}_${portNotation[1].toUpperCase()}` : svc),
           isNamed: true,
-          port: singleTransport?.ports[0],
+          port: singleTransport?.port ?? singleTransport?.ports?.[0],
           proto: icmpNotationConsistent ? icmpNotation[1].toUpperCase() : singleTransport?.proto,
           reuseKeys: decisionKeys.length > 0 ? decisionKeys : undefined,
           technicalConflict: technicalConflict || undefined,
