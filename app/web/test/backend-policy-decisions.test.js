@@ -102,6 +102,23 @@ test('FF2-15 crée le service nommé avec le tuple unique observé', () => {
   assert.match(cli, /set service "MyApp"/);
 });
 
+test('les actions terminales FortiOS prouvent les décisions de policy', () => {
+  const config = fortiConfig();
+  const authoritative = analyzePolicies([policy()], config);
+  const submitted = structuredClone(authoritative);
+
+  for (const action of ['close', 'timeout', 'client-rst', 'server-rst']) {
+    const decision = applyPolicyUserDecisions(
+      authoritative,
+      submitted,
+      config,
+      [observedFlow({ action })],
+    );
+
+    assert.equal(decision.ok, true, `${action}: ${JSON.stringify(decision.issues)}`);
+  }
+});
+
 test('FF2-04 conserve action, log et profils de sécurité jusqu’à la CLI', () => {
   const config = fortiConfig(`
 config ips sensor

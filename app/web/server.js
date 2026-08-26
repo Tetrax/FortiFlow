@@ -139,7 +139,7 @@ function requireSession(req, res) {
   return s;
 }
 
-function preparePolicyDecisions(session, selectedPolicies, opts = {}) {
+function preparePolicyAnalysis(session, selectedPolicies, opts = {}) {
   const optionDecision = validateGenerationOptions(opts, session.fortiConfig);
   const normalizedOpts = optionDecision.opts;
   let fortiConfig = session.fortiConfig;
@@ -153,7 +153,14 @@ function preparePolicyDecisions(session, selectedPolicies, opts = {}) {
   const submittedPolicies = preserveDestinationServiceAffinity(selectedPolicies);
   const shapeDecision = validatePolicyDecisionShapes(submittedPolicies);
   if (!shapeDecision.ok) {
-    return { ok: false, issues: [...optionDecision.issues, ...shapeDecision.issues], policies: [], fortiConfig, opts: normalizedOpts };
+    return {
+      ok: false,
+      issues: [...optionDecision.issues, ...shapeDecision.issues],
+      policies: [],
+      submittedPolicies,
+      fortiConfig,
+      opts: normalizedOpts,
+    };
   }
   const analysisInput = structuredClone(submittedPolicies);
   for (const policy of analysisInput) delete policy._mergedServices;
@@ -162,14 +169,77 @@ function preparePolicyDecisions(session, selectedPolicies, opts = {}) {
     fortiConfig,
     normalizedOpts.preferredWanIntf,
   );
-  const decision = applyPolicyUserDecisions(
-    authoritativePolicies,
+  return {
+    ok: optionDecision.issues.length === 0,
+    issues: optionDecision.issues,
+    policies: authoritativePolicies,
     submittedPolicies,
     fortiConfig,
+    opts: normalizedOpts,
+  };
+}
+
+function preparePolicyDecisions(session, selectedPolicies, opts = {}) {
+  const analysis = preparePolicyAnalysis(session, selectedPolicies, opts);
+  if (!analysis.ok) return analysis;
+  const decision = applyPolicyUserDecisions(
+    analysis.policies,
+    analysis.submittedPolicies,
+    analysis.fortiConfig,
     session.data?.flows || [],
   );
-  const issues = [...optionDecision.issues, ...decision.issues];
-  return { ...decision, ok: issues.length === 0, issues, fortiConfig, opts: normalizedOpts };
+  const issues = [...analysis.issues, ...decision.issues];
+  return {
+    ...decision,
+    ok: issues.length === 0,
+    issues,
+    fortiConfig: analysis.fortiConfig,
+    opts: analysis.opts,
+  };
+}
+
+function buildDeployAnalysisResult(session, analyzed) {
+  const fortiConfig = session.fortiConfig;
+  const warnings = validateAgainstExisting(analyzed, fortiConfig.existingPolicies || []);
+  const cidrIndex = new Map();
+  for (const [name, address] of Object.entries(fortiConfig.addresses || {})) {
+    if (address.cidr) cidrIndex.set(address.cidr, name);
+  }
+
+  const resolvedHosts = {};
+  for (const policy of analyzed) {
+    for (const host of [...(policy.srcHosts || []), ...(policy.dstHosts || [])]) {
+      if (!resolvedHosts[host]) {
+        const found = cidrIndex.get(`${host}/32`) || cidrIndex.get(host);
+        if (found) resolvedHosts[host] = found;
+      }
+    }
+  }
+
+  const relevantSrcs = new Set();
+  const relevantDsts = new Set();
+  for (const policy of analyzed) {
+    for (const host of (policy.srcHosts || [])) relevantSrcs.add(host);
+    for (const host of (policy.dstHosts || [])) relevantDsts.add(host);
+  }
+  const hostPairServices = {};
+  for (const flow of (session.data?.flows || [])) {
+    if (flow.action !== 'accept' || !flow.srcip || !flow.dstip || !flow.service) continue;
+    const dstOk = relevantDsts.has(flow.dstip) || flow.dstType === 'public';
+    if (!relevantSrcs.has(flow.srcip) || !dstOk) continue;
+    const key = `${flow.srcip}|${flow.dstip}`;
+    if (!hostPairServices[key]) hostPairServices[key] = [];
+    const service = flow.service.toUpperCase();
+    if (!hostPairServices[key].includes(service)) hostPairServices[key].push(service);
+  }
+
+  return {
+    analyzed,
+    addrGroups: fortiConfig.addressGroups || {},
+    warnings,
+    resolvedHosts,
+    hostPairServices,
+  };
 }
 
 // Vérifie si une valeur IP correspond au terme recherché.
@@ -1547,6 +1617,28 @@ app.post('/api/deploy/dynamic-routes', (req, res) => {
   res.json({ added, total: parsed.length, routes: parsed });
 });
 
+// POST /api/deploy/analyze — enrich raw traffic policies before user decisions
+app.post('/api/deploy/analyze', (req, res) => {
+  const s = requireSession(req, res);
+  if (!s) return;
+  if (!s.fortiConfig) return res.status(404).json({ error: 'Aucune config FortiGate chargée' });
+
+  const { selectedPolicies, opts } = req.body || {};
+  if (!Array.isArray(selectedPolicies) || selectedPolicies.length === 0) {
+    return res.status(400).json({ error: 'selectedPolicies requis' });
+  }
+
+  try {
+    const analysis = preparePolicyAnalysis(s, selectedPolicies, opts || {});
+    if (!analysis.ok) {
+      return res.status(422).json({ error: 'Analyse de policies invalide', code: 'POLICY_ANALYSIS_INVALID', issues: analysis.issues });
+    }
+    res.json(buildDeployAnalysisResult(s, analysis.policies));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /api/deploy/preflight — validate before generating CLI
 app.post('/api/deploy/preflight', (req, res) => {
   const s = requireSession(req, res);
@@ -1594,6 +1686,18 @@ app.post('/api/deploy/generate', (req, res) => {
   }
 
   try {
+    const legacyAnalysisRequest = selectedPolicies.every(policy =>
+      policy && typeof policy === 'object'
+      && !Object.prototype.hasOwnProperty.call(policy, 'analysis')
+    );
+    if (legacyAnalysisRequest) {
+      const analysis = preparePolicyAnalysis(s, selectedPolicies, opts || {});
+      if (!analysis.ok) {
+        return res.status(422).json({ error: 'Analyse de policies invalide', code: 'POLICY_ANALYSIS_INVALID', issues: analysis.issues });
+      }
+      return res.json(buildDeployAnalysisResult(s, analysis.policies));
+    }
+
     const decision = preparePolicyDecisions(s, selectedPolicies, opts || {});
     if (!decision.ok) {
       return res.status(422).json({ error: 'Décision utilisateur invalide', code: 'POLICY_DECISION_INVALID', issues: decision.issues });

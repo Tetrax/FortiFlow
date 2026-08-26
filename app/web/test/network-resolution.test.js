@@ -212,10 +212,30 @@ end
     ['10.250.16.0/23', '10.250.7.0/24'],
   ]);
 
-  const generateResponse = await fetch(`${baseUrl}/api/deploy/generate?session=${sessionId}`, {
+  const legacyAnalysisResponse = await fetch(`${baseUrl}/api/deploy/generate?session=${sessionId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ selectedPolicies: policies, opts: {} }),
+  });
+  assert.equal(legacyAnalysisResponse.status, 200, serverOutput);
+  const legacyAnalysisResult = await legacyAnalysisResponse.json();
+  assert.equal(legacyAnalysisResult.cli, undefined);
+  assert.ok(legacyAnalysisResult.analyzed[0].analysis);
+
+  const analysisResponse = await fetch(`${baseUrl}/api/deploy/analyze?session=${sessionId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ selectedPolicies: policies, opts: {} }),
+  });
+  assert.equal(analysisResponse.status, 200, serverOutput);
+  const analysisResult = await analysisResponse.json();
+  assert.equal(analysisResult.analyzed.length, 1);
+  assert.ok(analysisResult.analyzed[0].analysis);
+
+  const generateResponse = await fetch(`${baseUrl}/api/deploy/generate?session=${sessionId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ selectedPolicies: analysisResult.analyzed, opts: {} }),
   });
   assert.equal(generateResponse.status, 200, serverOutput);
   const generated = await generateResponse.json();

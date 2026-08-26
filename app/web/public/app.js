@@ -6669,7 +6669,7 @@ async function analyzeDeployPolicies() {
       .filter(i => i.isWan)
       .map(i => i.name);
 
-    const r = await fetch(`/api/deploy/generate?session=${state.session}`, {
+    const r = await fetch(`/api/deploy/analyze?session=${state.session}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ selectedPolicies: rawPolicies, opts: { preferredWanIntf, wanOverrides } }),

@@ -2088,7 +2088,12 @@ function validatePolicyDecisionShapes(policies) {
 }
 
 function isPolicyEvidenceFlow(flow) {
-  return ['accept', 'deny', 'drop'].includes(String(flow?.action || '').toLowerCase());
+  return [
+    'accept', 'allow', 'allowed', 'pass', 'start',
+    'close', 'timeout', 'client-rst', 'server-rst', 'ip-conn',
+    'deny', 'denied', 'drop', 'dropped', 'block', 'blocked',
+    'reject', 'rejected', 'violation',
+  ].includes(String(flow?.action || '').toLowerCase());
 }
 
 function observedServiceTuples(policy, serviceLabel, observedFlows) {
