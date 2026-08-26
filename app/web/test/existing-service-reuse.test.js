@@ -262,3 +262,83 @@ end
   }
   assert.match(cli, /edit "FF_SVC_65000_TCP"/);
 });
+
+test('réutilise un range standard identique au référentiel prédéfini sans promouvoir les ranges custom', () => {
+  const config = parseFortiConfig(`
+config firewall address
+    edit "SRC"
+        set subnet 10.0.0.0 255.255.255.0
+    next
+    edit "DST"
+        set subnet 10.0.1.0 255.255.255.0
+    next
+end
+config system interface
+    edit "LAN"
+        set ip 10.0.0.1 255.255.255.0
+    next
+    edit "DMZ"
+        set ip 10.0.1.1 255.255.255.0
+    next
+end
+config firewall service custom
+    edit "DHCP"
+        set udp-portrange 67-68
+    next
+    edit "DHCP-LIKE"
+        set udp-portrange 67-68
+    next
+    edit "APP-WIDE"
+        set tcp-portrange 400-500
+    next
+end
+`);
+
+  const policies = [
+    policy({ services: ['DHCP'], ports: [67], protos: ['UDP'] }),
+    policy({ services: ['DHCP-LIKE'], ports: [67], protos: ['UDP'] }),
+    policy({ services: ['APP-WIDE'], ports: [443], protos: ['TCP'] }),
+    policy({ services: ['TCP/65000'], ports: [65000], protos: ['TCP'] }),
+  ];
+  const observedFlows = [
+    flow('DHCP', 67, 'UDP'),
+    flow('DHCP-LIKE', 67, 'UDP'),
+    flow('APP-WIDE', 443, 'TCP'),
+    flow('TCP/65000', 65000, 'TCP'),
+  ];
+
+  const analyzed = analyzePolicies(policies, config, undefined, observedFlows);
+  const dhcp = analyzed[0].analysis.services[0];
+  assert.equal(dhcp.found, true);
+  assert.equal(dhcp.name, 'DHCP');
+  assert.equal(dhcp.compatibleMatch, undefined);
+  assert.equal(dhcp.portHint, 'UDP/67-68');
+
+  for (const item of analyzed.slice(1, 3).map(result => result.analysis.services[0])) {
+    assert.equal(item.found, false);
+    assert.equal(item.compatibilityAccepted, undefined);
+    assert.ok(item.compatibleMatch);
+  }
+  assert.equal(analyzed[1].analysis.services[0].compatibleMatch.name, 'DHCP-LIKE');
+  assert.equal(analyzed[2].analysis.services[0].compatibleMatch.name, 'APP-WIDE');
+
+  const missing = analyzed[3].analysis.services[0];
+  assert.equal(missing.found, false);
+  assert.equal(missing.suggestedName, 'FF_SVC_65000_TCP');
+
+  const decision = applyPolicyUserDecisions(
+    [analyzed[0]],
+    [structuredClone(analyzed[0])],
+    config,
+    observedFlows,
+  );
+  assert.equal(decision.ok, true, JSON.stringify(decision.issues));
+  const cli = generateConfig([decision.policies[0], analyzed[3]], {
+    addresses: config.addresses,
+    addressGroups: config.addressGroups,
+    zones: config.zones,
+  });
+  assert.doesNotMatch(cli, /edit "DHCP"/);
+  assert.match(cli, /set service "DHCP"/);
+  assert.match(cli, /edit "FF_SVC_65000_TCP"/);
+});

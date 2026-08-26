@@ -1158,6 +1158,30 @@ function classifyPredefinedService(name, observedPorts, protoName, observedTuple
   };
 }
 
+function customServiceMatchesPredefined(name, service) {
+  const coverage = new Set();
+  for (const [port, entry] of Object.entries(PREDEFINED)) {
+    if (entry.name.toLowerCase() !== String(name || '').toLowerCase()) continue;
+    if (entry.proto === 'both') {
+      coverage.add(`TCP/${port}`);
+      coverage.add(`UDP/${port}`);
+    } else {
+      coverage.add(`${entry.proto.toUpperCase()}/${port}`);
+    }
+  }
+  if (coverage.size === 0) return false;
+  const configuredCount = mergedRangeCount(serviceRanges(service, false))
+    + mergedRangeCount(serviceRanges(service, true));
+  if (configuredCount !== coverage.size) return false;
+  return [...coverage].every(key => {
+    const [proto, portText] = key.split('/');
+    if (!serviceAllowsTransport(service, proto)) return false;
+    const port = Number(portText);
+    return serviceRanges(service, proto === 'UDP')
+      .some(range => port >= range.start && port <= range.end);
+  });
+}
+
 function selectNamedResolution(resolutions) {
   const exact = resolutions.filter(resolution => resolution?.found);
   const exactNames = [...new Set(exact.map(resolution => resolution.name))];
@@ -1199,7 +1223,8 @@ function findServiceByName(label, observedPorts, protoName, customServices, obse
     ];
     if (observedTuples.length > 0 && resolution?.compatibleMatch
         && configuredRanges.length > 0
-        && configuredRanges.every(range => range.start === range.end)) {
+        && (configuredRanges.every(range => range.start === range.end)
+          || customServiceMatchesPredefined(exactCustom[0], exactCustom[1]))) {
       const exactMatch = {
         ...resolution.compatibleMatch,
         portSpec: formatCustomServicePortHint(exactCustom[1]),
@@ -2335,7 +2360,8 @@ function foundServiceEvidenceProven(service, evidenceFlows, fortiConfig) {
       ...serviceRanges(custom, true),
     ];
     return configuredRanges.length > 0
-      && configuredRanges.every(range => range.start === range.end);
+      && (configuredRanges.every(range => range.start === range.end)
+        || customServiceMatchesPredefined(service.name, custom));
   }
   const coverageCount = (serviceAllowsTransport(custom, 'TCP')
     ? mergedRangeCount(serviceRanges(custom, false)) : 0)
