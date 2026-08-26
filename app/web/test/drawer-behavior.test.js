@@ -368,6 +368,17 @@ test('_serviceReuse est créé uniquement par l’action utiliser service exista
   assert.doesNotMatch(harness.body.innerHTML, /drawer-use-compatible-service/);
 });
 
+test('une policy incomplète reste ouvrable et éditable dans le drawer', () => {
+  const policy = drawerPolicy([52980]);
+  policy.analysis.srcAddr = { found: false, cidr: '10.0.0.0/24', suggestedName: 'FF_10_0_0_0_24' };
+  const harness = createDrawerHarness(policy);
+
+  assert.match(harness.body.innerHTML, /drawer-src-name/);
+  assert.match(harness.body.innerHTML, /drawer-svc-name/);
+  assert.match(harness.body.innerHTML, /MS-RPC-DYNAMIC/);
+  assert.equal(harness.drawer.classList?.contains?.('open') ?? true, true);
+});
+
 test('créer un service spécifique retire toute réutilisation compatible du même port', () => {
   const policy = drawerPolicy([52980]);
   policy._serviceReuse = { 'TCP/52980': 'MS-RPC-DYNAMIC' };

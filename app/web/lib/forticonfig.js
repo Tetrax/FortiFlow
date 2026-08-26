@@ -1276,7 +1276,9 @@ function findService(port, protoName, customServices, _opts) {
 
   // Predefined objects can cover several protocol/port tuples under one name.
   const predef = findPredefinedService(p, protoName);
-  if (predef) {
+  const predefinedShadowed = predef && Object.keys(customServices || {})
+    .some(name => name.toLowerCase() === predef.toLowerCase());
+  if (predef && !predefinedShadowed) {
     const resolution = classifyPredefinedService(predef, [p], proto);
     if (resolution?.found) exactMatches.push(resolution.exactMatch);
     else if (resolution?.compatibleMatch) compatibleMatches.push(resolution.compatibleMatch);

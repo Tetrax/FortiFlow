@@ -2712,6 +2712,9 @@ function _snapDrawer(p) {
   snap._excludedDstHosts  = p._excludedDstHosts  ? new Set(p._excludedDstHosts) : undefined;
   if (_drawerHistory.length >= DRAWER_HISTORY_MAX) _drawerHistory.shift();
   _drawerHistory.push({ idx: _drawerIdx, snap });
+  delete p._backendIssues;
+  delete p._backendIssueKind;
+  delete p._backendValidated;
 }
 
 function mountDrawer() {
@@ -7118,6 +7121,8 @@ function isPolicyComplete(p, _debug) {
   const a = p.analysis || {};
   const dbg = msg => { if (_debug) console.log('[complete]', msg, 'dstMode:', p._dstMode, '_use32Dst:', p._use32Dst, '_isMultiDst:', p._isMultiDst, 'dstHosts:', p.dstHosts, '_dstHostsFound:', p._dstHostsFound, '_dstHostNames:', p._dstHostNames, '_multiDstSubnets:', JSON.stringify(p._multiDstSubnets)); };
 
+  if (p._backendIssues?.length) { dbg(`FAIL: ${p._backendIssues.join('; ')}`); return false; }
+
   // Interfaces must be explicitly selected
   if (!p._srcintf) { dbg('FAIL: no _srcintf'); return false; }
   if (!p._dstintf) { dbg('FAIL: no _dstintf'); return false; }
@@ -7820,13 +7825,20 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     const srcHostCount = (p.srcHosts || []).length;
     const srcModeBadge = srcHostCount > 0 ? ` <span class="dst-count-badge">${srcHostCount}h</span>` : '';
 
-    const rowStatus = (p._disabled || isPolicyComplete(p)) ? 'ok' : 'warn';
-    const statusTitle = (p.analysis?.missingFields || []).join(', ') || '';
+    const backendIssues = p._backendIssues || [];
+    const backendIncomplete = p._backendIssueKind === 'incomplete';
+    const fieldComplete = p._disabled || isPolicyComplete(p);
+    const rowStatus = backendIssues.length > 0 ? 'error' : fieldComplete ? 'ok' : 'warn';
+    const statusTitle = backendIssues.join('\n') || (p.analysis?.missingFields || []).join(', ') || '';
     const isHighlighted = !isAgg && idx === deployState._highlightIdx;
     if (isHighlighted) deployState._highlightIdx = null; // consommer une seule fois
     const isScan = isScanPolicy(p);
-    const objectState = rowStatus === 'ok'
-      ? '<span class="policy-ready">Prête</span>'
+    const objectState = backendIssues.length > 0
+      ? `<span class="policy-needs-work" title="${escHtml(statusTitle)}">${backendIncomplete ? 'À compléter' : 'Bloquée sécurité'}</span>`
+      : fieldComplete
+      ? p._backendValidated
+        ? '<span class="policy-ready">Prête</span>'
+        : '<span class="policy-ready">Complète</span>'
       : `<span class="policy-needs-work" title="${escHtml(statusTitle)}">À compléter</span>`;
     const interfaceSummary = `<span class="policy-interface-pair">${srcIntf}<span class="policy-interface-arrow">→</span>${dstIntf}</span>`;
     return `
@@ -7993,11 +8005,44 @@ function syncNoRcvdInfoBtn() {
   if (count > 0) updateNoRcvdToggleBtn();
 }
 
+function formatPolicyValidationError(payload) {
+  const issues = Array.isArray(payload?.issues) ? payload.issues
+    : Array.isArray(payload?.preflight?.issues) ? payload.preflight.issues : [];
+  const title = payload?.error || 'Validation backend refusée';
+  if (issues.length === 0) return title;
+  const prefix = payload?.code === 'POLICY_DECISION_INVALID' ? 'Blocage sécurité'
+    : payload?.preflight ? 'À compléter' : 'Validation bloquante';
+  return `${prefix} — ${title}\n\n${issues.map(issue =>
+    `• ${issue.msg || issue.code || 'Cause non précisée'}`).join('\n')}`;
+}
+
+function markSelectedPolicyIssues(issues, selectedIndexes, kind = 'security') {
+  for (const index of selectedIndexes) delete deployState.analyzed[index]._backendIssues;
+  for (const issue of issues) {
+    const position = String(issue?.msg || '').match(/^Policy #(\d+):/);
+    const indexes = position && selectedIndexes[Number(position[1]) - 1] !== undefined
+      ? [selectedIndexes[Number(position[1]) - 1]] : selectedIndexes;
+    const detail = `[${issue?.code || 'VALIDATION'}] ${issue?.msg || 'Cause non précisée'}`;
+    for (const index of indexes) {
+      const policy = deployState.analyzed[index];
+      if (!policy) continue;
+      if (!policy._backendIssues) policy._backendIssues = [];
+      policy._backendIssueKind = kind;
+      if (!policy._backendIssues.includes(detail)) policy._backendIssues.push(detail);
+    }
+  }
+  renderDeployPolicies(filterDeployPolicies(), false);
+}
+
 async function generateDeployConf() {
   if (!deployState.analyzed) return;
 
+  const selectedIndexes = [...deployState.selected]
+    .filter(index => index >= 0 && index < deployState.analyzed.length)
+    .sort((a, b) => a - b);
+
   // Vérification services non qualifiés dans la sélection
-  const _selectedForCheck = deployState.analyzed.filter((_, i) => deployState.selected.has(i));
+  const _selectedForCheck = selectedIndexes.map(index => deployState.analyzed[index]);
   const _unqualMap = _collectUnqualifiedSvcs(_selectedForCheck);
   if (_unqualMap.size > 0) {
     const lines = [..._unqualMap.values()]
@@ -8014,9 +8059,11 @@ async function generateDeployConf() {
   }
 
   let selectedPolicies;
+  const selectedCompleteIndexes = selectedIndexes
+    .filter(index => isPolicyComplete(deployState.analyzed[index]));
   if (deployState.viewMode === 'sequence') {
     // In sequence mode, aggregate selected policies before sending
-    const selected = deployState.analyzed.filter((_, i) => deployState.selected.has(i) && isPolicyComplete(deployState.analyzed[i]));
+    const selected = selectedCompleteIndexes.map(index => deployState.analyzed[index]);
     const aggregated = buildSequenceAggregated(selected);
     selectedPolicies = aggregated.map(p => ({
       ...p,
@@ -8038,8 +8085,8 @@ async function generateDeployConf() {
       disabled:     p._disabled || false,
     }));
   } else {
-    selectedPolicies = deployState.analyzed
-      .filter((_, i) => deployState.selected.has(i) && isPolicyComplete(deployState.analyzed[i]))
+    selectedPolicies = selectedCompleteIndexes
+      .map(index => deployState.analyzed[index])
       .map(p => ({
         ...p,
         services:        (p.analysis?.services || []).filter(s => !s._isMerged).map(s => s.label),
@@ -8061,10 +8108,15 @@ async function generateDeployConf() {
       }));
   }
 
-  const skippedCount = deployState.analyzed.filter((_, i) => deployState.selected.has(i) && !isPolicyComplete(deployState.analyzed[i])).length;
+  const skippedCount = selectedIndexes.length - selectedCompleteIndexes.length;
   if (!selectedPolicies.length) {
+    const details = selectedIndexes.map(index => {
+      const p = deployState.analyzed[index];
+      const missing = (p._backendIssues || p.analysis?.missingFields || []).join(', ') || 'ouvrir le drawer pour compléter les champs obligatoires';
+      return `Policy ${index + 1} — ${missing}`;
+    }).join('\n');
     alert(skippedCount > 0
-      ? `Aucune policy complète à générer.\n${skippedCount} policy${skippedCount > 1 ? 's' : ''} incomplète${skippedCount > 1 ? 's' : ''} ignorée${skippedCount > 1 ? 's' : ''} (badge rouge/orange sur la gauche).`
+      ? `Aucune policy complète à générer.\n\n${details}`
       : 'Sélectionnez au moins une policy');
     return;
   }
@@ -8089,6 +8141,9 @@ async function generateDeployConf() {
 
   const btn = el('btn-generate');
   if (btn) { btn.disabled = true; btn.textContent = 'Validation…'; }
+  const resetGenerateButton = () => {
+    if (btn) { btn.disabled = false; btn.textContent = '⬇ Générer config FortiGate'; }
+  };
 
   // Preflight validation
   try {
@@ -8097,14 +8152,33 @@ async function generateDeployConf() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ selectedPolicies, opts }),
     });
-    if (pfRes.ok) {
-      const pf = await pfRes.json();
-      if (pf.errors > 0 || pf.warnings > 0) {
-        const proceed = await showPreflightModal(pf);
-        if (!proceed) { if (btn) { btn.disabled = false; btn.textContent = '⬇ Générer config FortiGate'; } return; }
-      }
+    const pf = await pfRes.json().catch(() => ({}));
+    if (!pfRes.ok) {
+      const pfIssues = pf.issues || pf.preflight?.issues || [];
+      markSelectedPolicyIssues(
+        pfIssues,
+        selectedCompleteIndexes,
+        pf.code === 'POLICY_DECISION_INVALID' ? 'security' : 'incomplete',
+      );
+      alert(formatPolicyValidationError(pf));
+      resetGenerateButton();
+      return;
     }
-  } catch { /* non-bloquant */ }
+    for (const index of selectedCompleteIndexes) {
+      deployState.analyzed[index]._backendValidated = true;
+      delete deployState.analyzed[index]._backendIssues;
+      delete deployState.analyzed[index]._backendIssueKind;
+    }
+    renderDeployPolicies(filterDeployPolicies(), false);
+    if (pf.errors > 0 || pf.warnings > 0) {
+      const proceed = await showPreflightModal(pf);
+      if (!proceed) { resetGenerateButton(); return; }
+    }
+  } catch (err) {
+    alert(`Validation backend indisponible — ${err.message}`);
+    resetGenerateButton();
+    return;
+  }
 
   if (btn) btn.textContent = 'Génération…';
 
@@ -8115,7 +8189,17 @@ async function generateDeployConf() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ selectedPolicies, opts }),
     });
-    if (!r.ok) { const e = await r.json(); alert(e.error || 'Erreur génération'); return; }
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({}));
+      const issues = e.issues || e.preflight?.issues || [];
+      markSelectedPolicyIssues(
+        issues,
+        selectedCompleteIndexes,
+        e.code === 'POLICY_DECISION_INVALID' ? 'security' : 'incomplete',
+      );
+      alert(formatPolicyValidationError(e));
+      return;
+    }
     const { cli, existingPoliciesCli } = await r.json();
 
     deployState.generatedCli      = cli;
@@ -8196,7 +8280,7 @@ async function generateDeployConf() {
   } catch (err) {
     alert('Erreur : ' + err.message);
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = '⬇ Générer config FortiGate'; }
+    resetGenerateButton();
   }
 }
 

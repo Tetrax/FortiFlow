@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
 
 const {
   parseFortiConfig,
@@ -119,6 +120,42 @@ test('les actions terminales FortiOS prouvent les décisions de policy', () => {
   }
 });
 
+test('une policy complète sélectionnée génère seule malgré une policy non sélectionnée invalide', () => {
+  const config = fortiConfig(`
+config firewall service custom
+    edit "APPX"
+        set tcp-portrange 5555
+    next
+end
+  `);
+  const selected = policy({ srcintf: 'LAN', dstintf: 'DMZ' });
+  const authoritative = analyzePolicies([selected], config, undefined, [observedFlow()]);
+  const decision = applyPolicyUserDecisions(authoritative, [selected], config, [observedFlow()]);
+  assert.equal(decision.ok, true, JSON.stringify(decision.issues));
+
+  const cli = generateConfig(decision.policies, {
+    addresses: config.addresses,
+    addressGroups: config.addressGroups,
+    zones: config.zones,
+  });
+  assert.match(cli, /set service "APPX"/);
+  assert.equal((cli.match(/edit 0/g) || []).length, 1);
+
+  const unselectedInvalid = policy({
+    dstTarget: '10.99.99.0/24',
+    dstHosts: ['10.99.99.10'],
+    srcintf: 'LAN',
+    dstintf: 'FORGED',
+  });
+  const withUnselected = applyPolicyUserDecisions(
+    analyzePolicies([selected, unselectedInvalid], config, undefined, [observedFlow()]),
+    [selected, unselectedInvalid],
+    config,
+    [observedFlow()],
+  );
+  assert.equal(withUnselected.ok, false, 'la fixture non sélectionnée est volontairement bloquante si elle est transmise');
+});
+
 test('FF2-04 conserve action, log et profils de sécurité jusqu’à la CLI', () => {
   const config = fortiConfig(`
 config ips sensor
@@ -165,6 +202,68 @@ test('FF2-04 sérialise les décisions du drawer dans les deux modes de vue', ()
   assert.equal((generate.match(/action:\s*p\._action\s*\|\|\s*null/g) || []).length, 2);
   assert.equal((generate.match(/log:\s*p\._log\s*\|\|\s*null/g) || []).length, 2);
   assert.match(generate, /body:\s*JSON\.stringify\(\{\s*selectedPolicies,\s*opts\s*\}\)/);
+});
+
+test('la génération restitue les causes backend et marque uniquement les policies sélectionnées', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  const start = source.indexOf('function formatPolicyValidationError');
+  const end = source.indexOf('\nfunction ', start + 20);
+  assert.ok(start >= 0 && end > start, 'formatter de validation introuvable');
+  const context = {};
+  vm.createContext(context);
+  vm.runInContext(source.slice(start, end), context);
+
+  const message = context.formatPolicyValidationError({
+    error: 'Décision utilisateur invalide',
+    issues: [
+      { code: 'SERVICE_REUSE_DECISION_INVALID', msg: 'Policy #1: service LDAP stale' },
+      { code: 'POLICY_AFFINITY_UNPROVEN', msg: 'Policy #1: combinaison non prouvée' },
+    ],
+  });
+  assert.match(message, /Décision utilisateur invalide/);
+  assert.match(message, /Policy #1: service LDAP stale/);
+  assert.match(message, /Policy #1: combinaison non prouvée/);
+  const incompleteMessage = context.formatPolicyValidationError({
+    error: 'Preflight refusé',
+    preflight: { issues: [{ level: 'error', msg: 'Policy #1: interface destination manquante' }] },
+  });
+  assert.match(incompleteMessage, /À compléter/);
+  assert.match(incompleteMessage, /Policy #1: interface destination manquante/);
+
+  const markStart = source.indexOf('function markSelectedPolicyIssues');
+  const markEnd = source.indexOf('\nasync function generateDeployConf', markStart);
+  const markContext = {
+    deployState: { analyzed: [{}, {}] },
+    renderDeployPolicies() {},
+    filterDeployPolicies() { return []; },
+  };
+  vm.createContext(markContext);
+  vm.runInContext(source.slice(markStart, markEnd), markContext);
+  markContext.markSelectedPolicyIssues([
+    { code: 'POLICY_AFFINITY_UNPROVEN', msg: 'Policy #1: combinaison non prouvée' },
+  ], [0]);
+  assert.deepEqual(
+    [...markContext.deployState.analyzed[0]._backendIssues],
+    ['[POLICY_AFFINITY_UNPROVEN] Policy #1: combinaison non prouvée'],
+  );
+  assert.equal(markContext.deployState.analyzed[1]._backendIssues, undefined);
+
+  const generateStart = source.indexOf('async function generateDeployConf()');
+  const generateEnd = source.indexOf('\n// ─── Preflight modal', generateStart);
+  const generate = source.slice(generateStart, generateEnd);
+  assert.match(generate, /if \(!pfRes\.ok\)[\s\S]*formatPolicyValidationError[\s\S]*return;/);
+  assert.match(generate, /if \(!pfRes\.ok\)[\s\S]*resetGenerateButton\(\)[\s\S]*return;/);
+  assert.match(generate, /pf\.preflight\?\.issues/);
+  assert.doesNotMatch(generate, /catch \{ \/\* non-bloquant \*\//);
+  assert.match(generate, /Validation backend indisponible/);
+  assert.match(generate, /catch \(err\)[\s\S]*resetGenerateButton\(\)[\s\S]*return;/);
+  assert.match(generate, /if \(!r\.ok\)[\s\S]*formatPolicyValidationError/);
+  assert.match(generate, /const selectedIndexes = \[\.\.\.deployState\.selected\]/);
+  assert.match(generate, /selectedPolicies = selectedCompleteIndexes[\s\S]*\.map\(index => deployState\.analyzed\[index\]\)/);
+  assert.doesNotMatch(generate, /selectedPolicies\s*=\s*deployState\.analyzed\.map/);
+  assert.match(source, /_backendIssues[\s\S]*Bloquée sécurité/);
+  assert.match(source, /_backendValidated[\s\S]*Prête[\s\S]*Complète/);
+  assert.match(source, /delete p\._backendIssues/);
 });
 
 test('FF2-01 refuse une interface utilisateur absente de la configuration', () => {

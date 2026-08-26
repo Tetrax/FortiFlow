@@ -342,6 +342,60 @@ end
   assert.doesNotMatch(cli, /FF_SVC_TCP_MULTI|FF_SVC_52121_TCP|FF_SVC_52134_TCP|FF_SVC_62966_TCP/);
 });
 
+test('ne propose pas un service prédéfini masqué par un objet FortiGate du même nom', () => {
+  const config = parseFortiConfig(`
+config firewall address
+    edit "SRC"
+        set subnet 10.0.0.0 255.255.255.0
+    next
+    edit "DST"
+        set subnet 10.0.1.0 255.255.255.0
+    next
+end
+config system interface
+    edit "LAN"
+        set ip 10.0.0.1 255.255.255.0
+    next
+    edit "DMZ"
+        set ip 10.0.1.1 255.255.255.0
+    next
+end
+config firewall service custom
+    edit "LDAP"
+        set tcp-portrange 389
+    next
+end
+  `);
+  const selected = {
+    srcSubnet: '10.0.0.0/24', dstTarget: '10.0.1.0/24', dstType: 'private',
+    services: ['LDAP', 'TCP/3268'], ports: [389, 3268], protos: ['TCP'],
+    srcHosts: ['10.0.0.10'], dstHosts: ['10.0.1.20'],
+    srcintf: 'LAN', dstintf: 'DMZ',
+  };
+  const flows = [389, 3268].map(port => ({
+    srcip: '10.0.0.10', dstip: '10.0.1.20', srcSubnet: '10.0.0.0/24', dstSubnet: '10.0.1.0/24', dstType: 'private',
+    srcintf: 'LAN', dstintf: 'DMZ', service: port === 389 ? 'LDAP' : 'TCP/3268',
+    dstport: String(port), proto: '6', protoName: 'TCP', action: 'accept',
+  }));
+
+  const authoritative = analyzePolicies([selected], config, undefined, flows);
+  const raw3268 = authoritative[0].analysis.services.find(service => service.port === 3268);
+  assert.equal(raw3268.found, false);
+  assert.equal(raw3268.compatibleMatch, undefined);
+  assert.ok(!(raw3268.compatibleMatches || []).some(match => match.name === 'LDAP'));
+
+  const forged = structuredClone(selected);
+  forged._serviceReuse = { 'TCP/3268': 'LDAP' };
+  const rejected = applyPolicyUserDecisions(
+    analyzePolicies([forged], config, undefined, flows),
+    [forged],
+    config,
+    flows,
+  );
+  assert.equal(rejected.ok, false);
+  assert.ok(rejected.issues.some(issue => issue.code === 'SERVICE_REUSE_DECISION_INVALID'));
+});
+
 test('ne propose jamais ALL_TCP comme service compatible', () => {
   const config = configWithServices(`
     edit "ALL_TCP"
