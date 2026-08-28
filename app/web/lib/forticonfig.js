@@ -1470,6 +1470,8 @@ function suggestNetworkName(cidr) {
 // policies d'origine. Chaque rectangle correspond uniquement à des tuples
 // réellement présents dans _mergedFrom.
 function preserveDestinationServiceAffinity(policies) {
+  const strategyValidation = validatePolicyStrategyBatch(policies);
+  const strategyBypass = strategyValidation.hasStrategy && strategyValidation.ok;
   const serviceKey = (svc) => {
     if (typeof svc === 'string') return `label:${svc}`;
     const label = svc?.label || svc?.name || '';
@@ -1484,6 +1486,7 @@ function preserveDestinationServiceAffinity(policies) {
   const serviceLabel = (svc) => typeof svc === 'string' ? svc : (svc?.label || svc?.name || '');
 
   return (policies || []).flatMap((policy) => {
+    if (strategyBypass) return [policy];
     if (!policy || typeof policy !== 'object' || Array.isArray(policy)) return [policy];
     if ((policy.dstTarget === 'all' || policy._dstUseAll === true)
         && policy.dstType !== 'public' && policy._isWan !== true) return [policy];
@@ -1534,8 +1537,9 @@ function preserveDestinationServiceAffinity(policies) {
     if (affinityProduct > 100000) return [policy];
     const submittedOrigins = policy._mergedFrom;
     if (submittedOrigins === undefined) return [policy];
+    const maxOrigins = policy._generationStrategy ? 10000 : 1000;
     if (!Array.isArray(submittedOrigins) || submittedOrigins.length === 0
-        || submittedOrigins.length > 1000
+        || submittedOrigins.length > maxOrigins
         || submittedOrigins.some(origin => typeof origin?.srcSubnet !== 'string' || !origin.srcSubnet
           || typeof origin?.dstTarget !== 'string' || !origin.dstTarget
           || (origin.action !== undefined && !['accept', 'deny', 'drop'].includes(origin.action))
@@ -1689,6 +1693,519 @@ function preserveDestinationServiceAffinity(policies) {
     });
     return result.length > 0 ? result : [policy];
   });
+}
+
+// ─── Generation strategies ───────────────────────────────────────────────────
+
+function strategyServiceKey(service) {
+  const label = typeof service === 'string' ? service : (service?.label || service?.name || '');
+  const technical = typeof service === 'string' ? [] : serviceTransportKeys(service).sort();
+  return technical.length > 0 ? `${label}|${technical.join(',')}` : `label:${label}`;
+}
+
+function strategyServiceSetKey(services) {
+  return (services || []).map(strategyServiceKey).sort().join('\u0001');
+}
+
+function strategyBoundaryKey(policy) {
+  const profiles = policy?._secProfiles || policy?.securityProfiles || {};
+  const normalizedProfiles = Object.keys(profiles).sort()
+    .map(key => `${key}:${profiles[key]}`).join(',');
+  return [
+    policy?._srcintf || policy?.srcintf || policy?.analysis?.srcZone || policy?.analysis?.srcIface || '',
+    policy?._dstintf || policy?.dstintf || policy?.analysis?.dstZone || policy?.analysis?.dstIface || '',
+    policy?.dstType === 'public' || policy?._isWan === true ? 'wan' : 'lan',
+    policy?._action || policy?.action || 'accept',
+    policy?._log || policy?.log || 'all',
+    policy?._nat ?? policy?.nat ?? false,
+    policy?._disabled || policy?.disabled || false,
+    normalizedProfiles,
+  ].join('\u0002');
+}
+
+function strategyScopeMatches(policy, scope) {
+  if (scope === 'all') return true;
+  const internet = policy?.dstType === 'public' || policy?.dstTarget === 'all' || policy?._isWan === true;
+  return scope === 'internet' ? internet : !internet;
+}
+
+function strategyScopes(policy, side) {
+  const list = side === 'src' ? policy?.srcSubnets : policy?.dstTargets;
+  if (Array.isArray(list) && list.length > 0) {
+    return [...new Set(list.map(item => typeof item === 'string' ? item : item?.subnet).filter(Boolean))].sort();
+  }
+  const multi = side === 'src' ? policy?._multiSrcSubnets : policy?._multiDstSubnets;
+  if (Array.isArray(multi) && multi.length > 0) {
+    return [...new Set(multi.map(item => item?.subnet).filter(Boolean))].sort();
+  }
+  const value = side === 'src' ? policy?.srcSubnet : policy?.dstTarget;
+  return value ? [value] : [];
+}
+
+function strategyAtomicOrigins(policies) {
+  const origins = [];
+  for (const policy of (policies || [])) {
+    const submitted = Array.isArray(policy?._mergedFrom) && policy._mergedFrom.length > 0
+      ? policy._mergedFrom : null;
+    if (submitted) {
+      for (const origin of submitted) {
+        if (!origin?.srcSubnet || !origin?.dstTarget || !Array.isArray(origin.analysis?.services)) continue;
+        origins.push({
+          ...origin,
+          action: origin.action || policy._action || policy.action || 'accept',
+          analysis: { ...origin.analysis, services: [...origin.analysis.services] },
+          _template: policy,
+        });
+      }
+      continue;
+    }
+    const sources = strategyScopes(policy, 'src');
+    const destinations = strategyScopes(policy, 'dst');
+    const services = policy?.analysis?.services || [];
+    for (const source of sources) {
+      for (const destination of destinations) {
+        origins.push({
+          srcSubnet: source,
+          dstTarget: destination,
+          action: policy?._action || policy?.action || 'accept',
+          analysis: { services: [...services] },
+          _template: policy,
+        });
+      }
+    }
+  }
+  return origins.sort((a, b) => strategyBoundaryKey(a._template).localeCompare(strategyBoundaryKey(b._template))
+    || a.srcSubnet.localeCompare(b.srcSubnet)
+    || a.dstTarget.localeCompare(b.dstTarget)
+    || strategyServiceSetKey(a.analysis.services).localeCompare(strategyServiceSetKey(b.analysis.services)));
+}
+
+function strategyMetadata(origins, side, values) {
+  const index = new Map();
+  for (const origin of origins) {
+    const policy = origin._template || {};
+    const multi = side === 'src' ? policy._multiSrcSubnets : policy._multiDstSubnets;
+    for (const item of (multi || [])) {
+      if (item?.subnet && !index.has(item.subnet)) index.set(item.subnet, item);
+    }
+    const value = side === 'src' ? origin.srcSubnet : origin.dstTarget;
+    if (!value || index.has(value)) continue;
+    index.set(value, {
+      subnet: value,
+      hosts: side === 'src' ? (policy.srcHosts || []) : (policy.dstHosts || []),
+      useSubnet: side === 'src'
+        ? policy._use32Src !== true && policy._srcMode !== 'hosts'
+        : policy._use32Dst !== true && policy._dstMode !== 'hosts',
+      addrName: side === 'src'
+        ? (policy._srcAddrName || policy.analysis?.srcAddr?.name || '')
+        : (policy._dstAddrName || policy.analysis?.dstAddr?.name || ''),
+      addrFound: side === 'src' ? !!policy.analysis?.srcAddr?.found : !!policy.analysis?.dstAddr?.found,
+    });
+  }
+  return values.map(value => ({
+    subnet: value,
+    hosts: [...new Set(index.get(value)?.hosts || [])].sort(),
+    useSubnet: index.get(value)?.useSubnet !== false,
+    addrName: index.get(value)?.addrName || '',
+    addrFound: !!index.get(value)?.addrFound,
+  }));
+}
+
+function strategyUmbrella(origins, strategy) {
+  const base = origins[0]?._template || {};
+  const sources = [...new Set(origins.map(origin => origin.srcSubnet))].sort();
+  const destinations = [...new Set(origins.map(origin => origin.dstTarget))].sort();
+  const serviceMap = new Map();
+  for (const origin of origins) {
+    for (const service of origin.analysis.services || []) serviceMap.set(strategyServiceKey(service), service);
+  }
+  const services = [...serviceMap].sort(([a], [b]) => a.localeCompare(b)).map(([, service]) => service);
+  const sourceMetadata = strategyMetadata(origins, 'src', sources);
+  const destinationMetadata = strategyMetadata(origins, 'dst', destinations);
+  const submittedOrigins = origins.map(origin => ({
+    srcSubnet: origin.srcSubnet,
+    dstTarget: origin.dstTarget,
+    action: origin.action,
+    analysis: { services: [...origin.analysis.services] },
+  }));
+  const transportKeys = [...new Set(services.flatMap(serviceTransportKeys))].sort();
+  return {
+    ...base,
+    srcSubnet: sources[0],
+    srcSubnets: sources,
+    _multiSrcSubnets: sources.length > 1 ? sourceMetadata : undefined,
+    dstTarget: destinations[0],
+    dstTargets: destinations,
+    _isMultiDst: destinations.length > 1,
+    _multiDstSubnets: destinations.length > 1 ? destinationMetadata : undefined,
+    _dstUseAll: false,
+    srcHosts: [...new Set(sourceMetadata.flatMap(item => item.hosts))].sort(),
+    dstHosts: [...new Set(destinationMetadata.flatMap(item => item.hosts))].sort(),
+    _use32Src: sources.length === 1 && sourceMetadata[0]?.useSubnet === false,
+    _use32Dst: destinations.length === 1 && destinationMetadata[0]?.useSubnet === false,
+    services: services.map(service => typeof service === 'string' ? service : (service.label || service.name)).filter(Boolean),
+    ports: [...new Set(transportKeys.filter(key => /^(TCP|UDP)\/\d+$/.test(key))
+      .map(key => Number(key.split('/')[1])))].sort((a, b) => a - b),
+    protos: [...new Set(transportKeys.map(key => key.split('/')[0]))].sort(),
+    serviceDesc: services.map(service => typeof service === 'string' ? service : (service.label || service.name)).filter(Boolean).join(', '),
+    _mergedCount: submittedOrigins.length,
+    _mergedFrom: submittedOrigins,
+    _generationStrategy: strategy,
+    _srcAddrName: sources.length === 1 && sourceMetadata[0]?.addrFound ? sourceMetadata[0].addrName : '',
+    _dstAddrName: destinations.length === 1 && destinationMetadata[0]?.addrFound ? destinationMetadata[0].addrName : '',
+    _srcAddrGrpFound: false,
+    _dstAddrGrpFound: false,
+    _useSrcGroup: false,
+    _useDstGroup: false,
+    analysis: {
+      ...base.analysis,
+      services,
+      needsWork: services.some(service => !service?.found),
+    },
+  };
+}
+
+function strategyGroupOrigins(origins) {
+  const groups = new Map();
+  for (const origin of origins) {
+    const key = strategyBoundaryKey(origin._template);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(origin);
+  }
+  return [...groups].sort(([a], [b]) => a.localeCompare(b)).map(([, group]) => group);
+}
+
+function strategyBalanced(origins) {
+  return strategyGroupOrigins(origins).flatMap(group => {
+    const byService = new Map();
+    for (const origin of group) {
+      for (const service of origin.analysis.services || []) {
+        const key = strategyServiceKey(service);
+        if (!byService.has(key)) byService.set(key, { service, byDestination: new Map() });
+        const destinations = byService.get(key).byDestination;
+        if (!destinations.has(origin.dstTarget)) destinations.set(origin.dstTarget, new Set());
+        destinations.get(origin.dstTarget).add(origin.srcSubnet);
+      }
+    }
+    const rectangles = new Map();
+    for (const [serviceKey, entry] of [...byService].sort(([a], [b]) => a.localeCompare(b))) {
+      const bySources = new Map();
+      for (const [destination, sourceSet] of [...entry.byDestination].sort(([a], [b]) => a.localeCompare(b))) {
+        const sources = [...sourceSet].sort();
+        const signature = sources.join('\u0001');
+        if (!bySources.has(signature)) bySources.set(signature, { sources, destinations: [] });
+        bySources.get(signature).destinations.push(destination);
+      }
+      for (const rectangle of bySources.values()) {
+        rectangle.destinations.sort();
+        const rectangleKey = `${rectangle.sources.join('\u0001')}\u0002${rectangle.destinations.join('\u0001')}`;
+        if (!rectangles.has(rectangleKey)) rectangles.set(rectangleKey, new Map());
+        const tuples = rectangles.get(rectangleKey);
+        const sourceSet = new Set(rectangle.sources);
+        const destinationSet = new Set(rectangle.destinations);
+        for (const origin of group) {
+          if (!sourceSet.has(origin.srcSubnet) || !destinationSet.has(origin.dstTarget)) continue;
+          const selected = (origin.analysis.services || []).find(service => strategyServiceKey(service) === serviceKey);
+          if (!selected) continue;
+          const tupleKey = `${origin.srcSubnet}\u0001${origin.dstTarget}\u0001${serviceKey}`;
+          tuples.set(tupleKey, { ...origin, analysis: { ...origin.analysis, services: [selected] } });
+        }
+      }
+    }
+    return [...rectangles].sort(([a], [b]) => a.localeCompare(b))
+      .map(([, tuples]) => strategyUmbrella([...tuples.values()], 'balanced'));
+  });
+}
+
+function strategyRectangles(origins, orientation) {
+  const neighbors = new Map();
+  for (const origin of origins) {
+    const key = orientation === 'source' ? origin.srcSubnet : origin.dstTarget;
+    const value = orientation === 'source' ? origin.dstTarget : origin.srcSubnet;
+    if (!neighbors.has(key)) neighbors.set(key, new Set());
+    neighbors.get(key).add(value);
+  }
+  const grouped = new Map();
+  for (const [key, values] of [...neighbors].sort(([a], [b]) => a.localeCompare(b))) {
+    const signature = [...values].sort().join('\u0001');
+    if (!grouped.has(signature)) grouped.set(signature, []);
+    grouped.get(signature).push(key);
+  }
+  return [...grouped].sort(([a], [b]) => a.localeCompare(b)).map(([signature, keys]) => {
+    const values = signature ? signature.split('\u0001') : [];
+    const keySet = new Set(keys);
+    const valueSet = new Set(values);
+    return origins.filter(origin => orientation === 'source'
+      ? keySet.has(origin.srcSubnet) && valueSet.has(origin.dstTarget)
+      : keySet.has(origin.dstTarget) && valueSet.has(origin.srcSubnet));
+  });
+}
+
+function strategyCompact(origins) {
+  return strategyGroupOrigins(origins).flatMap(group => {
+    const balanced = strategyBalanced(group);
+    const byServices = new Map();
+    for (const origin of group) {
+      const key = strategyServiceSetKey(origin.analysis.services);
+      if (!byServices.has(key)) byServices.set(key, []);
+      byServices.get(key).push(origin);
+    }
+    const compact = [...byServices].sort(([a], [b]) => a.localeCompare(b)).flatMap(([, serviceOrigins]) => {
+      const bySource = strategyRectangles(serviceOrigins, 'source');
+      const byDestination = strategyRectangles(serviceOrigins, 'destination');
+      const rectangles = byDestination.length < bySource.length ? byDestination : bySource;
+      return rectangles.map(rectangle => strategyUmbrella(rectangle, 'compact'));
+    });
+    return balanced.length < compact.length ? balanced.map(policy => ({ ...policy, _generationStrategy: 'compact' })) : compact;
+  });
+}
+
+function strategySynthetic(origins) {
+  return strategyGroupOrigins(origins).map(group => strategyUmbrella(group, 'synthetic'));
+}
+
+function strategyTupleSet(policies) {
+  const tuples = new Set();
+  for (const policy of (policies || [])) {
+    const sources = strategyScopes(policy, 'src');
+    const destinations = strategyScopes(policy, 'dst');
+    const services = [...new Set((policy?.analysis?.services || []).map(strategyServiceKey))].sort();
+    for (const source of sources) for (const destination of destinations) for (const service of services) {
+      tuples.add(`${source}\u0001${destination}\u0001${service}`);
+    }
+  }
+  return tuples;
+}
+
+function strategyMetrics(originalPolicies, policies) {
+  const observed = strategyTupleSet(strategyAtomicOrigins(originalPolicies).map(origin => ({
+    srcSubnet: origin.srcSubnet,
+    dstTarget: origin.dstTarget,
+    analysis: origin.analysis,
+  })));
+  const allowed = strategyTupleSet(policies);
+  const additionalKeys = [...allowed].filter(key => !observed.has(key)).sort();
+  const additional = additionalKeys.length;
+  const expansion = observed.size > 0 ? additional / observed.size : 0;
+  return {
+    before: originalPolicies.length,
+    after: policies.length,
+    saved: originalPolicies.length - policies.length,
+    savedPercent: originalPolicies.length > 0
+      ? ((originalPolicies.length - policies.length) / originalPolicies.length) * 100 : 0,
+    observed: observed.size,
+    allowed: allowed.size,
+    additional,
+    expansion,
+    expansionPercent: expansion * 100,
+    examples: additionalKeys.slice(0, 6).map(key => {
+      const [source, destination, service] = key.split('\u0001');
+      return { source, destination, service };
+    }),
+  };
+}
+
+function strategyStableSort(policies) {
+  return [...policies].sort((a, b) => strategyBoundaryKey(a).localeCompare(strategyBoundaryKey(b))
+    || strategyScopes(a, 'src').join('\u0001').localeCompare(strategyScopes(b, 'src').join('\u0001'))
+    || strategyScopes(a, 'dst').join('\u0001').localeCompare(strategyScopes(b, 'dst').join('\u0001'))
+    || strategyServiceSetKey(a.analysis?.services).localeCompare(strategyServiceSetKey(b.analysis?.services)));
+}
+
+function strategyPassThroughPolicy(policy) {
+  const output = { ...policy, _generationPassThrough: true };
+  if (!Array.isArray(output._mergedFrom) || output._mergedFrom.length === 0) {
+    output._mergedFrom = strategyAtomicOrigins([policy]).map(origin => ({
+      srcSubnet: origin.srcSubnet,
+      dstTarget: origin.dstTarget,
+      action: origin.action,
+      analysis: { services: [...origin.analysis.services] },
+    }));
+  }
+  return output;
+}
+
+function buildPolicyStrategyPreviews(policies, { scope = 'all' } = {}) {
+  const normalizedScope = ['all', 'internet', 'lan'].includes(scope) ? scope : 'all';
+  const original = Array.isArray(policies) ? policies : [];
+  const inScope = original.filter(policy => strategyScopeMatches(policy, normalizedScope));
+  const outScope = original.filter(policy => !strategyScopeMatches(policy, normalizedScope));
+  const origins = strategyAtomicOrigins(inScope);
+  const builders = {
+    balanced: strategyBalanced,
+    compact: strategyCompact,
+    synthetic: strategySynthetic,
+  };
+  const strategies = {};
+  const labels = { balanced: 'Équilibrée', compact: 'Compacte', synthetic: 'Synthétique' };
+  for (const [name, builder] of Object.entries(builders)) {
+    const result = strategyStableSort([...builder(origins), ...outScope.map(strategyPassThroughPolicy)]);
+    strategies[name] = {
+      id: name,
+      label: labels[name],
+      policyCount: result.length,
+      policies: result,
+      metrics: strategyMetrics(original, result),
+    };
+  }
+  return { scope: normalizedScope, strategies };
+}
+
+function strategyMetricsShapeValid(metrics) {
+  if (!metrics || typeof metrics !== 'object' || Array.isArray(metrics)) return false;
+  const integerFields = ['before', 'after', 'observed', 'allowed', 'additional'];
+  if (integerFields.some(field => !Number.isInteger(metrics[field]) || metrics[field] < 0)) return false;
+  if (!Number.isInteger(metrics.saved) || metrics.saved !== metrics.before - metrics.after) return false;
+  if (typeof metrics.savedPercent !== 'number' || !Number.isFinite(metrics.savedPercent)) return false;
+  if (typeof metrics.expansion !== 'number' || !Number.isFinite(metrics.expansion) || metrics.expansion < 0) return false;
+  if (typeof metrics.expansionPercent !== 'number' || !Number.isFinite(metrics.expansionPercent) || metrics.expansionPercent < 0) return false;
+  if (metrics.allowed < metrics.observed) return false;
+  if (metrics.additional !== metrics.allowed - metrics.observed) return false;
+  const expectedSavedPercent = metrics.before ? (metrics.saved / metrics.before) * 100 : 0;
+  if (Math.abs(metrics.savedPercent - expectedSavedPercent) > 1e-7) return false;
+  if (Math.abs(metrics.expansion - (metrics.observed ? metrics.additional / metrics.observed : 0)) > 1e-9) return false;
+  if (Math.abs(metrics.expansionPercent - metrics.expansion * 100) > 1e-7) return false;
+  return true;
+}
+
+function strategyMetricsEqual(left, right) {
+  if (!strategyMetricsShapeValid(left) || !strategyMetricsShapeValid(right)) return false;
+  const fields = ['before', 'after', 'saved', 'observed', 'allowed', 'additional'];
+  if (fields.some(field => left[field] !== right[field])) return false;
+  return Math.abs(left.savedPercent - right.savedPercent) <= 1e-7
+    && Math.abs(left.expansion - right.expansion) <= 1e-9
+    && Math.abs(left.expansionPercent - right.expansionPercent) <= 1e-7;
+}
+
+function strategyOriginTuples(policy) {
+  if (Array.isArray(policy?._mergedFrom) && policy._mergedFrom.length > 0) {
+    return strategyTupleSet(policy._mergedFrom);
+  }
+  return null;
+}
+
+function strategySyntheticTuplesFromOrigins(policy) {
+  const origins = Array.isArray(policy?._mergedFrom) ? policy._mergedFrom : [];
+  if (origins.length === 0) return null;
+  const sources = [...new Set(origins.map(origin => origin?.srcSubnet).filter(Boolean))].sort();
+  const destinations = [...new Set(origins.map(origin => origin?.dstTarget).filter(Boolean))].sort();
+  const services = [...new Set(origins.flatMap(origin => (origin?.analysis?.services || []).map(strategyServiceKey)))].sort();
+  const expected = new Set();
+  for (const source of sources) {
+    for (const destination of destinations) {
+      for (const service of services) expected.add(`${source}\u0001${destination}\u0001${service}`);
+    }
+  }
+  return expected;
+}
+
+function strategySetsEqual(left, right) {
+  return left && right && left.size === right.size && [...left].every(value => right.has(value));
+}
+
+// Validate the proof attached to a strategy preview before bypassing the
+// legacy affinity recomposition. The marker is never sufficient on its own.
+function validatePolicyStrategyBatch(policies, { scope, strategy, metrics } = {}) {
+  const list = Array.isArray(policies) ? policies : [];
+  const markers = list.map(policy => policy?._generationStrategy).filter(Boolean);
+  if (markers.length === 0) return { hasStrategy: false, ok: true, issues: [] };
+
+  const issues = [];
+  const inferredStrategy = strategy || markers[0];
+  const knownStrategies = new Set(['balanced', 'compact', 'synthetic']);
+  const inferredScope = scope || list.find(policy => policy?._generationScope)?._generationScope || null;
+  const authoritativeMetrics = metrics
+    || list.map(policy => policy?._generationMetrics || policy?._strategyMetrics).find(Boolean);
+  if (!knownStrategies.has(inferredStrategy)) {
+    issues.push({ level: 'error', code: 'POLICY_STRATEGY_INVALID', msg: `Stratégie inconnue "${inferredStrategy}"` });
+  }
+  if (!['all', 'internet', 'lan'].includes(inferredScope)) {
+    issues.push({ level: 'error', code: 'POLICY_STRATEGY_SCOPE_INVALID', msg: 'Périmètre de stratégie absent ou invalide' });
+  }
+  if (!strategyMetricsShapeValid(authoritativeMetrics)) {
+    issues.push({ level: 'error', code: 'POLICY_STRATEGY_METRICS_INVALID', msg: 'Métriques de stratégie absentes ou incohérentes' });
+  }
+  if (markers.length !== list.length) {
+    issues.push({ level: 'error', code: 'POLICY_STRATEGY_BATCH_INVALID', msg: 'Batch de stratégie partiellement marqué' });
+  }
+
+  const allowed = new Set();
+  const observed = new Set();
+  for (const [index, policy] of list.entries()) {
+    if (!policy || typeof policy !== 'object' || Array.isArray(policy)) {
+      issues.push({ level: 'error', code: 'POLICY_STRATEGY_BATCH_INVALID', msg: `Policy #${index + 1}: policy mal formée` });
+      continue;
+    }
+    if (policy._generationStrategy !== inferredStrategy) {
+      issues.push({ level: 'error', code: 'POLICY_STRATEGY_BATCH_INVALID', msg: `Policy #${index + 1}: stratégie incohérente` });
+    }
+    if (policy._generationScope !== inferredScope) {
+      issues.push({ level: 'error', code: 'POLICY_STRATEGY_SCOPE_INVALID', msg: `Policy #${index + 1}: périmètre incohérent` });
+    }
+    const policyMetrics = policy._generationMetrics || policy._strategyMetrics;
+    if (!strategyMetricsEqual(policyMetrics, authoritativeMetrics)) {
+      issues.push({ level: 'error', code: 'POLICY_STRATEGY_METRICS_INVALID', msg: `Policy #${index + 1}: métriques non autoritatives` });
+    }
+    const actual = strategyTupleSet([policy]);
+    for (const key of actual) allowed.add(key);
+    const originTuples = strategyOriginTuples(policy);
+    if (!originTuples) {
+      issues.push({ level: 'error', code: 'POLICY_STRATEGY_PROVENANCE_INVALID', msg: `Policy #${index + 1}: _mergedFrom absent` });
+      continue;
+    }
+    for (const key of originTuples) observed.add(key);
+    if (inferredStrategy === 'synthetic' && policy._generationPassThrough !== true) {
+      const expected = strategySyntheticTuplesFromOrigins(policy);
+      if (!strategySetsEqual(actual, expected)) {
+        issues.push({ level: 'error', code: 'POLICY_STRATEGY_PROVENANCE_INVALID', msg: `Policy #${index + 1}: union cartésienne synthétique incohérente` });
+      }
+    } else if (!strategySetsEqual(actual, originTuples)) {
+      issues.push({ level: 'error', code: 'POLICY_STRATEGY_PROVENANCE_INVALID', msg: `Policy #${index + 1}: tuples supplémentaires ou perdus` });
+    }
+  }
+
+  const missing = [...observed].filter(key => !allowed.has(key));
+  const additional = [...allowed].filter(key => !observed.has(key));
+  const computedExpansion = observed.size > 0 ? additional.length / observed.size : 0;
+  const computedMetrics = {
+    observed: observed.size,
+    allowed: allowed.size,
+    additional: additional.length,
+    expansion: computedExpansion,
+    expansionPercent: computedExpansion * 100,
+  };
+  if (missing.length > 0) {
+    issues.push({ level: 'error', code: 'POLICY_STRATEGY_PROVENANCE_INVALID', msg: 'La stratégie perd des tuples observés' });
+  }
+  if (inferredStrategy === 'balanced' || inferredStrategy === 'compact') {
+    if (authoritativeMetrics?.allowed !== authoritativeMetrics?.observed
+        || authoritativeMetrics?.additional !== 0
+        || authoritativeMetrics?.expansion !== 0) {
+      issues.push({ level: 'error', code: 'POLICY_STRATEGY_METRICS_INVALID', msg: 'Équilibrée/Compacte doit rester exacte' });
+    }
+    if (!strategySetsEqual(allowed, observed)) {
+      issues.push({ level: 'error', code: 'POLICY_STRATEGY_PROVENANCE_INVALID', msg: 'Équilibrée/Compacte autorise un tuple non observé' });
+    }
+  }
+  // Client metrics are display evidence only. For a complete applied preview,
+  // compare them to the tuple sets recomputed here; for a selected subset, the
+  // recomputed metrics below remain the sole authoritative result.
+  if (authoritativeMetrics?.batchComplete !== false
+      && (authoritativeMetrics?.allowed !== computedMetrics.allowed
+        || authoritativeMetrics?.observed !== computedMetrics.observed
+        || authoritativeMetrics?.additional !== computedMetrics.additional
+        || Math.abs(authoritativeMetrics?.expansion - computedMetrics.expansion) > 1e-9
+        || Math.abs(authoritativeMetrics?.expansionPercent - computedMetrics.expansionPercent) > 1e-7)) {
+    issues.push({ level: 'error', code: 'POLICY_STRATEGY_METRICS_INVALID', msg: 'Métriques de stratégie incompatibles avec les tuples recalculés' });
+  }
+  return {
+    hasStrategy: true,
+    ok: issues.length === 0,
+    issues,
+    strategy: inferredStrategy,
+    scope: inferredScope,
+    metrics: computedMetrics,
+  };
 }
 
 function analyzePolicies(policies, fortiConfig, preferredWanIntf, observedFlows = []) {
@@ -2265,8 +2782,9 @@ function policyRepresentationIssue(policy) {
   if (policy._use32Src === true && (!Array.isArray(policy.srcHosts) || policy.srcHosts.length === 0)) return 'srcHosts vide en mode hôte';
   if (policy._use32Dst === true && (!Array.isArray(policy.dstHosts) || policy.dstHosts.length === 0)) return 'dstHosts vide en mode hôte';
   if (policy._mergedFrom !== undefined) {
+    const maxOrigins = policy._generationStrategy ? 10000 : 1000;
     if (!Array.isArray(policy._mergedFrom) || policy._mergedFrom.length === 0
-        || policy._mergedFrom.length > 1000) return '_mergedFrom mal formé, vide ou trop volumineux';
+        || policy._mergedFrom.length > maxOrigins) return '_mergedFrom mal formé, vide ou trop volumineux';
     for (const origin of policy._mergedFrom) {
       if (!origin || typeof origin !== 'object'
           || typeof origin.srcSubnet !== 'string' || !origin.srcSubnet
@@ -2294,10 +2812,11 @@ function policyRepresentationIssue(policy) {
       }
     }
   }
+  const maxStrategyScopeItems = policy._generationStrategy ? 10000 : 1000;
   for (const field of ['_multiSrcSubnets', '_multiDstSubnets']) {
     if (policy[field] !== undefined && !Array.isArray(policy[field])) return `${field} mal formé`;
     if (Array.isArray(policy[field]) && policy[field].length === 0) return `${field} vide`;
-    if (Array.isArray(policy[field]) && policy[field].length > 1000) return `${field} trop volumineux`;
+    if (Array.isArray(policy[field]) && policy[field].length > maxStrategyScopeItems) return `${field} trop volumineux`;
     const seenSubnets = new Set();
     for (const item of (policy[field] || [])) {
       if (!item || typeof item !== 'object' || typeof item.useSubnet !== 'boolean') return `${field}.useSubnet mal formé`;
@@ -3684,6 +4203,8 @@ module.exports = {
   extractKnownSubnets,
   resolveDestinationSubnets,
   preserveDestinationServiceAffinity,
+  buildPolicyStrategyPreviews,
+  validatePolicyStrategyBatch,
   analyzePolicies,
   generateConfig,
   validateAgainstExisting,

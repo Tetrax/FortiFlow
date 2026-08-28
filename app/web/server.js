@@ -10,7 +10,7 @@ const { parseFile }                                      = require('./lib/parser
 const { buildAnalysis, consolidatePolicies }             = require('./lib/analyzer');
 const { createSession, getSession, setSessionData, setFortiConfig,
         setSessionError, deleteSession, getStats, listSessions } = require('./lib/store');
-const { parseFortiConfig, extractKnownSubnets, preserveDestinationServiceAffinity, analyzePolicies,
+const { parseFortiConfig, extractKnownSubnets, preserveDestinationServiceAffinity, buildPolicyStrategyPreviews, validatePolicyStrategyBatch, analyzePolicies,
         generateConfig, validateAgainstExisting, applyPolicyUserDecisions, validateGenerationOptions, validatePolicyDecisionShapes,
         preflightValidation,
         parseFullRoutingTable, parseOspfRoutingTable, parseBgpNetworkTable,
@@ -152,7 +152,25 @@ function preparePolicyAnalysis(session, selectedPolicies, opts = {}) {
     }
     fortiConfig = { ...fortiConfig, interfaces };
   }
-  const submittedPolicies = preserveDestinationServiceAffinity(selectedPolicies);
+  const strategyValidation = validatePolicyStrategyBatch(selectedPolicies, {
+    strategy: opts?.generationStrategy || opts?.strategy,
+    scope: opts?.generationScope || opts?.scope,
+    metrics: opts?.generationMetrics || opts?.strategyMetrics,
+  });
+  if (strategyValidation.hasStrategy && !strategyValidation.ok) {
+    return {
+      ok: false,
+      issues: [...optionDecision.issues, ...strategyValidation.issues],
+      policies: [],
+      submittedPolicies: selectedPolicies,
+      fortiConfig,
+      opts: normalizedOpts,
+      strategyMetrics: strategyValidation.metrics,
+    };
+  }
+  const submittedPolicies = strategyValidation.hasStrategy
+    ? structuredClone(selectedPolicies)
+    : preserveDestinationServiceAffinity(selectedPolicies);
   const shapeDecision = validatePolicyDecisionShapes(submittedPolicies);
   if (!shapeDecision.ok) {
     return {
@@ -179,6 +197,7 @@ function preparePolicyAnalysis(session, selectedPolicies, opts = {}) {
     submittedPolicies,
     fortiConfig,
     opts: normalizedOpts,
+    strategyMetrics: strategyValidation.hasStrategy ? strategyValidation.metrics : null,
   };
 }
 
@@ -198,6 +217,7 @@ function preparePolicyDecisions(session, selectedPolicies, opts = {}) {
     issues,
     fortiConfig: analysis.fortiConfig,
     opts: analysis.opts,
+    strategyMetrics: analysis.strategyMetrics,
   };
 }
 
@@ -206,6 +226,7 @@ function sendPolicyDecisionFailure(res, decision) {
     error: 'Décision utilisateur invalide',
     code: 'POLICY_DECISION_INVALID',
     issues: decision.issues,
+    strategyMetrics: decision.strategyMetrics,
   });
 }
 
@@ -1650,6 +1671,34 @@ app.post('/api/deploy/analyze', (req, res) => {
   }
 });
 
+// POST /api/deploy/preview — calculate real strategy previews from analyzed policies
+app.post('/api/deploy/preview', (req, res) => {
+  const s = requireSession(req, res);
+  if (!s) return;
+
+  const selectedPolicies = Array.isArray(req.body?.analyzed)
+    ? req.body.analyzed
+    : req.body?.selectedPolicies;
+  if (!Array.isArray(selectedPolicies) || selectedPolicies.length === 0 || selectedPolicies.length > 10000) {
+    return res.status(400).json({ error: 'analyzed requis (1..10000 policies)' });
+  }
+  const shapeDecision = validatePolicyDecisionShapes(selectedPolicies);
+  if (!shapeDecision.ok) {
+    return res.status(422).json({ error: 'Payload de preview invalide', code: 'POLICY_PREVIEW_INVALID', issues: shapeDecision.issues });
+  }
+  const scope = req.body?.scope || 'all';
+  if (!['all', 'internet', 'lan'].includes(scope)) {
+    return res.status(400).json({ error: 'scope inconnu (all|internet|lan)' });
+  }
+
+  try {
+    const preview = buildPolicyStrategyPreviews(selectedPolicies, { scope });
+    res.json(preview);
+  } catch (err) {
+    res.status(422).json({ error: err.message });
+  }
+});
+
 // POST /api/deploy/recovery-backup — persist client decisions before targeted repair
 app.post('/api/deploy/recovery-backup', async (req, res) => {
   const s = requireSession(req, res);
@@ -1703,6 +1752,7 @@ app.post('/api/deploy/preflight', (req, res) => {
     res.json({
       ...result,
       acceptedRisks: decision.issues.filter(issue => issue.accepted === true),
+      strategyMetrics: decision.strategyMetrics,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1827,6 +1877,7 @@ app.post('/api/deploy/generate', (req, res) => {
         cli, analyzed, addrGroups: s.fortiConfig.addressGroups || {}, warnings,
         resolvedHosts, existingPoliciesCli, hostPairServices,
         acceptedRisks: decision.issues.filter(issue => issue.accepted === true),
+        strategyMetrics: decision.strategyMetrics,
       });
     }
   } catch (err) {
