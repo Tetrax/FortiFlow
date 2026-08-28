@@ -27,6 +27,8 @@ fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 const WS_HISTORY_DIR = path.join(__dirname, 'workspaces');
 fs.mkdirSync(WS_HISTORY_DIR, { recursive: true });
+const SERVICE_RECOVERY_BACKUP_DIR = path.join(WS_HISTORY_DIR, 'service-recovery-backups');
+fs.mkdirSync(SERVICE_RECOVERY_BACKUP_DIR, { recursive: true });
 
 // ─── Risk ports config ────────────────────────────────────────────────────────
 
@@ -192,7 +194,7 @@ function preparePolicyDecisions(session, selectedPolicies, opts = {}) {
   const issues = [...analysis.issues, ...decision.issues];
   return {
     ...decision,
-    ok: !issues.some(issue => issue.level === 'error' || issue.level === 'risk'),
+    ok: !issues.some(issue => issue.level === 'error'),
     issues,
     fortiConfig: analysis.fortiConfig,
     opts: analysis.opts,
@@ -200,15 +202,6 @@ function preparePolicyDecisions(session, selectedPolicies, opts = {}) {
 }
 
 function sendPolicyDecisionFailure(res, decision) {
-  const risks = decision.issues.filter(issue => issue.level === 'risk' && issue.overridable);
-  const errors = decision.issues.filter(issue => issue.level === 'error');
-  if (risks.length > 0 && errors.length === 0) {
-    return res.status(409).json({
-      error: 'Confirmation de risque requise',
-      code: 'POLICY_RISK_CONFIRMATION_REQUIRED',
-      issues: risks,
-    });
-  }
   return res.status(422).json({
     error: 'Décision utilisateur invalide',
     code: 'POLICY_DECISION_INVALID',
@@ -1654,6 +1647,35 @@ app.post('/api/deploy/analyze', (req, res) => {
     res.json(buildDeployAnalysisResult(s, analysis.policies));
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/deploy/recovery-backup — persist client decisions before targeted repair
+app.post('/api/deploy/recovery-backup', async (req, res) => {
+  const s = requireSession(req, res);
+  if (!s) return;
+  const analyzed = req.body?.analyzed;
+  if (!Array.isArray(analyzed) || analyzed.length === 0 || analyzed.length > 10000) {
+    return res.status(400).json({ error: 'analyzed requis pour la sauvegarde de récupération' });
+  }
+  const reason = String(req.body?.reason || 'service-name-conflict').slice(0, 120);
+  const backupId = `${s.id}-${Date.now()}-service-decisions.json`;
+  const target = path.join(SERVICE_RECOVERY_BACKUP_DIR, backupId);
+  const temporary = `${target}.${process.pid}.tmp`;
+  try {
+    const payload = {
+      version: 1,
+      sessionId: s.id,
+      createdAt: new Date().toISOString(),
+      reason,
+      analyzed,
+    };
+    await fs.promises.writeFile(temporary, JSON.stringify(payload), { flag: 'wx' });
+    await fs.promises.rename(temporary, target);
+    res.json({ ok: true, backupId });
+  } catch (err) {
+    await fs.promises.unlink(temporary).catch(() => {});
+    res.status(500).json({ error: `Sauvegarde de récupération impossible : ${err.message}` });
   }
 });
 

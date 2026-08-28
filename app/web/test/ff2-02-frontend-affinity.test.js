@@ -23,6 +23,10 @@ function frontendContext(...blocks) {
     AUTO32_THRESHOLD: 4,
     escSlug(value) { return String(value); },
     cidrSupernet() { return null; },
+    mergeDestinationDetectionCandidates(policies) {
+      return (policies || []).flatMap(policy => policy._dstDetectedSubnets || []);
+    },
+    destinationAggregateForPolicies(_policies, fallback = '') { return fallback; },
     alert() {},
     _savePolicySnapshot() {},
     defaultSelectedSet() { return new Set(); },
@@ -63,6 +67,32 @@ test('FF2-02 la fusion par policyId ne mélange pas destinations et empreintes',
   const byPolicy = functionBlock('mergeByPolicyId', 'renderRiskPanel');
   assert.match(byPolicy, /serviceSetKey\(p\)/);
   assert.match(byPolicy, /destinationKey/);
+});
+
+test('les fusions multi-destination conservent tous les candidats détectés', () => {
+  assert.ok(source.includes('function mergeDestinationDetectionCandidates'), 'fusion des candidats absente');
+  const context = frontendContext(
+    functionBlock('mergeByPolicyId', 'renderRiskPanel'),
+    functionBlock('mergeDestinationDetectionCandidates', 'syncHostCell'),
+    functionBlock('serviceSetKey', 'groupByInterfacePair'),
+    functionBlock('mergeServices', 'syncMergedServiceMetadata'),
+    functionBlock('syncMergedServiceMetadata', 'updateNoRcvdToggleBtn'),
+    functionBlock('normalizeInternetMerge', 'mergeByService'),
+    functionBlock('mergeByService', 'mergeByDestination'),
+    functionBlock('mergeByDestination', 'applyMerge'),
+  );
+  const first = policy('SRC', '10.42.0.0/23', 'SSH', 'TCP/22');
+  first.dstHosts = ['10.42.1.252'];
+  first._dstDetectedSubnets = [{ subnet: '10.42.0.0/23', hosts: first.dstHosts, useSubnet: true }];
+  const second = policy('SRC', '10.44.2.0/24', 'SSH', 'TCP/22');
+  second.dstHosts = ['10.44.2.1'];
+  second._dstDetectedSubnets = [{ subnet: '10.44.2.0/24', hosts: second.dstHosts, useSubnet: true }];
+
+  const [merged] = context.mergeByPolicyId([first, second]);
+  assert.deepEqual(JSON.parse(JSON.stringify(merged._dstDetectedSubnets.map(item => [item.subnet, item.hosts]))), [
+    ['10.42.0.0/23', ['10.42.1.252']],
+    ['10.44.2.0/24', ['10.44.2.1']],
+  ]);
 });
 
 test('FF2-02 les fusions frontend restent séparées sur des tuples non rectangulaires', () => {

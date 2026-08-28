@@ -140,7 +140,7 @@ function fortiSubnetToCIDR(subnet) {
 function extractKnownSubnets(fortiConfig) {
   const byCidr = new Map();
 
-  function addCidr(cidr) {
+  function addCidr(cidr, source) {
     if (!cidr || !cidr.includes('/')) return;
     const slash = cidr.lastIndexOf('/');
     const ip = cidr.slice(0, slash);
@@ -153,14 +153,142 @@ function extractKnownSubnets(fortiConfig) {
     const networkInt = (ip2int(ip) & mask) >>> 0;
     const normalized = `${int2ip(networkInt)}/${prefix}`;
     if (!byCidr.has(normalized)) {
-      byCidr.set(normalized, { prefix, networkInt, cidr: normalized });
+      byCidr.set(normalized, { prefix, networkInt, cidr: normalized, sources: source ? [source] : [] });
+    } else if (source && !byCidr.get(normalized).sources.includes(source)) {
+      byCidr.get(normalized).sources.push(source);
     }
   }
 
-  for (const address of Object.values(fortiConfig?.addresses || {})) addCidr(address.cidr);
-  for (const iface of Object.values(fortiConfig?.interfaces || {})) addCidr(iface.cidr);
+  for (const address of Object.values(fortiConfig?.addresses || {})) addCidr(address.cidr, 'object');
+  for (const iface of Object.values(fortiConfig?.interfaces || {})) addCidr(iface.cidr, 'interface');
 
   return [...byCidr.values()].sort((a, b) => b.prefix - a.prefix);
+}
+
+function parseCidr(cidr) {
+  if (typeof cidr !== 'string') return null;
+  const match = cidr.trim().match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)\/(\d{1,2})$/);
+  if (!match) return null;
+  const octets = match.slice(1, 5).map(Number);
+  const prefix = Number(match[5]);
+  if (octets.some(octet => !Number.isInteger(octet) || octet < 0 || octet > 255)
+      || !Number.isInteger(prefix) || prefix < 0 || prefix > 32) return null;
+  const ip = octets.join('.');
+  const mask = prefix === 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) >>> 0;
+  const networkInt = (ip2int(ip) & mask) >>> 0;
+  return { cidr: `${int2ip(networkInt)}/${prefix}`, prefix, networkInt };
+}
+
+function cidrContainsIp(parsedCidr, ipInt) {
+  if (!parsedCidr) return false;
+  const mask = parsedCidr.prefix === 0 ? 0 : (0xFFFFFFFF << (32 - parsedCidr.prefix)) >>> 0;
+  return ((ipInt & mask) >>> 0) === parsedCidr.networkInt;
+}
+
+function destinationRouteList(fortiConfig) {
+  if (Array.isArray(fortiConfig?.fullRoutes) && fortiConfig.fullRoutes.length > 0) {
+    return fortiConfig.fullRoutes;
+  }
+  return Array.isArray(fortiConfig?.staticRoutes) ? fortiConfig.staticRoutes : [];
+}
+
+function bestDestinationRoute(ipInt, routes, specificOnly = false) {
+  const matches = [];
+  for (const route of routes || []) {
+    const parsed = parseCidr(route?.dst);
+    if (!parsed || (specificOnly && parsed.prefix === 0) || !cidrContainsIp(parsed, ipInt)) continue;
+    matches.push({ route, parsed });
+  }
+  matches.sort((a, b) => b.parsed.prefix - a.parsed.prefix
+    || Number(a.route?.distance ?? 10) - Number(b.route?.distance ?? 10)
+    || Number(a.route?.priority ?? 0) - Number(b.route?.priority ?? 0)
+    || String(a.route?.device || '').localeCompare(String(b.route?.device || ''))
+    || a.parsed.cidr.localeCompare(b.parsed.cidr));
+  if (!matches[0]) return null;
+  return {
+    ...matches[0].route,
+    dst: matches[0].parsed.cidr,
+    source: matches[0].route?.source || 'static',
+  };
+}
+
+function destinationNetworkCandidates(fortiConfig) {
+  const candidates = [];
+  for (const [name, address] of Object.entries(fortiConfig?.addresses || {})) {
+    const parsed = parseCidr(address?.cidr);
+    if (parsed && parsed.prefix > 0) {
+      candidates.push({ ...parsed, type: 'object', name });
+    }
+  }
+  for (const [name, iface] of Object.entries(fortiConfig?.interfaces || {})) {
+    const parsed = parseCidr(iface?.cidr);
+    if (parsed && parsed.prefix > 0) {
+      candidates.push({ ...parsed, type: 'interface', name });
+    }
+  }
+  for (const route of destinationRouteList(fortiConfig)) {
+    const parsed = parseCidr(route?.dst);
+    if (parsed && parsed.prefix > 0) {
+      candidates.push({ ...parsed, type: 'route', route: { ...route, dst: parsed.cidr, source: route?.source || 'static' } });
+    }
+  }
+  return candidates;
+}
+
+function destinationNetworkEntry(host, candidates, routes) {
+  const hostInt = ip2int(host);
+  const matches = candidates.filter(candidate => cidrContainsIp(candidate, hostInt));
+  const routeMatches = matches.filter(candidate => candidate.type === 'route' && candidate.prefix > 0);
+  const interfaceMatches = matches.filter(candidate => candidate.type === 'interface' && candidate.prefix > 0);
+  // Les objets /32 restent des objets hôtes; les objets /8 ou plus larges restent
+  // des inventaires génériques et ne constituent pas seuls une preuve de topologie.
+  const objectMatchesForInference = matches.filter(candidate =>
+    candidate.type === 'object' && candidate.prefix > 8 && candidate.prefix < 32
+  );
+  const inferenceMatches = routeMatches.length > 0
+    ? routeMatches : interfaceMatches.length > 0 ? interfaceMatches : objectMatchesForInference;
+  const prefix = inferenceMatches.reduce((best, candidate) => Math.max(best, candidate.prefix), -1);
+  const selected = prefix >= 0 ? inferenceMatches.filter(candidate => candidate.prefix === prefix) : [];
+  const subnet = selected[0]?.cidr || `${host}/32`;
+  const objectMatches = candidates.filter(candidate => candidate.type === 'object' && candidate.cidr === subnet);
+  const interfaceMatchesAtSubnet = candidates.filter(candidate => candidate.type === 'interface' && candidate.cidr === subnet);
+  const route = bestDestinationRoute(hostInt, routes, true)
+    || (selected.length === 0 ? bestDestinationRoute(hostInt, routes, false) : null);
+  const exactAddress = subnet.endsWith('/32') ? null : objectMatches[0]
+    ? { name: objectMatches[0].name, cidr: subnet, source: 'config' }
+    : null;
+  const sources = [
+    ...(subnet.endsWith('/32') ? [] : objectMatches).map(candidate => ({ type: 'object', name: candidate.name, cidr: subnet })),
+    ...interfaceMatchesAtSubnet.map(candidate => ({ type: 'interface', name: candidate.name, cidr: subnet })),
+  ];
+  if (route) sources.push({ type: 'route', ...route });
+  return {
+    subnet,
+    hosts: [host],
+    useSubnet: !subnet.endsWith('/32'),
+    addrName: exactAddress?.name || '',
+    addrFound: !!exactAddress,
+    suggestedName: exactAddress?.name || suggestNetworkName(subnet),
+    route: route || null,
+    sources,
+  };
+}
+
+function resolveDestinationSubnets(hosts, fortiConfig) {
+  const uniqueHosts = [...new Set((Array.isArray(hosts) ? hosts : [])
+    .filter(host => typeof host === 'string' && parseCidr(`${host}/32`)))];
+  const candidates = destinationNetworkCandidates(fortiConfig);
+  const routes = destinationRouteList(fortiConfig);
+  const bySubnet = new Map();
+  for (const host of uniqueHosts) {
+    const entry = destinationNetworkEntry(host, candidates, routes);
+    if (!bySubnet.has(entry.subnet)) bySubnet.set(entry.subnet, entry);
+    else {
+      const existing = bySubnet.get(entry.subnet);
+      existing.hosts.push(host);
+    }
+  }
+  return [...bySubnet.values()];
 }
 
 function parsePortSpec(portrange) {
@@ -563,7 +691,7 @@ function parseFortiConfig(text, selectedVdom = null) {
 
   // Ajouter les voisins BGP comme pseudo-routes /32 (host routes)
   for (const [ip, intf] of bgpNeighborIntfs) {
-    staticRoutes.push({ dst: `${ip}/32`, gateway: ip, device: intf, distance: 0, priority: 0 });
+    staticRoutes.push({ dst: `${ip}/32`, gateway: ip, device: intf, distance: 0, priority: 0, source: 'bgp' });
   }
   sortRoutes(staticRoutes);
 
@@ -640,6 +768,7 @@ function parseStaticRoutes(rawRoutesOrLines) {
       device,
       distance: parseInt(props.distance || '10', 10),
       priority: parseInt(props.priority || '0',  10),
+      source:   'static',
     });
   }
 
@@ -1333,6 +1462,10 @@ function suggestAddrName(cidr) {
   return 'FF_' + (cidr || '').replace(/\//g, '_').replace(/\./g, '_');
 }
 
+function suggestNetworkName(cidr) {
+  return 'FF_NET_' + (cidr || '').replace(/\//g, '_').replace(/\./g, '_');
+}
+
 // Recompose des rectangles sûrs source × destination × service à partir des
 // policies d'origine. Chaque rectangle correspond uniquement à des tuples
 // réellement présents dans _mergedFrom.
@@ -1571,6 +1704,20 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf, observedFlows 
     } else {
       dstAddrMatch = findAddress(p.dstTarget, addresses);
     }
+    const dstDetectedSubnets = p.dstType === 'private'
+      ? resolveDestinationSubnets(p.dstHosts, fortiConfig)
+      : [];
+    const targetCidr = parseCidr(p.dstTarget);
+    const detectedTargetIsMoreSpecific = targetCidr && dstDetectedSubnets.some(item => {
+      const detectedCidr = parseCidr(item.subnet);
+      return detectedCidr && detectedCidr.prefix > targetCidr.prefix;
+    });
+    const defaultDestinationMode = p.dstType === 'private'
+      && (dstDetectedSubnets.length > 1 || detectedTargetIsMoreSpecific)
+      && p._dstMode === undefined
+      && !p._multiDstSubnets?.length
+      ? 'hosts'
+      : p._dstMode;
 
     // Services
     const protoLabel = p.protos?.length === 1 ? p.protos[0] : null;
@@ -1870,6 +2017,9 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf, observedFlows 
 
     return {
       ...p,
+      _dstDetectedSubnets: dstDetectedSubnets,
+      _dstMode: defaultDestinationMode,
+      _use32Dst: defaultDestinationMode === 'hosts' ? true : p._use32Dst,
       _srcHostNames: Object.keys(srcHostNames).length ? { ...p._srcHostNames, ...srcHostNames } : (p._srcHostNames || undefined),
       _dstHostNames: Object.keys(dstHostNames).length ? { ...p._dstHostNames, ...dstHostNames } : (p._dstHostNames || undefined),
       _srcHostsFound: srcHostsFound.size ? [...srcHostsFound] : (p._srcHostsFound || undefined),
@@ -1901,15 +2051,25 @@ function normalizedFlowProtocol(flow) {
   return value;
 }
 
+function destinationTargetContainsIp(target, ip) {
+  const parsedTarget = parseCidr(target);
+  const parsedIp = parseCidr(`${ip}/32`);
+  return !!parsedTarget && parsedTarget.prefix > 0 && !!parsedIp
+    && cidrContainsIp(parsedTarget, parsedIp.networkInt);
+}
+
 function flowMatchesPolicySide(ip, subnet, policy, multiField, targetsField, hostsField, targetField, useHosts) {
   const multi = policy[multiField];
   if (Array.isArray(multi) && multi.length > 0) {
     return multi.some(item => item?.useSubnet !== false
-      ? item?.subnet === subnet
+      ? item?.subnet === subnet || (item?.hosts || []).includes(ip)
       : (item?.hosts || []).includes(ip));
   }
   const hosts = policy[hostsField];
   if (useHosts) return Array.isArray(hosts) && hosts.includes(ip);
+  if (targetField === 'dstTarget' && policy._dstMode === 'aggregate') {
+    return destinationTargetContainsIp(policy[targetField], ip);
+  }
   return policy[targetField] === subnet || policy[targetField] === ip;
 }
 
@@ -1938,7 +2098,8 @@ function policySideElementsProven(policy, evidenceFlows, side) {
   const subnetField = side === 'src' ? 'srcSubnet' : 'dstSubnet';
   if (Array.isArray(multi) && multi.length > 0) {
     return multi.every(item => item?.useSubnet !== false
-      ? evidenceFlows.some(flow => flow[subnetField] === item?.subnet)
+      ? evidenceFlows.some(flow => flow[subnetField] === item?.subnet
+        || (item?.hosts || []).includes(flow[ipField]))
       : Array.isArray(item?.hosts) && item.hosts.length > 0
         && item.hosts.every(host => evidenceFlows.some(flow => flow[ipField] === host)));
   }
@@ -1949,6 +2110,10 @@ function policySideElementsProven(policy, evidenceFlows, side) {
       && hosts.every(host => evidenceFlows.some(flow => flow[ipField] === host));
   }
   const target = policy[side === 'src' ? 'srcSubnet' : 'dstTarget'];
+  if (side === 'dst' && policy._dstMode === 'aggregate') {
+    return evidenceFlows.length > 0
+      && evidenceFlows.every(flow => destinationTargetContainsIp(target, flow[ipField]));
+  }
   return evidenceFlows.some(flow => flow[subnetField] === target || flow[ipField] === target);
 }
 
@@ -1957,13 +2122,17 @@ function policyAffinityScopes(policy, side) {
   let scopes;
   if (Array.isArray(multi) && multi.length > 0) {
     scopes = multi.flatMap(item => item?.useSubnet !== false
-      ? [{ subnet: item?.subnet }]
+      ? [{ subnet: item?.subnet, hosts: Array.isArray(item?.hosts) ? item.hosts : [] }]
       : (item?.hosts || []).map(host => ({ host })));
   } else {
     const useHosts = policy[side === 'src' ? '_use32Src' : '_use32Dst'] === true;
+    const useAggregateDestination = side === 'dst' && policy._dstMode === 'aggregate';
     scopes = useHosts
       ? (policy[side === 'src' ? 'srcHosts' : 'dstHosts'] || []).map(host => ({ host }))
-      : [{ subnet: policy[side === 'src' ? 'srcSubnet' : 'dstTarget'] }];
+      : [{
+        subnet: policy[side === 'src' ? 'srcSubnet' : 'dstTarget'],
+        hosts: useAggregateDestination ? (policy.dstHosts || []) : [],
+      }];
   }
   return [...new Map(scopes.map(scope => [scope.host ? `h:${scope.host}` : `s:${scope.subnet}`, scope])).values()];
 }
@@ -1985,7 +2154,9 @@ function policyAffinityProven(policy, evidenceFlows) {
   const serviceKeys = [...new Set((policy.analysis?.services || []).flatMap(serviceTransportKeys))];
   if (sources.length === 0 || destinations.length === 0 || serviceKeys.length === 0) return false;
   const indexScopes = scopes => ({
-    hosts: new Map(scopes.filter(scope => scope.host).map(scope => [scope.host, `h:${scope.host}`])),
+    hosts: new Map(scopes.flatMap(scope => scope.host
+      ? [[scope.host, `h:${scope.host}`]]
+      : (scope.hosts || []).map(host => [host, `s:${scope.subnet}`]))),
     subnets: new Map(scopes.filter(scope => scope.subnet).map(scope => [scope.subnet, `s:${scope.subnet}`])),
   });
   const sourceIndex = indexScopes(sources);
@@ -2054,8 +2225,19 @@ function policyRepresentationIssue(policy) {
   for (const field of ['srcSubnet', 'dstTarget']) {
     if (policy[field] !== undefined && (typeof policy[field] !== 'string' || !policy[field])) return `${field} mal formé`;
   }
-  for (const field of ['_use32Src', '_use32Dst', '_dstUseAll', '_isWan', '_useSrcGroup', '_useDstGroup', '_isMultiDst']) {
+  for (const field of ['_use32Src', '_use32Dst', '_dstUseAll', '_isWan', '_useSrcGroup', '_useDstGroup', '_isMultiDst', '_dstAggregateManual']) {
     if (policy[field] !== undefined && typeof policy[field] !== 'boolean') return `${field} mal formé`;
+  }
+  if (policy._srcMode !== undefined && !['hosts', 'subnet'].includes(policy._srcMode)) return '_srcMode mal formé';
+  if (policy._dstMode !== undefined && !['hosts', 'subnet', 'detected-subnets', 'aggregate'].includes(policy._dstMode)) return '_dstMode mal formé';
+  if (policy._dstMode === 'detected-subnets'
+      && (policy._isMultiDst !== true || policy._use32Dst === true
+        || !Array.isArray(policy._multiDstSubnets) || policy._multiDstSubnets.length === 0)) {
+    return '_dstMode detected-subnets incohérent';
+  }
+  if (policy._dstMode === 'aggregate'
+      && (policy._use32Dst === true || policy._isMultiDst === true || policy._multiDstSubnets?.length)) {
+    return '_dstMode aggregate incohérent';
   }
   for (const field of ['srcSubnets', 'dstTargets', 'srcHosts', 'dstHosts']) {
     if (policy[field] !== undefined && !Array.isArray(policy[field])) return `${field} mal formé`;
@@ -2122,6 +2304,7 @@ function policyRepresentationIssue(policy) {
       if (typeof item.subnet !== 'string' || !item.subnet || seenSubnets.has(item.subnet)) return `${field}.subnet dupliqué ou absent`;
       seenSubnets.add(item.subnet);
       if (item.addrFound !== undefined && typeof item.addrFound !== 'boolean') return `${field}.addrFound mal formé`;
+      if (item.manual !== undefined && typeof item.manual !== 'boolean') return `${field}.manual mal formé`;
       if (item.hosts !== undefined && !Array.isArray(item.hosts)) return `${field}.hosts mal formé`;
       if (Array.isArray(item.hosts) && item.hosts.length > 1000) return `${field}.hosts trop volumineux`;
       if (Array.isArray(item.hosts)
@@ -2463,6 +2646,58 @@ function validateGenerationOptions(input, fortiConfig) {
   };
 }
 
+function destinationDetectedDecisionIssue(policy, submitted) {
+  if (submitted?._dstMode !== 'detected-subnets') return null;
+  const candidates = new Map((policy?._dstDetectedSubnets || [])
+    .map(candidate => [candidate.subnet, candidate]));
+  const selected = submitted?._multiDstSubnets;
+  if (!Array.isArray(selected) || selected.length === 0) return 'sous-réseaux détectés absents';
+  if (new Set(selected.map(item => item?.subnet)).size !== selected.length) return 'sous-réseaux détectés dupliqués';
+  const selectedSubnets = new Set(selected.map(item => item?.subnet));
+  const hasManualSubnet = selected.some(item => item?.manual === true);
+  const expectedHosts = new Set([...candidates.values()].flatMap(candidate => candidate.hosts || []));
+  const selectedHosts = new Set(selected.flatMap(item => item?.hosts || []));
+  if (selectedHosts.size !== expectedHosts.size || [...selectedHosts].some(host => !expectedHosts.has(host))) {
+    return 'IPs observées des sous-réseaux détectés incohérentes';
+  }
+  if (!hasManualSubnet && (selectedSubnets.size !== candidates.size
+      || [...candidates.keys()].some(subnet => !selectedSubnets.has(subnet)))) {
+    return 'sous-réseaux détectés incomplets';
+  }
+  for (const item of selected) {
+    const candidate = candidates.get(item?.subnet);
+    if (item.manual === true) {
+      const parsed = parseCidr(item.subnet);
+      if (!parsed || parsed.prefix === 0) return `CIDR destination manuel invalide "${item?.subnet || ''}"`;
+      if (item.useSubnet !== (parsed.prefix !== 32)) return `mode du CIDR manuel incohérent "${item.subnet}"`;
+      if (!(item.hosts || []).every(host => cidrContainsIp(parsed, ip2int(host)))) {
+        return `CIDR destination manuel ne contenant pas les IP observées "${item.subnet}"`;
+      }
+      continue;
+    }
+    if (!candidate) return `sous-réseau détecté inconnu "${item?.subnet || ''}"`;
+    if (item.useSubnet !== candidate.useSubnet) return `mode du sous-réseau détecté incohérent "${item.subnet}"`;
+    const candidateHosts = new Set(candidate.hosts || []);
+    const itemHosts = new Set(item.hosts || []);
+    if (candidateHosts.size !== itemHosts.size || [...itemHosts].some(host => !candidateHosts.has(host))) {
+      return `hôtes du sous-réseau détecté incohérents "${item.subnet}"`;
+    }
+  }
+  return null;
+}
+
+function destinationAggregateDecisionIssue(policy, submitted) {
+  if (submitted?._dstMode !== 'aggregate') return null;
+  const parsed = parseCidr(submitted.dstTarget);
+  if (!parsed || parsed.prefix === 0) return `CIDR agrégé invalide "${submitted?.dstTarget || ''}"`;
+  const hosts = Array.isArray(submitted.dstHosts) ? submitted.dstHosts : policy?.dstHosts;
+  if (!Array.isArray(hosts) || hosts.length === 0) return 'IPs observées absentes pour le réseau agrégé';
+  if (!hosts.every(host => cidrContainsIp(parsed, ip2int(host)))) {
+    return `CIDR agrégé ne contenant pas les IP observées "${submitted.dstTarget}"`;
+  }
+  return null;
+}
+
 function applyPolicyUserDecisions(authoritativePolicies, submittedPolicies, fortiConfig, observedFlows) {
   const policies = structuredClone(authoritativePolicies || []);
   const issues = [];
@@ -2503,9 +2738,13 @@ function applyPolicyUserDecisions(authoritativePolicies, submittedPolicies, fort
     const submitted = submittedPolicies?.[index] || {};
     const acceptedRiskInput = submitted._acceptedRisks;
     const acceptedRisks = new Set();
+    const emittedRiskCodes = new Set();
     if (acceptedRiskInput !== undefined) {
       const valid = Array.isArray(acceptedRiskInput)
-        && acceptedRiskInput.every(code => code === 'POLICY_AFFINITY_UNPROVEN');
+        && acceptedRiskInput.every(code => [
+          'MERGED_SERVICE_DECISION_INVALID',
+          'POLICY_AFFINITY_UNPROVEN',
+        ].includes(code));
       if (!valid) {
         issues.push({ level: 'error', code: 'RISK_DECISION_INVALID', msg: `Policy #${index + 1}: acceptation de risque invalide` });
       } else {
@@ -2513,6 +2752,7 @@ function applyPolicyUserDecisions(authoritativePolicies, submittedPolicies, fort
       }
     }
     const addRisk = (code, msg, detail, recommendation) => {
+      emittedRiskCodes.add(code);
       const accepted = acceptedRisks.has(code);
       issues.push({
         level: accepted ? 'warn' : 'risk', code, msg, detail, recommendation,
@@ -2531,6 +2771,14 @@ function applyPolicyUserDecisions(authoritativePolicies, submittedPolicies, fort
     if (representationIssue) {
       issues.push({ level: 'error', code: 'SCOPE_DECISION_INVALID', msg: `Policy #${index + 1}: ${representationIssue}` });
       continue;
+    }
+    const destinationDecisionIssue = destinationDetectedDecisionIssue(policy, submitted);
+    if (destinationDecisionIssue) {
+      issues.push({ level: 'error', code: 'DESTINATION_SUBNET_DECISION_INVALID', msg: `Policy #${index + 1}: ${destinationDecisionIssue}` });
+    }
+    const aggregateDecisionIssue = destinationAggregateDecisionIssue(policy, submitted);
+    if (aggregateDecisionIssue) {
+      issues.push({ level: 'error', code: 'DESTINATION_AGGREGATE_DECISION_INVALID', msg: `Policy #${index + 1}: ${aggregateDecisionIssue}` });
     }
     if (!policy._multiSrcSubnets?.length && !policy._use32Src && policy.analysis?.srcAddr?.found) {
       delete policy._srcAddrName;
@@ -2566,13 +2814,13 @@ function applyPolicyUserDecisions(authoritativePolicies, submittedPolicies, fort
       for (const item of multi) {
         if (item.useSubnet === false) continue;
         const exact = Object.entries(fortiConfig?.addresses || {})
-          .find(([, address]) => address.cidr === item.subnet);
+          .find(([, address]) => parseCidr(address.cidr)?.cidr === item.subnet);
         if (exact) {
           item.addrFound = true;
           item.addrName = exact[0];
         } else {
           item.addrFound = false;
-          const name = String(item.addrName || suggestAddrName(item.subnet)).trim();
+          const name = String(item.addrName || item.suggestedName || suggestNetworkName(item.subnet)).trim();
           if (registerAddressDefinition(name, item.subnet, index)) item.addrName = name;
         }
       }
@@ -2814,17 +3062,23 @@ function applyPolicyUserDecisions(authoritativePolicies, submittedPolicies, fort
       const mergedNames = new Set();
       for (const merged of mergedServices) {
         const proto = String(merged?.proto || '').toUpperCase();
-        const sourcePorts = [...new Set((merged?.sourcePorts || []).map(Number))].sort((a, b) => a - b);
+        const sourcePortsInput = merged?.sourcePorts;
+        const sourcePorts = [...new Set((Array.isArray(sourcePortsInput) ? sourcePortsInput : []).map(Number))]
+          .sort((a, b) => a - b);
         const name = typeof merged?.name === 'string' ? merged.name.trim() : '';
         const nameIssue = serviceNameDecisionIssue(name, fortiConfig);
         const sourceKeys = sourcePorts.map(port => `${proto}/${port}`);
-        let invalid = !['TCP', 'UDP'].includes(proto)
+        let invalid = !Array.isArray(sourcePortsInput)
+          || (merged?.ports !== undefined && merged?.ports !== null && !Array.isArray(merged.ports))
+          || (merged?.portRange !== undefined && merged?.portRange !== null && typeof merged.portRange !== 'string')
+          || !['TCP', 'UDP'].includes(proto)
           || sourcePorts.length < 2
           || (Array.isArray(merged?.ports) && typeof merged?.portRange === 'string')
           || sourcePorts.some(port => !Number.isInteger(port) || port < 1 || port > 65535)
           || sourceKeys.some(key => !authoritativeKeys.has(key) || !observedKeys.has(key) || consumedKeys.has(key));
         let ports = null;
         let portRange = null;
+        let rangeExpansion = null;
         if (Array.isArray(merged?.ports)) {
           const requestedPorts = [...new Set(merged.ports.map(Number))].sort((a, b) => a - b);
           invalid ||= requestedPorts.length !== sourcePorts.length
@@ -2834,9 +3088,13 @@ function applyPolicyUserDecisions(authoritativePolicies, submittedPolicies, fort
           const range = merged.portRange.match(/^(\d+)-(\d+)$/);
           const start = range ? Number(range[1]) : NaN;
           const end = range ? Number(range[2]) : NaN;
-          invalid ||= !range || start !== sourcePorts[0] || end !== sourcePorts[sourcePorts.length - 1];
-          invalid ||= sourcePorts.some((port, offset) => offset > 0 && port !== sourcePorts[offset - 1] + 1);
-          if (range) portRange = `${start}-${end}`;
+          invalid ||= !range || start > end
+            || start !== sourcePorts[0] || end !== sourcePorts[sourcePorts.length - 1];
+          if (range) {
+            portRange = `${start}-${end}`;
+            const extraPortCount = end - start + 1 - sourcePorts.length;
+            if (extraPortCount > 0) rangeExpansion = { start, end, extraPortCount };
+          }
         } else {
           invalid = true;
         }
@@ -2850,6 +3108,14 @@ function applyPolicyUserDecisions(authoritativePolicies, submittedPolicies, fort
         sourceKeys.forEach(key => consumedKeys.add(key));
         mergedNames.add(name.toLowerCase());
         validatedMerged.push({ label: name, found: false, name: null, source: null, suggestedName: name, isNamed: false, proto, ports, portRange, sourcePorts, _isMerged: true });
+        if (rangeExpansion) {
+          addRisk(
+            'MERGED_SERVICE_DECISION_INVALID',
+            `Policy #${index + 1}: le service "${name}" autorise des ports supplémentaires`,
+            `Le choix ${proto}/${rangeExpansion.start}-${rangeExpansion.end} couvre ${rangeExpansion.extraPortCount} port${rangeExpansion.extraPortCount > 1 ? 's' : ''} intermédiaire${rangeExpansion.extraPortCount > 1 ? 's' : ''} en plus des ports observés (${sourcePorts.join(', ')}).`,
+            'Créer des services spécifiques pour limiter les ports, ou accepter explicitement cette permission plus large.',
+          );
+        }
       }
       if (validatedMerged.length > 0) {
         policy.analysis.services = (policy.analysis.services || [])
@@ -2873,6 +3139,11 @@ function applyPolicyUserDecisions(authoritativePolicies, submittedPolicies, fort
         `Périmètre concerné — sources: ${summarize(sources)}; destinations: ${summarize(destinations)}; services: ${summarize(services)}. Toutes les combinaisons de ce produit n’ont pas été observées.`,
         'Séparer les policies selon les associations destination/service observées, ou accepter explicitement cette permission plus large.',
       );
+    }
+    for (const code of acceptedRisks) {
+      if (!emittedRiskCodes.has(code)) {
+        issues.push({ level: 'error', code: 'RISK_DECISION_INVALID', msg: `Policy #${index + 1}: acceptation de risque sans risque correspondant` });
+      }
     }
   }
   return {
@@ -3065,7 +3336,7 @@ function generateConfig(selectedPolicies, opts = {}) {
     } else if (p._isMultiDst && p._dstUseAll === true && (p._isWan || p.dstType === 'public')) {
       dstAddrName = 'all';
     // ── Multi-dst policy : destinations diverses avec seuil /24 vs /32 ──
-    } else if (p._isMultiDst && p._multiDstSubnets?.length > 0) {
+    } else if (p._multiDstSubnets?.length > 0) {
       const dstNames = [];
       for (const s of p._multiDstSubnets) {
         if (s.useSubnet !== false) {
@@ -3073,7 +3344,7 @@ function generateConfig(selectedPolicies, opts = {}) {
           if (s.addrFound) {
             dstNames.push(s.addrName);
           } else {
-            const name = s.addrName || suggestAddrName(s.subnet);
+            const name = s.addrName || s.suggestedName || suggestNetworkName(s.subnet);
             dstNames.push(name);
             newAddresses.set(s.subnet, name);
           }
@@ -3411,6 +3682,7 @@ function formatExistingPolicies(policies) {
 module.exports = {
   parseFortiConfig,
   extractKnownSubnets,
+  resolveDestinationSubnets,
   preserveDestinationServiceAffinity,
   analyzePolicies,
   generateConfig,

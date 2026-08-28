@@ -1954,7 +1954,29 @@ function deserializeAnalyzed(analyzed) {
   });
 }
 
-// ── F6b: Export/Import policies Excel ──
+async function backupServiceRecoveryState(analyzed, reason) {
+  if (!state.session) throw new Error('session absente pour la sauvegarde');
+  const response = await fetch(`/api/deploy/recovery-backup?session=${state.session}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ analyzed: serializeAnalyzed(analyzed), reason }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || !payload.backupId) {
+    throw new Error(payload.error || 'sauvegarde de récupération refusée');
+  }
+  return payload.backupId;
+}
+
+async function recoverInvalidSpecificServiceState(analyzed, reason = 'service-name-conflict') {
+  const plan = planInvalidSpecificServiceAssociations(analyzed);
+  if (plan.repairs.length === 0) return { applied: [], ambiguous: plan.ambiguous, backupId: null };
+  const backupId = await backupServiceRecoveryState(analyzed, reason);
+  const result = applyInvalidSpecificServiceRecovery(analyzed, plan);
+  return { ...result, backupId };
+}
+
+// ── F6b: Export/Import policies Excel ──────────────────────
 async function exportPoliciesExcel() {
   if (!deployState.analyzed?.length) { alert('Aucune policy à exporter'); return; }
   try {
@@ -2138,6 +2160,20 @@ function importSession(file) {
           deployState.addrGroups           = ds.addrGroups    || null;
           deployState.warnings             = ds.warnings      || [];
           deployState.viewMode             = ds.viewMode      || 'interface-pair';
+          if (deployState.analyzed?.length) {
+            try {
+              const recovery = await recoverInvalidSpecificServiceState(
+                deployState.analyzed,
+                'workspace-import-service-name-conflict',
+              );
+              if (recovery.applied.length) {
+                deployState.generatedCli = null;
+                alert(`Récupération services : ${recovery.applied.length} association(s) invalide(s) retirée(s). Sauvegarde : ${recovery.backupId}`);
+              }
+            } catch (recoveryError) {
+              alert(`Récupération services annulée : ${recoveryError.message}`);
+            }
+          }
         }
 
         // Navigation : deploy si dispo, sinon dashboard
@@ -2691,31 +2727,120 @@ function _policyRedoStep() {
   renderDeployPolicies(filterDeployPolicies(), false);
 }
 
-function _snapDrawer(p) {
-  if (!p) return;
+const DRAWER_SNAPSHOT_KEYS = ['_srcAddrName','_dstAddrName','_policyName','_srcMode','_dstMode',
+  '_use32Src','_use32Dst','_isMultiDst','dstTarget','dstTargets','_srcHostNames','_dstHostNames','_useSrcGroup','_useDstGroup',
+  '_srcintf','_dstintf','_nat','_action','_log','_mergeMode','_mergedSvcName','_mergeRange','_serviceReuse','_resolvedServiceKeys',
+  '_resolvedObjectKeys','_dismissedCompatibleSelection','_propagateServicePending','_propagatePending','_backendIssues','_backendIssueKind','_backendValidated'];
+
+function _captureDrawerSnapshot(p) {
   const snap = {};
-  const keys = ['_srcAddrName','_dstAddrName','_policyName','_srcMode','_dstMode',
-    '_use32Src','_use32Dst','_srcHostNames','_dstHostNames','_useSrcGroup','_useDstGroup',
-    '_srcintf','_dstintf','_nat','_action','_log','_mergeMode','_mergedSvcName','_mergeRange','_serviceReuse','_resolvedServiceKeys','_resolvedObjectKeys','_dismissedCompatibleSelection'];
-  for (const k of keys) {
+  const hasAnalysis = !!p.analysis;
+  const hasAnalysisServices = hasAnalysis && Object.hasOwn(p.analysis, 'services');
+  for (const k of DRAWER_SNAPSHOT_KEYS) {
     if (!(k in p)) continue;
     const v = p[k];
-    snap[k] = (v && typeof v === 'object' && !Array.isArray(v) && !(v instanceof Set) && !(v instanceof Map))
+    snap[k] = k === '_propagateServicePending'
+      ? JSON.parse(JSON.stringify(v))
+      : Array.isArray(v)
+      ? [...v]
+      : (v && typeof v === 'object' && !Array.isArray(v) && !(v instanceof Set) && !(v instanceof Map))
       ? { ...v } : v;
   }
   snap._selectedSvcKeys   = p._selectedSvcKeys   ? new Set(p._selectedSvcKeys)  : undefined;
-  snap._analysisServices  = JSON.parse(JSON.stringify(p.analysis?.services || []));
+  snap._hasAnalysis       = hasAnalysis;
+  snap._hasAnalysisServices = hasAnalysisServices;
+  snap._analysisServices  = hasAnalysisServices ? JSON.parse(JSON.stringify(p.analysis.services || [])) : undefined;
   snap._multiSrcSubnets   = p._multiSrcSubnets   ? JSON.parse(JSON.stringify(p._multiSrcSubnets)) : undefined;
   snap._multiDstSubnets   = p._multiDstSubnets   ? JSON.parse(JSON.stringify(p._multiDstSubnets)) : undefined;
   snap._excludedSrcHosts  = p._excludedSrcHosts  ? new Set(p._excludedSrcHosts) : undefined;
   snap._excludedDstHosts  = p._excludedDstHosts  ? new Set(p._excludedDstHosts) : undefined;
+  return snap;
+}
+
+function _recordDrawerHistory(entries) {
+  if (!entries?.length) return;
   if (_drawerHistory.length >= DRAWER_HISTORY_MAX) _drawerHistory.shift();
-  _drawerHistory.push({ idx: _drawerIdx, snap });
+  _drawerHistory.push(entries.length === 1 ? entries[0] : { idx: _drawerIdx, entries });
+  _syncDrawerUndoButton();
+}
+
+function _clearDrawerBackendState(p) {
+  if (!p) return;
   delete p._backendIssues;
   delete p._backendIssueKind;
   delete p._backendValidated;
-  delete p._acceptedRisks;
-  delete p._acceptedRiskIssues;
+}
+
+function _snapDrawerIndexes(indexes, clearIndexes = indexes) {
+  const uniqueIndexes = [...new Set((indexes || []).filter(index => Number.isInteger(index) && index >= 0))];
+  const indexesToClear = new Set((clearIndexes || []).filter(index => Number.isInteger(index) && index >= 0));
+  const entries = uniqueIndexes.map(idx => {
+    const policy = deployState.analyzed?.[idx];
+    return policy ? { idx, snap: _captureDrawerSnapshot(policy) } : null;
+  }).filter(Boolean);
+  _recordDrawerHistory(entries);
+  for (const { idx } of entries) {
+    const p = deployState.analyzed[idx];
+    if (indexesToClear.has(idx)) _clearDrawerBackendState(p);
+  }
+}
+
+function _snapDrawer(p) {
+  if (!p) return;
+  const idx = Number.isInteger(_drawerIdx) ? _drawerIdx : deployState.analyzed?.indexOf(p);
+  _snapDrawerIndexes([idx]);
+}
+
+function _restoreDrawerSnapshot(policy, snap) {
+  if (!policy || !snap) return;
+  for (const key of DRAWER_SNAPSHOT_KEYS) {
+    if (key === '_propagateServicePending') {
+      if (snap[key] === undefined) delete policy[key];
+      else _setDrawerServicePropagationPending(policy, snap[key]);
+    } else if (snap[key] === undefined) delete policy[key];
+    else policy[key] = snap[key];
+  }
+  if (snap._hasAnalysis) {
+    if (!policy.analysis) policy.analysis = {};
+    if (snap._hasAnalysisServices) policy.analysis.services = snap._analysisServices;
+    else delete policy.analysis.services;
+  } else {
+    delete policy.analysis;
+  }
+  if (snap._selectedSvcKeys !== undefined) policy._selectedSvcKeys = snap._selectedSvcKeys;
+  else delete policy._selectedSvcKeys;
+  if (snap._multiSrcSubnets !== undefined) policy._multiSrcSubnets = snap._multiSrcSubnets;
+  else delete policy._multiSrcSubnets;
+  if (snap._multiDstSubnets !== undefined) policy._multiDstSubnets = snap._multiDstSubnets;
+  else delete policy._multiDstSubnets;
+  if (snap._excludedSrcHosts !== undefined) policy._excludedSrcHosts = snap._excludedSrcHosts;
+  else delete policy._excludedSrcHosts;
+  if (snap._excludedDstHosts !== undefined) policy._excludedDstHosts = snap._excludedDstHosts;
+  else delete policy._excludedDstHosts;
+}
+
+function _syncDrawerUndoButton() {
+  const button = document.getElementById('drawer-undo');
+  if (!button) return;
+  button.disabled = _drawerIdx === null || _drawerHistory.length === 0;
+}
+
+function _undoDrawer() {
+  if (_drawerIdx === null || !_drawerHistory.length) {
+    _syncDrawerUndoButton();
+    return false;
+  }
+  const last = _drawerHistory.pop();
+  const entries = last.entries || [last];
+  for (const entry of entries) {
+    const policy = deployState.analyzed[entry.idx];
+    _restoreDrawerSnapshot(policy, entry.snap);
+    syncRowStatus(entry.idx);
+  }
+  populateDrawer(_drawerIdx);
+  renderDeployPolicies(filterDeployPolicies(), false);
+  _syncDrawerUndoButton();
+  return true;
 }
 
 function mountDrawer() {
@@ -2729,7 +2854,8 @@ function mountDrawer() {
   drawer.id = 'policy-drawer';
   drawer.innerHTML = `<div class="drawer-header">
     <h3 id="drawer-title">Policy</h3>
-    <button class="drawer-close" id="drawer-close">&times;</button>
+    <div class="drawer-header-actions" id="drawer-header-actions"></div>
+    <button class="drawer-close" id="drawer-close" type="button" aria-label="Fermer le drawer" title="Fermer">&times;</button>
   </div>
   <div class="drawer-body" id="drawer-body"></div>`;
   document.body.appendChild(overlay);
@@ -2737,35 +2863,12 @@ function mountDrawer() {
   overlay.addEventListener('click', closeDrawer);
   drawer.querySelector('#drawer-close').addEventListener('click', closeDrawer);
 
-  // Undo hint span (inserted between title and close button)
-  const undoHint = document.createElement('span');
-  undoHint.id = 'drawer-undo-hint';
-  undoHint.textContent = 'Ctrl+Z';
-  undoHint.style.cssText = 'font-size:10px;color:var(--text3);display:none;margin-right:8px;';
-  drawer.querySelector('.drawer-header').insertBefore(undoHint, drawer.querySelector('#drawer-close'));
-
   // Ctrl+Z undo handler (once)
   if (!window._undoWired) {
     window._undoWired = true;
     document.addEventListener('keydown', e => {
-      if (!e.ctrlKey || e.key !== 'z' || _drawerIdx === null) return;
-      e.preventDefault();
-      const last = _drawerHistory.pop();
-      if (!last) return;
-      const p = deployState.analyzed[last.idx];
-      const { _analysisServices, _selectedSvcKeys, _multiSrcSubnets, _multiDstSubnets, _excludedSrcHosts, _excludedDstHosts, ...rest } = last.snap;
-      Object.assign(p, rest);
-      if (_analysisServices  !== undefined) p.analysis.services   = _analysisServices;
-      if (_selectedSvcKeys   !== undefined) p._selectedSvcKeys    = _selectedSvcKeys;
-      if (_multiSrcSubnets   !== undefined) p._multiSrcSubnets    = _multiSrcSubnets;
-      if (_multiDstSubnets   !== undefined) p._multiDstSubnets    = _multiDstSubnets;
-      if (_excludedSrcHosts  !== undefined) p._excludedSrcHosts   = _excludedSrcHosts;
-      if (_excludedDstHosts  !== undefined) p._excludedDstHosts   = _excludedDstHosts;
-      populateDrawer(last.idx);
-      syncRowStatus(last.idx);
-      renderDeployPolicies(filterDeployPolicies(), false);
-      const hint = document.getElementById('drawer-undo-hint');
-      if (hint) hint.style.display = _drawerHistory.length ? '' : 'none';
+      if (!(e.ctrlKey || e.metaKey) || (e.key || '').toLowerCase() !== 'z' || _drawerIdx === null) return;
+      if (_undoDrawer()) e.preventDefault();
     });
   }
 
@@ -2774,8 +2877,6 @@ function mountDrawer() {
     const p = _drawerIdx !== null ? deployState.analyzed[_drawerIdx] : null;
     if (!p) return;
     _snapDrawer(p);
-    const hint = document.getElementById('drawer-undo-hint');
-    if (hint) hint.style.display = '';
     if (e.target.matches('.drawer-src-name'))  { p._srcAddrName = e.target.value; syncAddrCell(_drawerIdx, 'src'); }
     if (e.target.matches('.drawer-dst-name'))  { p._dstAddrName = e.target.value; syncAddrCell(_drawerIdx, 'dst'); }
     if (e.target.matches('.drawer-policy-name')) p._policyName = e.target.value;
@@ -2789,18 +2890,43 @@ function mountDrawer() {
     if (e.target.matches('.svc-merge-name')) { p._mergedSvcName = e.target.value; return; }
     if (e.target.matches('.svc-merge-range')) { p._mergeRange = e.target.value; return; }
     if (e.target.matches('.drawer-svc-name')) {
-      const svcKey = e.target.dataset.svcKey;
-      const svc = (p.analysis?.services || []).find(s => {
-        const _m = s.label?.match(/^(TCP|UDP)\/(\d+)$/i);
-        const k = _m ? `${parseInt(_m[2],10)}/${_m[1].toUpperCase()}` : (s.isNamed ? `label:${s.label}` : `${s.port}/${s.proto}`);
-        return k === svcKey;
-      });
-      if (svc) { svc.suggestedName = e.target.value; syncSvcCell(_drawerIdx); }
+      setPolicyServiceSuggestedName(p, e.target.dataset.svcKey, e.target.value);
+      syncSvcCell(_drawerIdx);
     }
     if (e.target.matches('.drawer-multidst-name')) {
       const si = +e.target.dataset.si;
       if (p._multiDstSubnets?.[si]) p._multiDstSubnets[si].addrName = e.target.value;
       syncAddrCell(_drawerIdx, 'dst');
+    }
+    if (e.target.matches('.drawer-destination-cidr')) {
+      const si = +e.target.dataset.si;
+      const item = destinationScopeForElement(p, e.target);
+      if (item) {
+        item.subnet = e.target.value.trim();
+        item.manual = true;
+        item.addrName = '';
+        item.addrFound = false;
+        item.route = null;
+        item.sources = [];
+        const parsed = normalizeDestinationCidr(item.subnet);
+        if (parsed) item.useSubnet = parsed.prefix !== 32;
+        item.suggestedName = `FF_NET_${item.subnet.replace(/[./]/g, '_')}`;
+        item._cidrError = destinationCidrIssue(item.subnet, item.hosts || []);
+        e.target.dataset.subnetKey = item.subnet;
+        const error = drawer.querySelector(`.drawer-destination-cidr-error[data-si="${si}"]`);
+        if (error) error.textContent = item._cidrError;
+        syncRowStatus(_drawerIdx);
+      }
+      return;
+    }
+    if (e.target.matches('.drawer-destination-aggregate-cidr')) {
+      p._dstAggregateSubnet = e.target.value.trim();
+      p._dstAggregateManual = true;
+      p._dstAggregateError = destinationCidrIssue(p._dstAggregateSubnet, destinationObservedHosts(p));
+      const error = drawer.querySelector('[data-aggregate-cidr-error="true"]');
+      if (error) error.textContent = p._dstAggregateError;
+      syncRowStatus(_drawerIdx);
+      return;
     }
     if (e.target.matches('.drawer-multisrc-name')) {
       const si = +e.target.dataset.si;
@@ -2823,23 +2949,36 @@ function mountDrawer() {
   drawer.addEventListener('click', e => {
     const p = _drawerIdx !== null ? deployState.analyzed[_drawerIdx] : null;
     if (!p) return;
+    const undoButton = e.target.closest('.drawer-undo');
+    if (undoButton) {
+      e.stopPropagation();
+      _undoDrawer();
+      return;
+    }
     const _snapAndShow = () => {
       _snapDrawer(p);
-      const hint = document.getElementById('drawer-undo-hint');
-      if (hint) hint.style.display = '';
+    };
+    const _snapAndShowIndexes = (indexes, clearIndexes = [_drawerIdx]) => {
+      _snapDrawerIndexes(indexes, clearIndexes);
     };
     const useSelectedCompatible = e.target.closest('.svc-use-compatible-selected');
     if (useSelectedCompatible) {
-      _snapAndShow();
-      if (!p._serviceReuse) p._serviceReuse = {};
-      const proto = useSelectedCompatible.dataset.proto;
+      const proto = String(useSelectedCompatible.dataset.proto || '').toUpperCase();
       const name = useSelectedCompatible.dataset.serviceName;
-      useSelectedCompatible.dataset.ports.split(',').filter(Boolean)
-        .forEach(port => {
-          const serviceKey = `${proto}/${port}`;
-          p._serviceReuse[serviceKey] = name;
-          markServiceDecisionResolved(p, serviceKey, `existing:${name}`);
-        });
+      const serviceKeys = String(useSelectedCompatible.dataset.ports || '').split(',')
+        .filter(Boolean).map(port => `${proto}/${port}`);
+      const propagationTargets = servicePropagationPlan(p, name, serviceKeys);
+      _snapAndShowIndexes([_drawerIdx, ...propagationTargets.map(target => target.idx)], [_drawerIdx]);
+      if (!p._serviceReuse) p._serviceReuse = {};
+      serviceKeys.forEach(serviceKey => {
+        p._serviceReuse[serviceKey] = name;
+        markServiceDecisionResolved(p, serviceKey, `existing:${name}`);
+      });
+      _setDrawerServicePropagationPending(p, propagationTargets.length ? {
+          serviceName: name,
+          serviceKeys: [...serviceKeys],
+          targets: propagationTargets.map(target => ({ idx: target.idx, keys: [...target.keys] })),
+        } : null);
       delete p._dismissedCompatibleSelection;
       populateDrawer(_drawerIdx);
       syncRowStatus(_drawerIdx);
@@ -2855,14 +2994,21 @@ function mountDrawer() {
     }
     const useCompatible = e.target.closest('.drawer-use-compatible-service');
     if (useCompatible) {
-      _snapAndShow();
       const serviceKeys = String(useCompatible.dataset.serviceKeys || useCompatible.dataset.serviceKey || '')
         .split(',').filter(Boolean);
+      const serviceName = useCompatible.dataset.serviceName;
+      const propagationTargets = servicePropagationPlan(p, serviceName, serviceKeys);
+      _snapAndShowIndexes([_drawerIdx, ...propagationTargets.map(target => target.idx)], [_drawerIdx]);
       for (const serviceKey of serviceKeys) {
         markServiceDecisionResolved(
-          p, serviceKey, `existing:${useCompatible.dataset.serviceName}`,
+          p, serviceKey, `existing:${serviceName}`,
         );
       }
+      _setDrawerServicePropagationPending(p, propagationTargets.length ? {
+          serviceName,
+          serviceKeys: [...serviceKeys],
+          targets: propagationTargets.map(target => ({ idx: target.idx, keys: [...target.keys] })),
+        } : null);
       populateDrawer(_drawerIdx);
       syncRowStatus(_drawerIdx);
       renderDeployPolicies(filterDeployPolicies(), false);
@@ -2874,20 +3020,27 @@ function mountDrawer() {
       const serviceKeys = String(createSpecific.dataset.serviceKeys || createSpecific.dataset.serviceKey || '')
         .split(',').filter(Boolean);
       const [proto, port] = serviceKeys[0]?.split('/') || [];
-      const service = (p.analysis?.services || []).find(item =>
+      const serviceIndex = (p.analysis?.services || []).findIndex(item =>
         serviceReuseKeys(item).some(key => serviceKeys.includes(key)));
+      const service = p.analysis?.services?.[serviceIndex];
       const typedName = createSpecific.closest('.drawer-service-item')
         ?.querySelector('.drawer-svc-name')?.value.trim();
-      if (service) {
-        service.suggestedName = typedName || `FF_SVC_${proto}_${port}`;
-        if (serviceKeys.length > 1 && ['TCP', 'UDP'].includes(proto)
+      if (serviceKeys.length === 1) {
+        applySpecificServiceDecision(p, serviceKeys[0], typedName || `FF_SVC_${proto}_${port}`);
+      } else if (service) {
+        const next = cloneServiceDecision(service);
+        next.suggestedName = typedName || `FF_SVC_${proto}_${port}`;
+        if (['TCP', 'UDP'].includes(proto)
             && serviceKeys.every(key => key.startsWith(`${proto}/`))) {
-          service.ports = serviceKeys.map(key => Number(key.split('/')[1]));
-          service.sourcePorts = [...service.ports];
-          service.proto = proto;
+          next.ports = serviceKeys.map(key => Number(key.split('/')[1]));
+          next.sourcePorts = [...next.ports];
+          next.proto = proto;
         }
+        const services = [...p.analysis.services];
+        services[serviceIndex] = next;
+        p.analysis = { ...p.analysis, services };
+        serviceKeys.forEach(serviceKey => markServiceDecisionResolved(p, serviceKey, 'specific'));
       }
-      serviceKeys.forEach(serviceKey => markServiceDecisionResolved(p, serviceKey, 'specific'));
       populateDrawer(_drawerIdx);
       syncRowStatus(_drawerIdx);
       renderDeployPolicies(filterDeployPolicies(), false);
@@ -2907,6 +3060,7 @@ function mountDrawer() {
     }
     // Action toggle (accept / deny)
     if (e.target.matches('.drawer-action-btn')) {
+      _snapAndShow();
       p._action = e.target.dataset.action;
       populateDrawer(_drawerIdx);
       renderDeployPolicies(filterDeployPolicies(), false);
@@ -2932,7 +3086,6 @@ function mountDrawer() {
     }
     // Service selection toggle
     const svcRow = e.target.closest('.svc-selectable');
-    const svcChk = e.target.matches('.svc-sel-chk') ? e.target : null;
     if (svcRow && (!e.target.matches('.drawer-svc-name'))) {
       _snapAndShow();
       const key = svcRow.dataset.svcKey;
@@ -2988,6 +3141,16 @@ function mountDrawer() {
       populateDrawer(_drawerIdx);
       syncRowStatus(_drawerIdx);
       renderDeployPolicies(filterDeployPolicies(), false);
+      return;
+    }
+    const destinationModeBtn = e.target.closest('.drawer-destination-mode');
+    if (destinationModeBtn) {
+      _snapAndShow();
+      if (setDestinationRepresentation(p, destinationModeBtn.dataset.mode)) {
+        populateDrawer(_drawerIdx);
+        syncAddrCell(_drawerIdx, 'dst');
+        renderDeployPolicies(filterDeployPolicies(), false);
+      }
       return;
     }
     const modeBtn = e.target.closest('.drawer-mode-btn');
@@ -3110,26 +3273,62 @@ function mountDrawer() {
       populateDrawer(_drawerIdx);
       return;
     }
+    if (e.target.closest('.svc-service-prop-yes')) {
+      const pending = p._propagateServicePending;
+      if (pending) {
+        for (const target of pending.targets || []) {
+          const op = deployState.analyzed[target.idx];
+          if (!op) continue;
+          const eligibleKeys = compatiblePolicyServiceKeys(op, pending.serviceName, target.keys);
+          if (eligibleKeys.length) _clearDrawerBackendState(op);
+          eligibleKeys.forEach(serviceKey => markServiceDecisionResolved(
+            op, serviceKey, `existing:${pending.serviceName}`,
+          ));
+          syncRowStatus(target.idx);
+        }
+        _setDrawerServicePropagationPending(p, null);
+        populateDrawer(_drawerIdx);
+        syncRowStatus(_drawerIdx);
+        renderDeployPolicies(filterDeployPolicies(), false);
+      }
+      return;
+    }
+    if (e.target.closest('.svc-service-prop-no')) {
+      _setDrawerServicePropagationPending(p, null);
+      populateDrawer(_drawerIdx);
+      return;
+    }
     // Propagation banner buttons
     if (e.target.closest('.svc-prop-yes')) {
       const pp = p._propagatePending;
       if (pp) {
-        for (const op of (deployState.analyzed || [])) {
-          if (op === p) continue;
-          const match = (op.analysis?.services || []).find(s => {
-            if (!s.found) {
-              if (pp.label) return s.label === pp.label;
-              const sm = s.label?.match(/^(TCP|UDP)\/(\d+)$/i);
-              const sp = sm ? parseInt(sm[2], 10) : s.port;
-              const spr = sm ? sm[1].toUpperCase() : (s.proto || '').toUpperCase();
-              return sp === pp.port && spr === pp.proto;
+        if (pp.targets?.length && pp.serviceKey) {
+          const targetIndexes = pp.targets.map(target => target.idx);
+          _snapDrawerIndexes(targetIndexes, targetIndexes);
+          for (const target of pp.targets) {
+            const op = deployState.analyzed[target.idx];
+            if (op && applySpecificServiceDecision(op, target.serviceKey, pp.newName)) {
+              syncRowStatus(target.idx);
             }
-            return false;
-          });
-          if (match) {
-            match.suggestedName = pp.newName;
-            const oi = deployState.analyzed.indexOf(op);
-            syncRowStatus(oi);
+          }
+        } else {
+          for (const op of (deployState.analyzed || [])) {
+            if (op === p) continue;
+            const match = (op.analysis?.services || []).find(s => {
+              if (!s.found) {
+                if (pp.label) return s.label === pp.label;
+                const sm = s.label?.match(/^(TCP|UDP)\/(\d+)$/i);
+                const sp = sm ? parseInt(sm[2], 10) : s.port;
+                const spr = sm ? sm[1].toUpperCase() : (s.proto || '').toUpperCase();
+                return sp === pp.port && spr === pp.proto;
+              }
+              return false;
+            });
+            if (match) {
+              match.suggestedName = pp.newName;
+              const oi = deployState.analyzed.indexOf(op);
+              syncRowStatus(oi);
+            }
           }
         }
         delete p._propagatePending;
@@ -3144,15 +3343,24 @@ function mountDrawer() {
       return;
     }
   });
+  drawer.addEventListener('keydown', e => {
+    if (!['Enter', ' '].includes(e.key) || e.target.matches('.drawer-svc-name')) return;
+    const serviceRow = e.target.closest('.svc-selectable');
+    if (!serviceRow) return;
+    e.preventDefault();
+    serviceRow.click();
+  });
   drawer.addEventListener('change', e => {
     const p = _drawerIdx !== null ? deployState.analyzed[_drawerIdx] : null;
     if (!p) return;
     _snapDrawer(p);
-    const hint = document.getElementById('drawer-undo-hint');
-    if (hint) hint.style.display = '';
     if (e.target.matches('.drawer-srcintf')) { p._srcintf = e.target.value || undefined; renderDeployPolicies(filterDeployPolicies(), false); }
     if (e.target.matches('.drawer-dstintf')) { p._dstintf = e.target.value || undefined; renderDeployPolicies(filterDeployPolicies(), false); }
-    if (e.target.matches('.drawer-nat')) { p._nat = e.target.checked; }
+    if (e.target.matches('.drawer-nat')) {
+      p._nat = e.target.checked;
+      const natValue = e.target.closest('.drawer-inline-toggle')?.querySelector('.drawer-nat-value');
+      if (natValue) natValue.textContent = p._nat ? 'Activé' : 'Désactivé';
+    }
     if (e.target.matches('.drawer-log-sel')) { p._log = e.target.value; }
     if (e.target.matches('.drawer-sp-sel')) {
       if (!p._secProfiles) p._secProfiles = {};
@@ -3176,6 +3384,30 @@ function mountDrawer() {
       return k === svcKey;
     });
     if (!svc) return;
+    const identity = canonicalMonoServiceIdentity(svc);
+    if (identity) {
+      applySpecificServiceDecision(p, identity.key, newName);
+      const targets = specificServicePropagationPlan(p, identity.key);
+      if (targets.length > 0) {
+        p._propagatePending = {
+          svcKey,
+          serviceKey: identity.key,
+          newName,
+          port: identity.port,
+          proto: identity.proto,
+          label: null,
+          portHint: svc.portHint || null,
+          count: targets.length,
+          targets,
+        };
+      } else {
+        delete p._propagatePending;
+      }
+      populateDrawer(_drawerIdx);
+      syncRowStatus(_drawerIdx);
+      renderDeployPolicies(filterDeployPolicies(), false);
+      return;
+    }
     svc.suggestedName = newName;
     const decisionKeys = serviceReuseKeys(svc);
     decisionKeys.forEach(key => markServiceDecisionResolved(p, key, 'specific'));
@@ -3218,6 +3450,51 @@ function mountDrawer() {
   drawer.addEventListener('focusout', e => {
     const p = _drawerIdx !== null ? deployState.analyzed[_drawerIdx] : null;
     if (!p) return;
+    if (e.target.matches('.drawer-destination-cidr')) {
+      const si = +e.target.dataset.si;
+      const item = destinationScopeForElement(p, e.target);
+      if (!item) return;
+      const issue = destinationCidrIssue(item.subnet, item.hosts || []);
+      if (issue) {
+        item._cidrError = issue;
+        populateDrawer(_drawerIdx);
+        return;
+      }
+      const parsed = normalizeDestinationCidr(item.subnet);
+      item.subnet = parsed.cidr;
+      item.useSubnet = parsed.prefix !== 32;
+      item.manual = true;
+      item.suggestedName = `FF_NET_${item.subnet.replace(/[./]/g, '_')}`;
+      item._cidrError = '';
+      deduplicateDestinationScopes(p);
+      p._dstDetectedSubnets = p._multiDstSubnets.map(candidate => ({
+        ...candidate, hosts: [...(candidate.hosts || [])],
+      }));
+      populateDrawer(_drawerIdx);
+      syncAddrCell(_drawerIdx, 'dst');
+      renderDeployPolicies(filterDeployPolicies(), false);
+      return;
+    }
+    if (e.target.matches('.drawer-destination-aggregate-cidr')) {
+      const issue = destinationCidrIssue(p._dstAggregateSubnet, destinationObservedHosts(p));
+      if (issue) {
+        p._dstAggregateError = issue;
+        populateDrawer(_drawerIdx);
+        return;
+      }
+      const parsed = normalizeDestinationCidr(p._dstAggregateSubnet);
+      p._dstAggregateSubnet = parsed.cidr;
+      p._dstAggregateManual = true;
+      p._dstAggregateError = '';
+      p.dstTarget = parsed.cidr;
+      p.dstTargets = [parsed.cidr];
+      p._dstAddrName = '';
+      p._dstAggregateAddrName = '';
+      populateDrawer(_drawerIdx);
+      syncAddrCell(_drawerIdx, 'dst');
+      renderDeployPolicies(filterDeployPolicies(), false);
+      return;
+    }
     const resolvedObjectKey = e.target.dataset.objectKey;
     const resolvedObjectName = typeof e.target.value === 'string' ? e.target.value.trim() : '';
     if (resolvedObjectKey && resolvedObjectName) {
@@ -3292,7 +3569,7 @@ function buildDrawerSecProfiles(p, idx) {
     (list || []).map(n => `<option value="${escHtml(n)}" ${cur === n ? 'selected' : ''}>${escHtml(n)}</option>`).join('');
   const row = (label, key, list) => !list?.length ? '' :
     `<div class="drawer-field"><span class="drawer-field-label">${label}</span><select class="drawer-input drawer-sp-sel" data-idx="${idx}" data-sp="${key}" style="font-size:10px">${mkOpts(list, cur[key])}</select></div>`;
-  return `<details class="drawer-security-profiles">
+  return `<details class="drawer-security-profiles" open>
     <summary>Security Profiles</summary>
     <div class="drawer-security-profiles-body">
       ${row('Antivirus', 'antivirus', sp.antivirus)}
@@ -3444,10 +3721,480 @@ function markServiceDecisionResolved(policy, serviceKey, decision) {
   clearSelectedServiceKey(policy, serviceKey);
 }
 
+function normalizeServiceDecisionKey(rawKey) {
+  const value = String(rawKey || '').trim().toUpperCase();
+  let match = value.match(/^(TCP|UDP)\/(\d+)$/);
+  if (match) return `${match[1]}/${Number(match[2])}`;
+  match = value.match(/^(\d+)\/(TCP|UDP)$/);
+  return match ? `${match[2]}/${Number(match[1])}` : value;
+}
+
+function canonicalMonoServiceIdentity(service) {
+  const keys = serviceReuseKeys(service).map(normalizeServiceDecisionKey);
+  if (keys.length !== 1) return null;
+  const match = keys[0].match(/^(TCP|UDP)\/(\d+)$/);
+  if (!match) return null;
+  const port = Number(match[2]);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  return { key: `${match[1]}/${port}`, proto: match[1], port };
+}
+
+function policyServiceIndexByCanonicalKey(policy, serviceKey) {
+  const wanted = normalizeServiceDecisionKey(serviceKey);
+  return (policy?.analysis?.services || []).findIndex(service =>
+    canonicalMonoServiceIdentity(service)?.key === wanted);
+}
+
+function cloneServiceDecision(service) {
+  return typeof structuredClone === 'function'
+    ? structuredClone(service) : JSON.parse(JSON.stringify(service));
+}
+
+function setPolicyServiceSuggestedName(policy, serviceKey, serviceName) {
+  const canonicalKey = normalizeServiceDecisionKey(serviceKey);
+  const index = policyServiceIndexByCanonicalKey(policy, canonicalKey);
+  if (index < 0) return false;
+  const current = policy.analysis.services[index];
+  if (current?.found) return false;
+  const services = [...policy.analysis.services];
+  services[index] = { ...cloneServiceDecision(current), suggestedName: String(serviceName ?? '') };
+  policy.analysis = { ...policy.analysis, services };
+  return true;
+}
+
+function applySpecificServiceDecision(policy, serviceKey, serviceName) {
+  const canonicalKey = normalizeServiceDecisionKey(serviceKey);
+  if (!serviceName) return false;
+  if (!setPolicyServiceSuggestedName(policy, canonicalKey, serviceName)) return false;
+  markServiceDecisionResolved(policy, canonicalKey, 'specific');
+  return true;
+}
+
+function specificServicePropagationPlan(originPolicy, serviceKey) {
+  const canonicalKey = normalizeServiceDecisionKey(serviceKey);
+  if (!canonicalKey.match(/^(TCP|UDP)\/\d+$/)) return [];
+  return (deployState.analyzed || []).flatMap((policy, idx) => {
+    if (!policy || policy === originPolicy) return [];
+    const serviceIndex = policyServiceIndexByCanonicalKey(policy, canonicalKey);
+    if (serviceIndex < 0) return [];
+    const service = policy.analysis.services[serviceIndex];
+    if (service.found || policy._resolvedServiceKeys?.[canonicalKey] || policy._serviceReuse?.[canonicalKey]) return [];
+    return [{ idx, serviceKey: canonicalKey }];
+  });
+}
+
+function canonicalServiceKeyFromName(name) {
+  const compact = String(name || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+  let match = compact.match(/^(TCP|UDP)(\d+)$/);
+  if (!match) match = compact.match(/^FFSVC(TCP|UDP)(\d+)$/);
+  if (match) return `${match[1]}/${Number(match[2])}`;
+  match = compact.match(/^FFSVC(\d+)(TCP|UDP)$/);
+  return match ? `${match[2]}/${Number(match[1])}` : null;
+}
+
+function defaultSpecificServiceName(identity) {
+  return `FF_SVC_${identity.port}_${identity.proto}`;
+}
+
+function planInvalidSpecificServiceAssociations(policies) {
+  const entries = [];
+  for (let policyIndex = 0; policyIndex < (policies || []).length; policyIndex++) {
+    const policy = policies[policyIndex];
+    for (const service of policy?.analysis?.services || []) {
+      if (service?.found || service?._isMerged) continue;
+      const identity = canonicalMonoServiceIdentity(service);
+      if (!identity) continue;
+      const name = String(service.suggestedName || '').trim();
+      if (!name) continue;
+      const defaults = new Set([
+        defaultSpecificServiceName(identity).toUpperCase(),
+        `FF_SVC_${identity.proto}_${identity.port}`,
+      ]);
+      const decision = policy._resolvedServiceKeys?.[identity.key];
+      if (decision !== 'specific' && defaults.has(name.toUpperCase())) continue;
+      entries.push({ policyIndex, serviceKey: identity.key, identity, name, impliedKey: canonicalServiceKeyFromName(name) });
+    }
+  }
+  const preferredNameByKey = new Map();
+  for (const entry of entries) {
+    if (entry.impliedKey === entry.serviceKey && !preferredNameByKey.has(entry.serviceKey)) {
+      preferredNameByKey.set(entry.serviceKey, entry.name);
+    }
+  }
+  const repairs = new Map();
+  const markRepair = entry => repairs.set(`${entry.policyIndex}|${entry.serviceKey}`, {
+    policyIndex: entry.policyIndex,
+    serviceKey: entry.serviceKey,
+    invalidName: entry.name,
+    replacementName: preferredNameByKey.get(entry.serviceKey) || null,
+  });
+  const byName = new Map();
+  for (const entry of entries) {
+    const key = entry.name.toLowerCase();
+    if (!byName.has(key)) byName.set(key, []);
+    byName.get(key).push(entry);
+  }
+  const ambiguous = [];
+  for (const group of byName.values()) {
+    const definitions = new Set(group.map(entry => entry.serviceKey));
+    if (definitions.size < 2) continue;
+    const canonical = group.filter(entry => entry.impliedKey === entry.serviceKey);
+    const canonicalKeys = new Set(canonical.map(entry => entry.serviceKey));
+    if (canonicalKeys.size === 1) {
+      group.filter(entry =>
+        entry.name.toLowerCase() === 'tcp3268'
+        && entry.serviceKey === 'TCP/8530'
+        && canonicalKeys.has('TCP/3268')
+      ).forEach(markRepair);
+    } else {
+      ambiguous.push({ name: group[0].name, serviceKeys: [...definitions].sort() });
+    }
+  }
+  return { repairs: [...repairs.values()], ambiguous };
+}
+
+function applyInvalidSpecificServiceRecovery(policies, plan) {
+  const applied = [];
+  for (const repair of plan?.repairs || []) {
+    const policy = policies?.[repair.policyIndex];
+    const index = policyServiceIndexByCanonicalKey(policy, repair.serviceKey);
+    if (!policy || index < 0) continue;
+    const service = policy.analysis.services[index];
+    const identity = canonicalMonoServiceIdentity(service);
+    if (!identity) continue;
+    const services = [...policy.analysis.services];
+    const next = cloneServiceDecision(service);
+    next.suggestedName = repair.replacementName || '';
+    services[index] = next;
+    policy.analysis = { ...policy.analysis, services };
+    if (repair.replacementName) {
+      markServiceDecisionResolved(policy, identity.key, 'specific');
+    } else {
+      if (policy._resolvedServiceKeys) {
+        policy._resolvedServiceKeys = { ...policy._resolvedServiceKeys };
+        delete policy._resolvedServiceKeys[identity.key];
+        if (Object.keys(policy._resolvedServiceKeys).length === 0) delete policy._resolvedServiceKeys;
+      }
+      if (policy._serviceReuse) {
+        policy._serviceReuse = { ...policy._serviceReuse };
+        delete policy._serviceReuse[identity.key];
+        if (Object.keys(policy._serviceReuse).length === 0) delete policy._serviceReuse;
+      }
+    }
+    if (Array.isArray(policy._backendIssues)) {
+      const remaining = policy._backendIssues.filter(issue => !String(issue).includes('SERVICE_NAME_CONFLICT'));
+      if (remaining.length) policy._backendIssues = remaining;
+      else {
+        delete policy._backendIssues;
+        delete policy._backendIssueKind;
+        delete policy._backendValidated;
+      }
+    }
+    applied.push(repair);
+  }
+  return { applied, ambiguous: plan?.ambiguous || [] };
+}
+
+function compatiblePolicyServiceKeys(policy, serviceName, requestedKeys) {
+  const wanted = requestedKeys === undefined || requestedKeys === null ? null
+    : requestedKeys instanceof Set
+      ? requestedKeys : new Set((requestedKeys || []).map(key => String(key).toUpperCase()));
+  const eligible = new Set();
+  for (const service of policy?.analysis?.services || []) {
+    if (service.found || isServiceDecisionResolved(policy, service)) continue;
+    const matches = service.compatibleMatches || (service.compatibleMatch ? [service.compatibleMatch] : []);
+    if (!matches.some(match => match?.name === serviceName)) continue;
+    for (const key of serviceReuseKeys(service)) {
+      if ((!wanted || wanted.has(key))
+          && !policy?._resolvedServiceKeys?.[key]
+          && !policy?._serviceReuse?.[key]) eligible.add(key);
+    }
+  }
+  return [...eligible];
+}
+
+function servicePropagationPlan(originPolicy, serviceName, serviceKeys) {
+  const requestedKeys = new Set((serviceKeys || []).map(key => String(key).toUpperCase()).filter(Boolean));
+  if (!originPolicy || !serviceName || requestedKeys.size < 2) return [];
+  return (deployState.analyzed || []).flatMap((policy, idx) => {
+    if (!policy || policy === originPolicy) return [];
+    const keys = compatiblePolicyServiceKeys(policy, serviceName);
+    return keys.length ? [{ idx, keys }] : [];
+  });
+}
+
+function _setDrawerServicePropagationPending(policy, pending) {
+  if (!pending) {
+    delete policy._propagateServicePending;
+    return;
+  }
+  Object.defineProperty(policy, '_propagateServicePending', {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value: pending,
+  });
+}
+
+function serializePolicyServiceLabels(policy) {
+  const services = policy?.analysis?.services || [];
+  const labels = services
+    .filter(service => !service?._isMerged)
+    .map(service => service?.label)
+    .filter(Boolean);
+  const mergedSourceLabels = services.flatMap(service => {
+    if (!service?._isMerged) return [];
+    const proto = String(service.proto || '').toUpperCase();
+    if (!['TCP', 'UDP'].includes(proto) || !Array.isArray(service.sourcePorts)) return [];
+    return service.sourcePorts
+      .map(Number)
+      .filter(port => Number.isInteger(port) && port >= 1 && port <= 65535)
+      .map(port => `${proto}/${port}`);
+  });
+  return [...new Set([...labels, ...mergedSourceLabels])];
+}
+
+function serializeMergedServiceDecisions(policy) {
+  return (policy?.analysis?.services || []).filter(service => service?._isMerged).map(service => ({
+    name: service.suggestedName,
+    proto: service.proto,
+    sourcePorts: [...(service.sourcePorts || [])],
+    ...(Array.isArray(service.ports) ? { ports: [...service.ports] } : {}),
+    ...(typeof service.portRange === 'string' ? { portRange: service.portRange } : {}),
+  }));
+}
+
 function mergedServicePortLabel(svc) {
   const proto = String(svc?.proto || '').toUpperCase();
   const portSpec = svc?.portRange || (svc?.ports || []).join(',');
   return portSpec ? `${proto}/${portSpec}` : (svc?.portHint || svc?.label || proto);
+}
+
+function destinationRepresentationMode(policy) {
+  if (['hosts', 'detected-subnets', 'aggregate'].includes(policy?._dstMode)) return policy._dstMode;
+  return policy?._use32Dst ? 'hosts' : 'aggregate';
+}
+
+function destinationObservedHosts(policy) {
+  const excluded = new Set(policy?._excludedDstHosts || []);
+  return [...new Set((policy?.dstHosts || [])
+    .filter(host => typeof host === 'string' && host && !excluded.has(host)))];
+}
+
+function normalizeDestinationCidr(cidr) {
+  const match = String(cidr ?? '').trim().match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)\/(\d{1,2})$/);
+  if (!match) return null;
+  const octets = match.slice(1, 5).map(Number);
+  const prefix = Number(match[5]);
+  if (octets.some(octet => !Number.isInteger(octet) || octet < 0 || octet > 255)
+      || !Number.isInteger(prefix) || prefix < 1 || prefix > 32) return null;
+  const ip = octets.join('.');
+  const mask = prefix === 32 ? 0xFFFFFFFF : (0xFFFFFFFF << (32 - prefix)) >>> 0;
+  const networkInt = (ip2intFE(ip) & mask) >>> 0;
+  return { cidr: `${int2ipFE(networkInt)}/${prefix}`, prefix, networkInt };
+}
+
+function destinationCidrIssue(cidr, hosts) {
+  const parsed = normalizeDestinationCidr(cidr);
+  if (!parsed) return 'CIDR invalide (0.0.0.0/0 interdit)';
+  for (const host of hosts || []) {
+    const hostParsed = normalizeDestinationCidr(`${host}/32`);
+    if (!hostParsed || (((hostParsed.networkInt & (parsed.prefix === 32
+      ? 0xFFFFFFFF : (0xFFFFFFFF << (32 - parsed.prefix)) >>> 0)) >>> 0) !== parsed.networkInt)) {
+      return `IP observée ${host} hors du subnet`;
+    }
+  }
+  return '';
+}
+
+function destinationDetectedForPolicy(policy) {
+  const observed = destinationObservedHosts(policy);
+  const observedSet = new Set(observed);
+  const covered = new Set();
+  const result = [];
+  for (const candidate of (Array.isArray(policy?._dstDetectedSubnets) ? policy._dstDetectedSubnets : [])) {
+    const candidateHosts = Array.isArray(candidate?.hosts) ? candidate.hosts : [];
+    const hosts = [...new Set(candidateHosts
+      .filter(host => observedSet.has(host) && !covered.has(host)))];
+    if (hosts.length === 0) continue;
+    hosts.forEach(host => covered.add(host));
+    result.push({ ...candidate, hosts });
+  }
+  for (const host of observed) {
+    if (covered.has(host)) continue;
+    result.push({
+      subnet: `${host}/32`, hosts: [host], useSubnet: false,
+      addrName: '', addrFound: false, suggestedName: `FF_NET_${`${host}/32`.replace(/[./]/g, '_')}`,
+      route: null, sources: [],
+    });
+  }
+  return result;
+}
+
+function deduplicateDestinationScopes(policy) {
+  const observed = new Set(destinationObservedHosts(policy));
+  const assigned = new Set();
+  const bySubnet = new Map();
+  for (const candidate of policy?._multiDstSubnets || []) {
+    const parsed = normalizeDestinationCidr(candidate?.subnet);
+    const subnet = parsed?.cidr || String(candidate?.subnet || '').trim();
+    if (!subnet) continue;
+    const candidateHosts = Array.isArray(candidate?.hosts) ? candidate.hosts : [];
+    const hosts = [...new Set(candidateHosts
+      .filter(host => observed.has(host) && !assigned.has(host)))];
+    if (!hosts.length) continue;
+    hosts.forEach(host => assigned.add(host));
+    if (!bySubnet.has(subnet)) {
+      bySubnet.set(subnet, { ...candidate, subnet, hosts, useSubnet: parsed ? parsed.prefix !== 32 : candidate.useSubnet !== false });
+      continue;
+    }
+    const merged = bySubnet.get(subnet);
+    merged.hosts = [...new Set([...merged.hosts, ...hosts])].sort();
+    if (!merged.addrFound && candidate.addrFound === true) {
+      merged.addrFound = true;
+      merged.addrName = candidate.addrName || merged.addrName;
+    }
+    merged.manual = merged.manual === true || candidate.manual === true;
+  }
+  policy._multiDstSubnets = [...bySubnet.values()];
+  policy.dstTargets = policy._multiDstSubnets.map(candidate => candidate.subnet);
+  policy.dstTarget = policy.dstTargets[0] || destinationAggregateSubnet(policy);
+  return policy._multiDstSubnets;
+}
+
+function destinationScopeForElement(policy, element) {
+  const scopes = policy?._multiDstSubnets || [];
+  const index = Number(element?.dataset?.si);
+  const indexed = Number.isInteger(index) ? scopes[index] : null;
+  const key = element?.dataset?.subnetKey;
+  if (indexed && (!key || indexed.subnet === key)) return indexed;
+  return key ? scopes.find(scope => scope.subnet === key) : indexed;
+}
+
+function destinationAggregateSubnet(policy) {
+  if (policy?._dstAggregateManual && policy._dstAggregateSubnet) return policy._dstAggregateSubnet;
+  const hosts = destinationObservedHosts(policy);
+  const computed = hosts.length > 0 ? cidrSupernet(hosts.map(host => `${host}/32`)) : '';
+  return computed
+    || policy?._dstAggregateSubnet
+    || (policy?.dstTarget && policy.dstTarget !== 'all' ? policy.dstTarget : '')
+    || policy?._dstDetectedSubnets?.[0]?.subnet
+    || '';
+}
+
+function mergeDestinationDetectionCandidates(policies) {
+  const bySubnet = new Map();
+  for (const policy of policies || []) {
+    const candidateSource = Array.isArray(policy?._dstDetectedSubnets)
+      ? policy._dstDetectedSubnets
+      : Array.isArray(policy?._multiDstSubnets) ? policy._multiDstSubnets : [];
+    const observed = new Set((policy?.dstHosts || [])
+      .filter(host => !policy?._excludedDstHosts?.has(host)));
+    const covered = new Set();
+    const candidates = candidateSource.flatMap(candidate => {
+      const hosts = [...new Set((candidate?.hosts || [])
+        .filter(host => observed.has(host) && !covered.has(host)))];
+      if (!hosts.length) return [];
+      hosts.forEach(host => covered.add(host));
+      return [{ ...candidate, hosts }];
+    });
+    for (const candidate of candidates) {
+      if (!candidate?.subnet) continue;
+      if (!bySubnet.has(candidate.subnet)) {
+        bySubnet.set(candidate.subnet, {
+          ...candidate,
+          hosts: [],
+          addrName: candidate.addrName || '',
+          addrFound: candidate.addrFound === true,
+        });
+      }
+      const merged = bySubnet.get(candidate.subnet);
+      merged.hosts = [...new Set([...merged.hosts, ...(candidate.hosts || [])])].sort();
+      if (!merged.addrFound && candidate.addrFound === true) {
+        merged.addrFound = true;
+        merged.addrName = candidate.addrName || merged.addrName;
+      }
+      if (!merged.route && candidate.route) merged.route = candidate.route;
+      if ((!merged.sources || merged.sources.length === 0) && candidate.sources) merged.sources = candidate.sources;
+    }
+  }
+  return [...bySubnet.values()];
+}
+
+function destinationAggregateForPolicies(policies, fallback = '') {
+  const targets = [...new Set((policies || []).map(policy => {
+    if (policy?._dstAggregateManual && policy._dstAggregateSubnet) return policy._dstAggregateSubnet;
+    const hosts = (policy?.dstHosts || []).filter(host => !policy?._excludedDstHosts?.has(host));
+    return (hosts.length > 0 ? cidrSupernet(hosts.map(host => `${host}/32`)) : '')
+      || policy?._dstAggregateSubnet || policy?.dstTarget;
+  }).filter(target => target && target !== 'all'))];
+  if (targets.length <= 1) return targets[0] || fallback;
+  return cidrSupernet(targets) || fallback || targets[0];
+}
+
+function setDestinationRepresentation(policy, mode) {
+  if (!policy || !['hosts', 'detected-subnets', 'aggregate'].includes(mode)) return false;
+  const detected = destinationDetectedForPolicy(policy);
+  if (mode === 'detected-subnets' && detected.length === 0) return false;
+  const aggregate = destinationAggregateSubnet(policy);
+  if (!policy._dstAggregateManual && aggregate) policy._dstAggregateSubnet = aggregate;
+  policy._dstMode = mode;
+  policy._dstAddrGrpFound = false;
+  policy._useDstGroup = false;
+  if (mode === 'hosts') {
+    policy._use32Dst = true;
+    policy._isMultiDst = false;
+    delete policy._multiDstSubnets;
+    if (aggregate) {
+      policy.dstTarget = aggregate;
+      policy.dstTargets = [aggregate];
+    }
+    policy._dstAddrName = '';
+    return true;
+  }
+  if (mode === 'detected-subnets') {
+    const scopes = detected.map(item => ({
+      ...item,
+      hosts: [...new Set(item.hosts || [])],
+      useSubnet: item.subnet?.endsWith('/32') ? false : true,
+      addrName: item.addrName || '',
+      addrFound: item.addrFound === true,
+    }));
+    policy._use32Dst = false;
+    policy._isMultiDst = scopes.length > 0;
+    policy._multiDstSubnets = scopes;
+    policy.dstTargets = scopes.map(item => item.subnet);
+    policy.dstTarget = scopes[0]?.subnet || aggregate;
+    policy._dstDetectedSubnets = scopes.map(item => ({ ...item, hosts: [...(item.hosts || [])] }));
+    policy._dstAddrName = '';
+    return true;
+  }
+  policy._use32Dst = false;
+  policy._isMultiDst = false;
+  delete policy._multiDstSubnets;
+  if (aggregate) {
+    policy.dstTarget = aggregate;
+    policy.dstTargets = [aggregate];
+  }
+  policy._dstAddrName = policy._dstAggregateAddrName || '';
+  return true;
+}
+
+function destinationProvenanceLabel(candidate) {
+  if (candidate?.manual) return 'CIDR saisi manuellement';
+  const route = candidate?.route;
+  if (route) {
+    const source = String(route.source || 'static').toLowerCase();
+    const label = route.dst === '0.0.0.0/0'
+      ? 'Route par défaut'
+      : source === 'static' ? 'Route statique' : `Route ${source}`;
+    return `${label} · ${route.device || route.gateway || '—'}`;
+  }
+  const iface = candidate?.sources?.find(source => source.type === 'interface');
+  if (iface) return `Interface · ${iface.name}`;
+  const object = candidate?.sources?.find(source => source.type === 'object');
+  if (object) return `Objet FortiGate · ${object.name}`;
+  return 'Aucune provenance réseau spécifique';
 }
 
 function syncHostCell(idx, type) {
@@ -3524,8 +4271,14 @@ function populateDrawer(idx) {
   const p = deployState.analyzed[idx];
   if (!p) return;
   const a = p.analysis || {};
+  const pid0 = (p.policyIds || [])[0] || idx;
+  const currentAction = (p._action || p.action || 'accept').toLowerCase();
   const title = document.getElementById('drawer-title');
-  title.textContent = `Policy ${p._policyName || (p.policyIds || [])[0] || idx}`;
+  title.textContent = `Policy ${pid0}`;
+  const headerActions = document.getElementById('drawer-header-actions');
+  const drawerUndoDisabled = _drawerIdx === null || _drawerHistory.length === 0 ? ' disabled' : '';
+  if (headerActions) headerActions.innerHTML = `<button class="btn-sm drawer-view-flows" type="button" onclick="filterFlowsByPolicy(${idx})">→ Voir les flux</button><button class="btn-sm drawer-undo" id="drawer-undo" type="button" aria-label="Annuler la dernière modification" title="Annuler la dernière modification"${drawerUndoDisabled}><span aria-hidden="true">Annuler</span> <kbd aria-hidden="true">Ctrl+Z</kbd></button>`;
+  _syncDrawerUndoButton();
 
   const ifOpts = (deployState.ifaceOpts || []).map(o =>
     `<option value="${escHtml(o.value)}" ${(o.value === (p._srcintf || '')) ? 'selected' : ''}>${escHtml(o.label)}</option>`
@@ -3533,7 +4286,6 @@ function populateDrawer(idx) {
   const ifOptsDst = (deployState.ifaceOpts || []).map(o =>
     `<option value="${escHtml(o.value)}" ${(o.value === (p._dstintf || '')) ? 'selected' : ''}>${escHtml(o.label)}</option>`
   ).join('');
-  const pid0 = (p.policyIds || [])[0] || idx;
   const suggestedSrcGrp = `FF_POLICY_${pid0}_SRC`;
   const suggestedDstGrp = `GRP_${pid0}_DST`;
 
@@ -3593,7 +4345,7 @@ function populateDrawer(idx) {
       </div>${hostsHtml}`;
     }).join('');
     srcSection = `<div class="drawer-section drawer-network-card drawer-source-card">
-      <div class="drawer-section-title">Sources (${srcSubs.length} subnets)</div>
+      <div class="drawer-section-title">Source · ${srcSubs.length} subnets</div>
       ${srcSubRows}
       <div class="drawer-toggle-row" style="margin-top:8px">
         <button class="drawer-toggle-btn drawer-grp-toggle ${p._useSrcGroup ? 'active' : ''}" data-type="src">Grouper (addrgrp)</button>
@@ -3646,7 +4398,64 @@ function populateDrawer(idx) {
 
   // Dst section — depends on multi-dst or single
   let dstSection = '';
-  if (p._isMultiDst && p._multiDstSubnets?.length) {
+  if (p.dstType === 'private' && p._dstDetectedSubnets?.length) {
+    const detected = destinationDetectedForPolicy(p);
+    const representationMode = destinationRepresentationMode(p);
+    const aggregateTarget = destinationAggregateSubnet(p);
+    const visibleDstHosts = destinationObservedHosts(p);
+    const modeButton = (mode, label, disabled = false) => `<button type="button" class="drawer-toggle-btn drawer-destination-mode ${representationMode === mode ? 'active' : ''} ${disabled ? ' disabled' : ''}" data-mode="${mode}" aria-pressed="${representationMode === mode}"${disabled ? ' disabled' : ''}>${label}</button>`;
+    const modeHtml = `<div class="drawer-destination-mode-group drawer-destination-modes" role="group" aria-label="Mode de destination">
+      ${modeButton('hosts', `Hôtes /32 (${visibleDstHosts.length})`, visibleDstHosts.length === 0)}
+      ${modeButton('detected-subnets', `Sous-réseaux détectés (${detected.length})`, detected.length === 0)}
+      ${modeButton('aggregate', 'Réseau agrégé')}
+    </div>`;
+    const hostRows = visibleDstHosts.map(h => `<div class="drawer-host-row">
+      <span class="drawer-host-ip">${escHtml(h)}</span>
+      ${drawerHostControl(p, h, 'dst')}
+      <button class="btn-del-item" data-del-type="dst-host" data-host="${escHtml(h)}" title="Retirer cet hôte">✕</button>
+    </div>`).join('');
+    const hostHtml = representationMode === 'hosts'
+      ? `<div class="drawer-host-list">${hostRows}</div>` : '';
+    const selectedDetected = p._multiDstSubnets?.length
+      ? destinationDetectedForPolicy({ ...p, _dstDetectedSubnets: p._multiDstSubnets })
+      : detected;
+    const detectedHtml = representationMode === 'detected-subnets'
+      ? `<div class="drawer-destination-detected-list">${selectedDetected.map((item, si) => {
+        const isHost = item.useSubnet === false || item.subnet?.endsWith('/32');
+        const objectKey = `multi-dst:${si}`;
+        const suggestedName = item.suggestedName || `FF_NET_${(item.subnet || '').replace(/[./]/g, '_')}`;
+        const nameInput = `<input class="drawer-input drawer-multidst-name" data-object-key="${objectKey}" data-si="${si}" value="${escHtml(inputVal(item.addrName, suggestedName))}" placeholder="${escHtml(suggestedName)}" style="flex:1;font-size:10px">`;
+        const objectHtml = isHost ? '' : drawerNamedObjectControl(p, objectKey, item.addrName, item.addrFound, nameInput, item.subnet);
+        const hosts = (item.hosts || []).map(host => escHtml(host)).join(', ');
+        return `<div class="drawer-destination-detected-row">
+          <div class="drawer-destination-detected-main">
+            <input class="drawer-input drawer-destination-cidr" data-si="${si}" value="${escHtml(item.subnet || '')}" aria-label="CIDR destination ${escHtml(String(si + 1))}" style="max-width:150px;font-size:10px">
+            ${objectHtml}
+          </div>
+          <div class="drawer-destination-provenance">${escHtml(destinationProvenanceLabel(item))}</div>
+          ${hosts ? `<div class="drawer-destination-observed">IPs observées : <span class="mono">${hosts}</span></div>` : ''}
+          ${isHost && hosts ? `<div class="drawer-host-list">${(item.hosts || []).map(host => `<div class="drawer-host-row"><span class="drawer-host-ip">${escHtml(host)}</span>${drawerHostControl(p, host, 'dst')}</div>`).join('')}</div>` : ''}
+          <div class="drawer-destination-cidr-error" data-si="${si}">${escHtml(item._cidrError || '')}</div>
+        </div>`;
+      }).join('')}</div>` : '';
+    const aggregateAddressMatch = a.dstAddr?.found && a.dstAddr.cidr === aggregateTarget;
+    const aggregateName = p._dstAddrName || (aggregateAddressMatch ? a.dstAddr.name : '') || '';
+    const aggregateSuggestedName = `FF_NET_${(aggregateTarget || '').replace(/[./]/g, '_')}`;
+    const aggregateHtml = representationMode === 'aggregate'
+      ? `<div class="drawer-field"><span class="drawer-field-label">CIDR</span><input class="drawer-input drawer-destination-aggregate-cidr" value="${escHtml(aggregateTarget || '')}" aria-label="CIDR réseau agrégé"><span class="drawer-destination-cidr-error" data-aggregate-cidr-error="true">${escHtml(p._dstAggregateError || '')}</span></div>
+        <div class="drawer-field drawer-object-field"><span class="drawer-field-label">Objet addr</span>
+          ${drawerNamedObjectControl(p, 'addr:dst', aggregateName, aggregateAddressMatch, `<input class="drawer-input drawer-dst-name" data-object-key="addr:dst" value="${escHtml(inputVal(aggregateName, aggregateSuggestedName))}" placeholder="${escHtml(aggregateName || aggregateSuggestedName)}">${badgeHtml('auto')}`, aggregateTarget)}
+        </div>` : '';
+    dstSection = `<div class="drawer-section drawer-network-card drawer-destination-card">
+      <div class="drawer-section-title">Destination · ${visibleDstHosts.length} hôtes</div>
+      ${modeHtml}
+      ${hostHtml}
+      ${detectedHtml}
+      ${aggregateHtml}
+      ${_addrBanner('dst')}
+      <div class="drawer-field drawer-interface-field"><span class="drawer-field-label">Interface</span><select class="drawer-input drawer-dstintf">${ifOptsDst}</select></div>
+    </div>`;
+  } else if (p._isMultiDst && p._multiDstSubnets?.length) {
     const subs = p._multiDstSubnets;
     const subRows = subs.map((s, si) => {
       const isSubnet = s.useSubnet !== false;
@@ -3679,7 +4488,7 @@ function populateDrawer(idx) {
     const isMultiDstWan = p._isWan || p.dstTypeSummary === 'public' || subs.some(s => s.subnet === 'all' || (p.dstTypes || {})[s.subnet] === 'public');
     const dstUseAllMulti = p._dstUseAll === true;
     dstSection = `<div class="drawer-section drawer-network-card drawer-destination-card">
-      <div class="drawer-section-title">Destinations (${subs.length})</div>
+      <div class="drawer-section-title">Destination · ${subs.length} scopes</div>
       ${isMultiDstWan ? `<div class="drawer-toggle-row" style="margin-bottom:8px">
         <span style="font-size:11px;color:var(--text2)">Mode :</span>
         <button class="drawer-toggle-btn drawer-dstall-btn ${!dstUseAllMulti ? 'active' : ''}" data-val="false">IPs spécifiques (${subs.length})</button>
@@ -3701,6 +4510,18 @@ function populateDrawer(idx) {
     const dstFound = a.dstAddr?.found;
     const isWan = p._isWan || p.dstType === 'public';
     const dstUseAll = p._dstUseAll !== undefined ? p._dstUseAll : isWan;
+    const privateDetected = p.dstType === 'private' && p._dstDetectedSubnets?.length
+      ? destinationDetectedForPolicy(p) : [];
+    const privateRepresentation = p.dstType === 'private'
+      ? (p._dstMode === 'subnet' ? 'aggregate' : destinationRepresentationMode(p)) : '';
+    const privateModeButton = (mode, label, disabled = false) => `<button type="button" class="drawer-toggle-btn drawer-destination-mode ${privateRepresentation === mode ? 'active' : ''} ${disabled ? ' disabled' : ''}" data-mode="${mode}" aria-pressed="${privateRepresentation === mode}"${disabled ? ' disabled' : ''}>${label}</button>`;
+    const privateModeHtml = p.dstType === 'private' ? `<div class="drawer-destination-mode-group drawer-destination-modes" role="group" aria-label="Mode de destination">
+      ${privateModeButton('hosts', `Hôtes /32 (${destinationObservedHosts(p).length})`, destinationObservedHosts(p).length === 0)}
+      ${privateModeButton('detected-subnets', `Sous-réseaux détectés (${privateDetected.length})`, privateDetected.length === 0)}
+      ${privateModeButton('aggregate', 'Réseau agrégé')}
+    </div>` : '';
+    const showPrivateAggregate = p.dstType === 'private'
+      && (privateRepresentation === 'aggregate' || dstMode === 'subnet');
     let dstHostsHtml = '';
     if (dstHosts.length > 0 && (dstMode === 'hosts' || (isWan && !dstUseAll))) {
       const dstFoundSet = new Set(p._dstHostsFound || []);
@@ -3730,7 +4551,7 @@ function populateDrawer(idx) {
       </div>`;
     }
     dstSection = `<div class="drawer-section drawer-network-card drawer-destination-card">
-      <div class="drawer-section-title">Destination</div>
+      <div class="drawer-section-title">Destination · ${destinationObservedHosts(p).length} hôtes</div>
       <div class="drawer-field">
         <span class="drawer-field-label">Target</span>
         <span class="drawer-field-value">${escHtml(p.dstTarget || '—')}</span>
@@ -3744,12 +4565,8 @@ function populateDrawer(idx) {
         <span class="drawer-field-label">Objet addr</span>
         <span class="drawer-field-value" style="color:var(--success)">&#10003; all${badgeHtml('config')}</span>
       </div>` : dstWanSpecificHtml}
-      ` : `${p.dstType === 'private' ? `<div class="drawer-toggle-row">
-        <span style="font-size:11px;color:var(--text2)">Mode :</span>
-        <button class="drawer-toggle-btn drawer-mode-btn ${dstMode==='subnet'?'active':''}" data-type="dst" data-mode="subnet">/${p.dstTarget?.split('/')[1] || 'CIDR'} réseau</button>
-        <button class="drawer-toggle-btn drawer-mode-btn ${dstMode==='hosts'?'active':''} ${dstHosts.length<1?'disabled':''}" data-type="dst" data-mode="hosts">/32 hôtes (${dstHosts.length})</button>
-      </div>` : ''}
-      ${dstMode === 'subnet' ? `<div class="drawer-field drawer-object-field">
+      ` : `${privateModeHtml}
+      ${showPrivateAggregate ? `<div class="drawer-field drawer-object-field">
         <span class="drawer-field-label">Objet addr</span>
         ${drawerNamedObjectControl(p, 'addr:dst', dstAddrName, dstFound, `<input class="drawer-input drawer-dst-name" data-object-key="addr:dst" value="${escHtml(inputVal(dstAddrName, a.dstAddr?.suggestedName || suggestAddrNameFE(p.dstTarget)))}" placeholder="${escHtml(dstAddrName || 'FF_...')}">${badgeHtml('auto')}`, a.dstAddr?.cidr || p.dstTarget || '')}
       </div>` : ''}
@@ -3796,14 +4613,20 @@ function populateDrawer(idx) {
       ${mergeMode === 'range' ? `<input class="drawer-input svc-merge-range" value="${escHtml(p._mergeRange || mergeRangeSuggestion)}" placeholder="${mergeRangeSuggestion}" style="width:100px;font-size:11px">` : `<span style="font-size:10px;color:var(--text2)">${mergePorts.join(', ')}</span>`}
       <button class="btn-sm btn-accent svc-do-merge" style="font-size:10px">Fusionner</button>
     </div>` : '';
+  const compatiblePortSpec = String(commonCompatibleService?.portSpec || '').replace(/(\d)-(\d)/g, '$1–$2');
+  const selectedPortLabels = commonCompatibleService?.ports?.map(port => `${mergeProto}/${port}`) || [];
+  const selectedPortSummary = selectedPortLabels.length > 3
+    ? `${selectedPortLabels.slice(0, 3).join(', ')}… +${fmtNum(selectedPortLabels.length - 3)} autres`
+    : selectedPortLabels.join(', ');
+  const selectedPortTitle = selectedPortLabels.join(', ');
   const compatibleSelectionHtml = showGlobalCompatibleDecision ? `
-    <div class="svc-selected-compatible">
-      <strong>Un service FortiGate existant peut couvrir ces ports :</strong>
-      <span><b>Service existant compatible :</b> ${escHtml(commonCompatibleService.name)} <code>${escHtml(commonCompatibleService.portSpec)}</code></span>
-      <small>Ports sélectionnés : ${commonCompatibleService.ports.map(port => `${mergeProto}/${port}`).join(', ')}</small>
-      <small>${fmtNum(commonCompatibleService.extraPortCount)} ports supplémentaires couverts</small>
+    <div class="svc-selected-compatible" title="${escHtml(`${commonCompatibleService.portSpec} · Ports sélectionnés : ${selectedPortTitle}`)}">
+      <div class="svc-selected-compatible-copy">
+        <strong aria-label="${escHtml(commonCompatibleService.name)} couvre les ports sélectionnés">${escHtml(commonCompatibleService.name)} couvre les ports sélectionnés</strong>
+        <small title="${escHtml(selectedPortTitle)}">${escHtml(compatiblePortSpec)} · Ports sélectionnés : ${escHtml(selectedPortSummary)} · +${fmtNum(commonCompatibleService.extraPortCount)} ports supplémentaires</small>
+      </div>
       <div>
-        <button class="btn-sm btn-accent svc-use-compatible-selected ${globalCompatibleSelected ? 'btn-active' : ''}" data-proto="${mergeProto}" data-ports="${commonCompatibleService.ports.join(',')}" data-service-name="${escHtml(commonCompatibleService.name)}">${globalCompatibleSelected ? '✓ Service utilisé' : 'Utiliser ce service'}</button>
+        <button class="btn-sm btn-accent svc-use-compatible-selected ${globalCompatibleSelected ? 'btn-active' : ''}" data-proto="${mergeProto}" data-ports="${commonCompatibleService.ports.join(',')}" data-service-name="${escHtml(commonCompatibleService.name)}" aria-label="Utiliser ${escHtml(commonCompatibleService.name)}">${globalCompatibleSelected ? '✓ Service utilisé' : `Utiliser ${escHtml(commonCompatibleService.name)}`}</button>
         <button class="btn-sm svc-create-new-selected" data-selection-signature="${escHtml(selectionSignature)}">Créer un nouveau service</button>
       </div>
     </div>` : '';
@@ -3836,20 +4659,20 @@ function populateDrawer(idx) {
       !serviceReuseKeys(service).some(key => selectedGlobalServiceKeys.has(key)))
     : servicesWithoutResolvedExisting;
   const displayServiceCount = visibleSvcList.length + resolvedExistingGroups.size + (showGlobalCompatibleDecision ? 1 : 0);
-  const svcsHtml = resolvedExistingHtml + visibleSvcList.map(svc => {
+  const renderService = svc => {
     if (svc._isMerged) {
       const mergedName = svc.suggestedName || svc.label;
       const mergedPortLabel = svc.portRange
         ? `${String(svc.proto || '').toUpperCase()}/${svc.portRange}`
         : mergedServicePortLabel(svc);
       const rawKey = svc.label || mergedName;
-      return `<div class="drawer-field" title="${escHtml(svc.portHint || mergedPortLabel)}"><span class="drawer-field-label">${escHtml(mergedPortLabel)}</span><span class="drawer-field-value" style="color:var(--success)">&#10003; ${escHtml(mergedName)}${badgeHtml('config')}</span><button class="btn-del-item" data-del-type="svc" data-svc-key="${escHtml(rawKey)}" title="Retirer ce service de la policy">✕</button></div>`;
+      return `<div class="drawer-field drawer-service-row" title="${escHtml(svc.portHint || mergedPortLabel)}"><span class="drawer-field-label">${escHtml(mergedPortLabel)}</span><span class="drawer-field-value" style="color:var(--success)">&#10003; ${escHtml(mergedName)}${badgeHtml('config')}</span><button class="btn-del-item" type="button" data-del-type="svc" data-svc-key="${escHtml(rawKey)}" aria-label="Retirer ${escHtml(mergedPortLabel)}" title="Retirer ce service de la policy">✕</button></div>`;
     }
     if (svc.found) {
       const dispLabel = stripPd(svc.label || svc.name);
       const dispName  = stripPd(svc.name);
       const rawKey    = svc.label || svc.name; // keep raw for data-svc-key (CLI needs full name)
-      return `<div class="drawer-field" title="${escHtml(svc.portHint || '')}"><span class="drawer-field-label">${escHtml(dispLabel)}</span><span class="drawer-field-value" style="color:var(--success)">&#10003; ${escHtml(dispName)}${badgeHtml(svc.source === 'predefined' ? 'predefined' : 'config')}</span><button class="btn-del-item" data-del-type="svc" data-svc-key="${escHtml(rawKey)}" title="Retirer ce service de la policy">✕</button></div>`;
+      return `<div class="drawer-field drawer-service-row" title="${escHtml(svc.portHint || '')}"><span class="drawer-field-label">${escHtml(dispLabel)}</span><span class="drawer-field-value" style="color:var(--success)">&#10003; ${escHtml(dispName)}${badgeHtml(svc.source === 'predefined' ? 'predefined' : 'config')}</span><button class="btn-del-item" type="button" data-del-type="svc" data-svc-key="${escHtml(rawKey)}" aria-label="Retirer ${escHtml(dispLabel)}" title="Retirer ce service de la policy">✕</button></div>`;
     }
     // Detect port-notation labels like "UDP/11436" from FortiGate logs
     const _pnm = svc.label?.match(/^(TCP|UDP)\/(\d+)$/i);
@@ -3884,28 +4707,35 @@ function populateDrawer(idx) {
       : '';
     if (serviceDecision === 'specific') {
       const finalName = svc.suggestedName || svcAutoName;
-      return `<div class="drawer-field" title="${escHtml(observedServiceLabel)}"><span class="drawer-field-label">${escHtml(svc.label || observedServiceLabel)}</span><span class="drawer-field-value" style="color:var(--success)">&#10003; ${escHtml(finalName)}${badgeHtml('config')}</span><button class="btn-del-item" data-del-type="svc" data-svc-key="${escHtml(svcKey)}" title="Retirer ce service de la policy">✕</button></div>`;
+      return `<div class="drawer-field drawer-service-row" title="${escHtml(observedServiceLabel)}"><span class="drawer-field-label">${escHtml(svc.label || observedServiceLabel)}</span><span class="drawer-field-value" style="color:var(--success)">&#10003; ${escHtml(finalName)}${badgeHtml('config')}</span><button class="btn-del-item" type="button" data-del-type="svc" data-svc-key="${escHtml(svcKey)}" aria-label="Retirer ${escHtml(svc.label || observedServiceLabel)}" title="Retirer ce service de la policy">✕</button></div>`;
     }
-    const compatibilityHtml = compatibleMatch && !serviceDecisionResolved && !commonCompatibleService ? `<div class="drawer-service-compatibility ${usingCompatible ? 'is-selected' : ''}">
-      <div><small>Service observé</small><strong class="mono">${escHtml(observedServiceLabel)}</strong></div>
-      <div><small>Service compatible</small><strong>${escHtml(compatibleMatch.name)}</strong><span class="mono">${escHtml(compatibleMatch.portSpec)}</span></div>
-      <div><small>Extension possible</small><strong>${fmtNum(compatibleMatch.extraPortCount)} ports supplémentaires</strong></div>
+    const compatibilityHtml = compatibleMatch && !serviceDecisionResolved && !commonCompatibleService ? `<div class="drawer-service-compatibility-line ${usingCompatible ? 'is-selected' : ''}" title="${escHtml(compatibleMatch.portSpec)}" aria-label="Service observé · Service compatible · Extension possible">
+      <span class="drawer-service-compatibility-text"><strong class="mono">${escHtml(observedServiceLabel)}</strong> observé → <strong>${escHtml(compatibleMatch.name)}</strong> compatible · <strong>${fmtNum(compatibleMatch.extraPortCount)} ports</strong></span>
+      <span class="drawer-service-compatibility-spec mono">${escHtml(compatibleMatch.portSpec)}</span>
       <div class="drawer-service-compatibility-actions">
         <button class="btn-sm drawer-use-compatible-service ${usingCompatible ? 'btn-active' : ''}" data-service-key="${escHtml(reuseKey)}" data-service-keys="${escHtml(reuseKeys.join(','))}" data-service-name="${escHtml(compatibleMatch.name)}">${usingCompatible ? '✓ Service utilisé' : 'Utiliser ce service'}</button>
         ${_icmp ? '' : `<button class="btn-sm drawer-create-specific-service ${usingCompatible ? '' : 'btn-active'}" data-service-key="${escHtml(reuseKey)}" data-service-keys="${escHtml(reuseKeys.join(','))}">Créer un service spécifique</button>`}
       </div>
     </div>` : '';
-    return `<div class="drawer-service-item">
-      <div class="drawer-field${isSelectable ? ' svc-selectable' : ''}" data-svc-key="${escHtml(svcKey)}" style="cursor:${isSelectable?'pointer':'default'};${isSelected ? 'background:rgba(99,179,237,0.10);border-radius:4px;outline:1px solid var(--accent);' : ''}">
-        ${isSelectable ? `<input type="checkbox" class="svc-sel-chk" ${isSelected?'checked':''} style="margin-right:4px;cursor:pointer;flex-shrink:0">` : ''}
+    return `<div class="drawer-service-item${compatibilityHtml ? ' drawer-service-item-with-compatibility' : ''}">
+      <div class="drawer-field drawer-service-row${isSelectable ? ' svc-selectable' : ''}" data-svc-key="${escHtml(svcKey)}"${isSelectable ? ` role="button" tabindex="0" aria-pressed="${isSelected}"` : ''} style="cursor:${isSelectable?'pointer':'default'};${isSelected ? 'background:rgba(99,179,237,0.10);border-radius:4px;outline:1px solid var(--accent);' : ''}">
         <span class="drawer-field-label" title="${escHtml(hintTitle)}">${escHtml(svc.label || `${svc.port}/${svc.proto}`)}</span>
         ${svc.isNamed && !_pnm ? hintText : ''}
         <input class="drawer-input drawer-svc-name" data-svc-key="${escHtml(svcKey)}" value="${escHtml(svcInputValue)}" placeholder="${escHtml(svcDefaultName)}" onclick="event.stopPropagation()" ${usingCompatible || _icmp ? 'disabled' : ''}>${badgeHtml('auto')}
-        <button class="btn-del-item" data-del-type="svc" data-svc-key="${escHtml(svcKey)}" title="Retirer ce service de la policy">✕</button>
+        <button class="btn-del-item" type="button" data-del-type="svc" data-svc-key="${escHtml(svcKey)}" aria-label="Retirer ${escHtml(svc.label || observedServiceLabel)}" title="Retirer ce service de la policy">✕</button>
       </div>
       ${compatibilityHtml}
     </div>`;
-  }).join('');
+  };
+  const resolvedVisibleServices = visibleSvcList.filter(svc =>
+    svc._isMerged || svc.found || isServiceDecisionResolved(p, svc));
+  const pendingVisibleServices = visibleSvcList.filter(svc =>
+    !(svc._isMerged || svc.found || isServiceDecisionResolved(p, svc)));
+  const resolvedServiceEntries = resolvedExistingHtml
+    + resolvedVisibleServices.map(renderService).join('');
+  const pendingServiceEntries = pendingVisibleServices.map(renderService).join('');
+  const configuredServiceCount = resolvedExistingGroups.size + resolvedVisibleServices.length;
+  const pendingServiceCount = pendingVisibleServices.length + (showGlobalCompatibleDecision ? 1 : 0);
   // Propagation banner (shown after blur on svc name when other policies have same port/proto)
   const pp = p._propagatePending;
   const propagateBanner = pp ? `<div class="svc-propagate-banner">
@@ -3913,27 +4743,40 @@ function populateDrawer(idx) {
     <button class="btn-sm btn-accent svc-prop-yes">Oui</button>
     <button class="btn-sm svc-prop-no">Non</button>
   </div>` : '';
+  const servicePropagation = p._propagateServicePending;
+  const servicePropagationBanner = servicePropagation?.targets?.length ? `<div class="svc-propagate-banner drawer-service-propagate-banner">
+    <span>${servicePropagation.targets.length} autre${servicePropagation.targets.length > 1 ? 's' : ''} polic${servicePropagation.targets.length > 1 ? 'ies' : 'y'} contien${servicePropagation.targets.length > 1 ? 'nent' : 't'} des ports couverts par <strong>${escHtml(servicePropagation.serviceName)}</strong>. Appliquer ce service aux policies concernées&nbsp;?</span>
+    <button class="btn-sm btn-accent svc-prop-yes svc-service-prop-yes">Oui</button>
+    <button class="btn-sm svc-prop-no svc-service-prop-no">Non</button>
+  </div>` : '';
 
   const body = document.getElementById('drawer-body');
   body.innerHTML = `
-    <div class="drawer-top-actions"><button class="btn-sm" onclick="filterFlowsByPolicy(${idx})">→ Voir les flux</button></div>
     <div class="drawer-section drawer-general-summary">
       <div class="drawer-section-title">Général</div>
-      <div class="drawer-general-grid">
-        <div><span>Direction</span>${p._isWan ? '<span class="dir-badge wan">WAN</span>' : '<span class="dir-badge lan">LAN</span>'}</div>
-        <div><span>Sessions</span><strong>${fmtNum(p.sessions || 0)}</strong></div>
-        <div><span>Policy ID</span><strong>${(p.policyIds || [])[0] || '—'}</strong></div>
-        <div class="drawer-general-action"><span>Action</span><button class="btn-sm drawer-action-btn ${(p._action||'accept')==='accept'?'active':''}" data-action="accept">✓ Accept</button><button class="btn-sm drawer-action-btn ${(p._action||'accept')==='deny'?'active':''}" data-action="deny">✕ Deny</button></div>
-        <div class="drawer-general-control"><span>Log</span><select class="drawer-input drawer-log-sel"><option value="all" ${(p._log||'all')==='all'?'selected':''}>log all</option><option value="utm" ${p._log==='utm'?'selected':''}>log utm</option><option value="disable" ${p._log==='disable'?'selected':''}>log disable</option></select></div>
-        <div class="drawer-general-control"><span>NAT</span><label><input type="checkbox" class="drawer-nat" ${p._nat ? 'checked' : ''}> Activer</label></div>
-        <div class="drawer-general-control drawer-general-name"><span>Nom policy</span><input class="drawer-input drawer-policy-name" value="${escHtml(p._policyName || '')}" placeholder="FF_POLICY_..."></div>
+      <div class="drawer-general-lines">
+        <div class="drawer-general-line"><span>Direction</span><strong class="dir-badge ${p._isWan ? 'wan' : 'lan'}">${p._isWan ? 'WAN' : 'LAN'}</strong></div>
+        <div class="drawer-general-line"><span>Sessions</span><strong>${fmtNum(p.sessions || 0)}</strong></div>
+        <div class="drawer-general-line drawer-general-action"><span>Action</span><div class="drawer-action-group" role="group" aria-label="Action de la policy">
+          <button type="button" class="btn-sm drawer-action-btn accept ${currentAction === 'accept' ? 'active' : ''}" data-action="accept" aria-pressed="${currentAction === 'accept'}">✓ ACCEPT</button>
+          <button type="button" class="btn-sm drawer-action-btn deny ${currentAction === 'deny' ? 'active' : ''}" data-action="deny" aria-pressed="${currentAction === 'deny'}">✕ DENY</button>
+        </div></div>
+        <div class="drawer-general-line"><span>Policy ID</span><strong>${pid0}</strong></div>
+        <div class="drawer-general-line drawer-general-control"><span>Log</span><select class="drawer-input drawer-inline-select drawer-log-sel" aria-label="Journalisation"><option value="all" ${(p._log||'all')==='all'?'selected':''}>all</option><option value="utm" ${p._log==='utm'?'selected':''}>utm</option><option value="disable" ${p._log==='disable'?'selected':''}>disable</option></select></div>
+        <div class="drawer-general-line drawer-general-control"><span>NAT</span><label class="drawer-inline-toggle"><input type="checkbox" class="drawer-nat" ${p._nat ? 'checked' : ''}><span class="drawer-nat-value">${p._nat ? 'Activé' : 'Désactivé'}</span></label></div>
+        <div class="drawer-general-line drawer-general-name"><span>Nom</span><input class="drawer-input drawer-inline-input drawer-policy-name" value="${escHtml(p._policyName || '')}" placeholder="FF_POLICY_..." title="Nom complet de la policy"></div>
       </div>
     </div>
     <div class="drawer-network-grid">
       ${srcSection}
       ${dstSection}
     </div>
-    ${svcList.length ? `<div class="drawer-section drawer-services-section"><div class="drawer-section-title">Services (${displayServiceCount})${!showGlobalCompatibleDecision && selectableSvcs.length > 1 ? `<label style="font-size:10px;color:var(--text2);font-weight:400;margin-left:8px;display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" class="svc-sel-all" ${selectedSvcs.length === selectableSvcs.length ? 'checked':''} style="cursor:pointer;margin:0"> Tout sélectionner</label>` : ''}</div>${compatibleSelectionHtml}<div class="drawer-services-grid">${svcsHtml}</div>${mergeBar}${propagateBanner}</div>` : ''}
+    ${svcList.length ? `<div class="drawer-section drawer-services-section">
+      <div class="drawer-section-title">Services (${displayServiceCount})${!showGlobalCompatibleDecision && selectableSvcs.length > 1 ? `<label style="font-size:10px;color:var(--text2);font-weight:400;margin-left:8px;display:inline-flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" class="svc-sel-all" ${selectedSvcs.length === selectableSvcs.length ? 'checked':''} style="cursor:pointer;margin:0"> Tout sélectionner</label>` : ''}</div>
+      ${resolvedServiceEntries ? `<div class="drawer-services-group drawer-services-configured"><div class="drawer-services-subtitle">Configurés <span>(${configuredServiceCount})</span></div><div class="drawer-services-grid">${resolvedServiceEntries}</div></div>` : ''}
+      ${(pendingServiceEntries || compatibleSelectionHtml) ? `<div class="drawer-services-group drawer-services-pending"><div class="drawer-services-subtitle">À traiter <span>(${pendingServiceCount})</span></div>${compatibleSelectionHtml}${pendingServiceEntries ? `<div class="drawer-services-grid">${pendingServiceEntries}</div>` : ''}</div>` : ''}
+      ${servicePropagationBanner}${mergeBar}${propagateBanner}
+    </div>` : ''}
     ${buildDrawerSecProfiles(p, idx)}
   `;
 }
@@ -5191,7 +6034,9 @@ function mergeSelectedDeployPolicies() {
   const sessions = toMerge.reduce((s, p) => s + (p.sessions || 0), 0);
   const policyIds = [...new Set(toMerge.flatMap(p => p.policyIds || []))].sort((a, b) => +a - +b);
   let allSrcHosts = [...new Set(toMerge.flatMap(p => p.srcHosts || []))];
-  let allDstHosts = [...new Set(toMerge.flatMap(p => p.dstHosts || []))];
+  let allDstHosts = [...new Set(toMerge.flatMap(p => (p.dstHosts || []).filter(host => !p._excludedDstHosts?.has(host))))];
+  const mergedDetectedDstSubnets = mergeDestinationDetectionCandidates(toMerge);
+  const mergedAggregateDst = destinationAggregateForPolicies(toMerge, base._dstAggregateSubnet || base.dstTarget);
 
   // Re-filtrer via hostPairServices pour éliminer les combinaisons src×dst fictives
   // (croisements entre policies d'origines différentes qui n'ont jamais eu lieu)
@@ -5243,6 +6088,10 @@ function mergeSelectedDeployPolicies() {
     srcSubnet:   srcSubnets[0] || base.srcSubnet,
     srcSubnets:  srcSubnets.length ? srcSubnets : (base.srcSubnets || [base.srcSubnet]),
     _multiSrcSubnets: multiSrcSubnets,
+    _dstDetectedSubnets: mergedDetectedDstSubnets.length ? mergedDetectedDstSubnets : base._dstDetectedSubnets,
+    _dstAggregateSubnet: mergedAggregateDst,
+    _dstAggregateAddrName: mergedAggregateDst === (base._dstAggregateSubnet || base.dstTarget)
+      ? (base._dstAggregateAddrName || '') : '',
     _use32Src:   srcSubnets.length > 1 ? false : base._use32Src,
     srcHosts:    allSrcHosts,
     dstHosts:    allDstHosts,
@@ -5333,7 +6182,7 @@ function mergeAnalyzedPolicies(policies, mode) {
     const totalSessions = group.reduce((s, p) => s + (p.sessions || 0), 0);
     const allPolicyIds  = [...new Set(group.flatMap(p => p.policyIds || []))].sort((a, b) => Number(a) - Number(b));
     const allSrcHosts   = [...new Set(group.flatMap(p => p.srcHosts || []))];
-    const allDstHosts   = [...new Set(group.flatMap(p => p.dstHosts || []))];  // M5: agréger tout le groupe, pas seulement base
+    const allDstHosts   = [...new Set(group.flatMap(p => (p.dstHosts || []).filter(host => !p._excludedDstHosts?.has(host))))];  // M5: agréger tout le groupe, pas seulement base
     merged.push({
       ...base,
       srcHosts:     allSrcHosts,
@@ -5364,7 +6213,7 @@ function mergeAnalyzedPolicies(policies, mode) {
     const totalSessions = group.reduce((s, p) => s + (p.sessions || 0), 0);
     const allPolicyIds  = [...new Set(group.flatMap(p => p.policyIds || []))].sort((a, b) => Number(a) - Number(b));
     const allSrcHosts   = [...new Set(group.flatMap(p => p.srcHosts || []))];
-    const allDstHosts   = [...new Set(group.flatMap(p => p.dstHosts || []))];
+    const allDstHosts   = [...new Set(group.flatMap(p => (p.dstHosts || []).filter(host => !p._excludedDstHosts?.has(host))))];
     merged.push({
       ...base,
       srcHosts:     allSrcHosts,
@@ -5637,7 +6486,7 @@ function buildSequenceAggregated(policies) {
       _dstintf: dstintfs.join(', ') || '?',
       sessions: totalSessions,
       srcHosts: [...new Set(members.flatMap(m => m.srcHosts || []))].sort(),
-      dstHosts: [...new Set(members.flatMap(m => m.dstHosts || []))].sort(),
+      dstHosts: [...new Set(members.flatMap(m => (m.dstHosts || []).filter(host => !m._excludedDstHosts?.has(host))))].sort(),
       _sequenceCount: members.length,
       _sequenceMembers: memberIndices,
       _isAggregated: true,
@@ -5695,7 +6544,7 @@ function mergeByPolicyId(policies) {
         const DST_SUBNET_THRESHOLD = 5;
         const dstSubnets = dsts.map(subnet => {
           const subnetPols = ifGroup.filter(p => p.dstTarget === subnet);
-          const hosts      = [...new Set(subnetPols.flatMap(p => p.dstHosts || []))].sort();
+          const hosts      = [...new Set(subnetPols.flatMap(p => (p.dstHosts || []).filter(host => !p._excludedDstHosts?.has(host))))].sort();
           const dstAddr    = subnetPols.find(p => p.analysis?.dstAddr?.found)?.analysis?.dstAddr
                           || subnetPols[0]?.analysis?.dstAddr;
           return { subnet, hosts, useSubnet: hosts.length === 0 || hosts.length >= DST_SUBNET_THRESHOLD,
@@ -5712,7 +6561,9 @@ function mergeByPolicyId(policies) {
           (p._srcHostsFound || []).forEach(h => mergedSrcHostsFound.add(h));
           (p._dstHostsFound || []).forEach(h => mergedDstHostsFound.add(h));
         }
-        const allDstHosts = [...new Set(ifGroup.flatMap(p => p.dstHosts || []))].sort();
+        const allDstHosts = [...new Set(ifGroup.flatMap(p => (p.dstHosts || []).filter(host => !p._excludedDstHosts?.has(host))))].sort();
+        const mergedDetectedDstSubnets = mergeDestinationDetectionCandidates(ifGroup);
+        const mergedAggregateDst = destinationAggregateForPolicies(ifGroup, base._dstAggregateSubnet || base.dstTarget);
         // Chercher un groupe d'adresses existant pour les destinations
         let existingDstGrp1 = null;
         if (dstSubnets.length > 1 && deployState.addrGroups) {
@@ -5730,6 +6581,10 @@ function mergeByPolicyId(policies) {
         merged.push({
           ...base, srcSubnet: srcSubnets[0], srcSubnets,
           dstTarget: dsts[0], dstTargets: dsts,
+          _dstDetectedSubnets: mergedDetectedDstSubnets.length ? mergedDetectedDstSubnets : base._dstDetectedSubnets,
+          _dstAggregateSubnet: mergedAggregateDst,
+          _dstAggregateAddrName: mergedAggregateDst === (base._dstAggregateSubnet || base.dstTarget)
+            ? (base._dstAggregateAddrName || '') : '',
           _multiDstSubnets: dstSubnets, _isMultiDst: true,
           dstType: base.dstType, sessions: totalSessions,
           serviceDesc: allServices.map(s => s.label).join(', '),
@@ -5789,7 +6644,9 @@ function mergeByPolicyId(policies) {
       // Supprimé : on laisse le flux atteindre la construction _multiDstSubnets correcte.
       const allDstIPs   = [...new Set(subGroup.flatMap(p => p.dstIPs || (p.dstType === 'public' ? [p.dstTarget] : [])).filter(t => t && t !== 'all'))];
       const allSrcHosts = [...new Set(subGroup.flatMap(p => p.srcHosts || []))].sort();
-      const allDstHosts = [...new Set(subGroup.flatMap(p => p.dstHosts || []))].sort();
+      const allDstHosts = [...new Set(subGroup.flatMap(p => (p.dstHosts || []).filter(host => !p._excludedDstHosts?.has(host))))].sort();
+      const mergedDetectedDstSubnets = mergeDestinationDetectionCandidates(subGroup);
+      const mergedAggregateDst = destinationAggregateForPolicies(subGroup, base._dstAggregateSubnet || base.dstTarget);
       const multiSrc    = srcSubnets.length > 1;
 
       // Fusionner _srcHostNames/_dstHostNames et _hostsFound de TOUTES les policies du sous-groupe
@@ -5840,7 +6697,7 @@ function mergeByPolicyId(policies) {
         const DST_SUBNET_THRESHOLD = 5;
         const dstSubnets = allDstTargets.map(subnet => {
           const subnetPols = subGroup.filter(p => p.dstTarget === subnet);
-          const hosts      = [...new Set(subnetPols.flatMap(p => p.dstHosts || []))].sort();
+          const hosts      = [...new Set(subnetPols.flatMap(p => (p.dstHosts || []).filter(host => !p._excludedDstHosts?.has(host))))].sort();
           const dstAddr    = subnetPols.find(p => p.analysis?.dstAddr?.found)?.analysis?.dstAddr
                           || subnetPols[0]?.analysis?.dstAddr;
           return {
@@ -5876,6 +6733,10 @@ function mergeByPolicyId(policies) {
           srcSubnets,
           dstTarget:        allDstTargets[0],
           dstTargets:       allDstTargets,
+          _dstDetectedSubnets: mergedDetectedDstSubnets.length ? mergedDetectedDstSubnets : base._dstDetectedSubnets,
+          _dstAggregateSubnet: mergedAggregateDst,
+          _dstAggregateAddrName: mergedAggregateDst === (base._dstAggregateSubnet || base.dstTarget)
+            ? (base._dstAggregateAddrName || '') : '',
           _multiDstSubnets: dstSubnets,
           _isMultiDst:      true,
           dstType:          base.dstType,
@@ -5914,6 +6775,10 @@ function mergeByPolicyId(policies) {
         srcSubnet:    srcSubnets[0],
         srcSubnets,
         dstTarget,
+        _dstDetectedSubnets: mergeDestinationDetectionCandidates(subGroup),
+        _dstAggregateSubnet: mergedAggregateDst,
+        _dstAggregateAddrName: mergedAggregateDst === (base._dstAggregateSubnet || base.dstTarget)
+          ? (base._dstAggregateAddrName || '') : '',
         dstType:      isWan ? 'public' : base.dstType,
         sessions:     totalSessions,
         serviceDesc:  allServices.map(s => s.label).join(', '),
@@ -6313,7 +7178,7 @@ function mergeByService(policies) {
     const multiDst   = !isWan && dstTargets.length > 1;
 
     const allSrcHosts = [...new Set(group.flatMap(p => p.srcHosts || []))].sort();
-    const allDstHosts = [...new Set(group.flatMap(p => p.dstHosts || []))].sort();
+    const allDstHosts = [...new Set(group.flatMap(p => (p.dstHosts || []).filter(host => !p._excludedDstHosts?.has(host))))].sort();
 
     // Merge host name maps
     const mergedSrcHostNames = {};
@@ -6346,7 +7211,7 @@ function mergeByService(policies) {
     if (multiDst) {
       multiDstSubnets = dstTargets.map(subnet => {
         const subnetPols = group.filter(p => p.dstTarget === subnet);
-        const hosts      = [...new Set(subnetPols.flatMap(p => p.dstHosts || []))].sort();
+        const hosts      = [...new Set(subnetPols.flatMap(p => (p.dstHosts || []).filter(host => !p._excludedDstHosts?.has(host))))].sort();
         const dstAddr    = subnetPols.find(p => p.analysis?.dstAddr?.found)?.analysis?.dstAddr
                          || subnetPols[0]?.analysis?.dstAddr;
         return { subnet, hosts, useSubnet: hosts.length === 0 || hosts.length >= DST_SUBNET_THRESHOLD,
@@ -6465,7 +7330,7 @@ function mergeByDestination(policies) {
     const multiSrc   = srcSubnets.length > 1;
 
     const allSrcHosts = [...new Set(group.flatMap(p => p.srcHosts || []))].sort();
-    const allDstHosts = [...new Set(group.flatMap(p => p.dstHosts || []))].sort();
+    const allDstHosts = [...new Set(group.flatMap(p => (p.dstHosts || []).filter(host => !p._excludedDstHosts?.has(host))))].sort();
 
     const mergedSrcHostNames = {};
     const mergedDstHostNames = {};
@@ -6720,6 +7585,12 @@ async function analyzeDeployPolicies() {
     // Merge found hosts: backend _hostsFound + resolvedHosts matches
     const mergedSrcFound = [...new Set([...(p._srcHostsFound || []), ...srcHostsFoundExtra])];
     const mergedDstFound = [...new Set([...(p._dstHostsFound || []), ...dstHostsFoundExtra])];
+    const aggregateHosts = p.dstHosts || [];
+    const aggregateComputed = aggregateHosts.length > 0
+      ? cidrSupernet(aggregateHosts.map(host => `${host}/32`)) : '';
+    const aggregateSubnet = p._dstAggregateManual && p._dstAggregateSubnet
+      ? p._dstAggregateSubnet : (aggregateComputed || p._dstAggregateSubnet || p.dstTarget || '');
+    const aggregateAddressMatch = p.analysis?.dstAddr?.found && p.analysis.dstAddr.cidr === aggregateSubnet;
     return {
       ...p,
       srcAddrExists: p.analysis?.srcAddr?.found ?? false,
@@ -6728,6 +7599,10 @@ async function analyzeDeployPolicies() {
       _srcIfaceSource:   p.analysis?.srcIfaceSource || 'auto',
       _dstintf:          resolveZone(rawDstIntf),
       _dstIfaceSource:   p.analysis?.dstIfaceSource || 'auto',
+      _dstAggregateSubnet: aggregateSubnet,
+      _dstAggregateManual: p._dstAggregateManual === true,
+      _dstAggregateAddrName: p._dstAggregateAddrName
+        || (aggregateAddressMatch ? p.analysis?.dstAddr?.name || '' : ''),
       _srcAddrName:  p.analysis?.srcAddr?.name || '',
       _dstAddrName:  p.analysis?.dstAddr?.name || '',
       _policyName:   '',
@@ -6781,9 +7656,15 @@ async function analyzeDeployPolicies() {
   for (const p of analyzed) {
     if ((p.srcHosts || []).length >= 1 && (p.srcHosts || []).length <= AUTO32_THRESHOLD) p._use32Src = true;
     if ((p.dstHosts || []).length >= 1 && (p.dstHosts || []).length <= AUTO32_THRESHOLD) p._use32Dst = true;
+    if (p._dstDetectedSubnets?.length) {
+      if (!p._dstAggregateManual) p._dstAggregateSubnet = destinationAggregateSubnet(p);
+      // Une destination issue de plusieurs réseaux reste volontairement en /32
+      // tant que l'ingénieur n'a pas choisi le mode détecté ou agrégé.
+      p._use32Dst = true;
+    }
     // Initialize per-policy mode from _use32 flags
     p._srcMode = p._use32Src ? 'hosts' : 'subnet';
-    p._dstMode = p._use32Dst ? 'hosts' : 'subnet';
+    p._dstMode = p._dstDetectedSubnets?.length ? 'hosts' : (p._use32Dst ? 'hosts' : 'subnet');
     // Auto "all" : si destination WAN avec beaucoup d'hôtes ou sous-réseaux → mode all par défaut
     const _isWanP = p._isWan || p.dstType === 'public';
     if (_isWanP && p._dstUseAll === undefined) {
@@ -7117,6 +7998,85 @@ function policyIdsCell(p) {
   return shown.map(id => `<span class="policy-id-badge" ${tip ? `title="${escHtml(tip)}"` : ''}>${escHtml(id)}</span>`).join(' ') + more;
 }
 
+function policyMissingMandatoryFields(p) {
+  const a = p?.analysis || {};
+  const missing = [];
+  const add = field => { if (!missing.includes(field)) missing.push(field); };
+  const hostNameOk = (host, names) => {
+    const name = String(names?.[host] || '').trim();
+    return name && name !== `FF_HOST_${host.replace(/\./g, '_')}`;
+  };
+  const checkHosts = (hosts, foundHosts, names, field) => {
+    const found = new Set(foundHosts || []);
+    if ((hosts || []).some(host => !found.has(host) && !hostNameOk(host, names))) add(field);
+  };
+
+  if (!p?._srcintf) add('interface source');
+  if (!p?._dstintf) add('interface destination');
+
+  if (p._multiSrcSubnets?.length) {
+    for (const scope of p._multiSrcSubnets) {
+      if (scope.useSubnet !== false) {
+        if (!scope.addrFound && !scope.addrName) add('source');
+      } else {
+        checkHosts(scope.hosts, p._srcHostsFound, p._srcHostNames, 'source');
+      }
+    }
+  } else {
+    const srcMode = p._srcMode || (p._use32Src ? 'hosts' : 'subnet');
+    if (srcMode === 'hosts' && p.srcHosts?.length) {
+      checkHosts(p.srcHosts, p._srcHostsFound, p._srcHostNames, 'source');
+    } else if (!a.srcAddr?.found && !p._srcAddrName) {
+      add('source');
+    }
+  }
+  if (p._useSrcGroup && !p._srcAddrGrpFound && !p._srcAddrName) add('source');
+
+  const isWan = p._isWan || p.dstType === 'public';
+  const usesAll = isWan && p._dstUseAll === true;
+  if (!usesAll) {
+    if (p._isMultiDst && p._multiDstSubnets?.length) {
+      for (const scope of p._multiDstSubnets) {
+        if (scope.useSubnet !== false) {
+          if (!scope.addrFound && !scope.addrName) add('destination');
+        } else {
+          checkHosts(scope.hosts, p._dstHostsFound, p._dstHostNames, 'destination');
+        }
+      }
+    } else {
+      const dstMode = p._dstMode || (p._use32Dst ? 'hosts' : 'subnet');
+      const isWanSpecific = isWan && p._dstUseAll === false;
+      if ((dstMode === 'hosts' || isWanSpecific) && p.dstHosts?.length) {
+        checkHosts(p.dstHosts, p._dstHostsFound, p._dstHostNames, 'destination');
+      } else if (!isWanSpecific && p.dstType !== 'public'
+          && !a.dstAddr?.found && !p._dstAddrName) {
+        add('destination');
+      }
+    }
+  }
+  if (p._useDstGroup && !p._dstAddrGrpFound && !p._dstAddrName) add('destination');
+
+  if (!Array.isArray(a.services) || a.services.length === 0) add('service');
+  const serviceResolved = service => {
+    if (service.found || service._isMerged) return true;
+    const notation = String(service.label || '').match(/^(TCP|UDP)\/(\d+)$/i);
+    const keys = Array.isArray(service.reuseKeys)
+      ? service.reuseKeys
+      : notation ? [`${notation[1].toUpperCase()}/${notation[2]}`]
+        : service.port ? [`${String(service.proto || '').toUpperCase()}/${service.port}`] : [];
+    if (keys.length > 0 && keys.every(key => {
+      const decision = p._resolvedServiceKeys?.[key];
+      return decision === 'specific'
+        || (decision?.startsWith('existing:') && p._serviceReuse?.[key] === decision.slice(9));
+    })) return true;
+    const autoLabel = service.isNamed ? service.label : `FF_SVC_${service.port}_${service.proto}`;
+    const isPortNotation = /^(TCP|UDP)\/\d+$/i.test(service.suggestedName || '');
+    return service.suggestedName && !isPortNotation && service.suggestedName !== autoLabel;
+  };
+  if ((a.services || []).some(service => !serviceResolved(service))) add('service');
+  return missing;
+}
+
 function isPolicyComplete(p, _debug) {
   const a = p.analysis || {};
   const dbg = msg => { if (_debug) console.log('[complete]', msg, 'dstMode:', p._dstMode, '_use32Dst:', p._use32Dst, '_isMultiDst:', p._isMultiDst, 'dstHosts:', p.dstHosts, '_dstHostsFound:', p._dstHostsFound, '_dstHostNames:', p._dstHostNames, '_multiDstSubnets:', JSON.stringify(p._multiDstSubnets)); };
@@ -7206,6 +8166,7 @@ function isPolicyComplete(p, _debug) {
 
   // Services — must be found, merged, or explicitly renamed by user
   // Aligné avec svcCells: orange si pas de customName (= suggestedName identique au label auto)
+  if (!Array.isArray(a.services) || a.services.length === 0) { dbg('FAIL: no services'); return false; }
   for (const svc of a.services || []) {
     if (svc.found || svc._isMerged || isCompatibleServiceSelected(p, svc)) continue;
     const isPortNotation = /^(TCP|UDP)\/\d+$/i.test(svc.suggestedName || '');
@@ -7830,23 +8791,16 @@ function renderDeployPolicies(analyzed, resetPage = true) {
 
     const backendIssues = p._backendIssues || [];
     const backendIncomplete = p._backendIssueKind === 'incomplete';
-    const riskIssues = p._acceptedRiskIssues
-      || (p._backendIssueKind === 'risk' ? backendIssues : []);
     const technicalIssues = p._backendIssueKind === 'risk' ? [] : backendIssues;
     const fieldComplete = p._disabled || isPolicyComplete(p);
-    const rowStatus = technicalIssues.length > 0 ? 'error' : riskIssues.length > 0 ? 'warn' : fieldComplete ? 'ok' : 'warn';
-    const statusTitle = [...technicalIssues, ...riskIssues].join('\n') || (p.analysis?.missingFields || []).join(', ') || '';
+    const statusTitle = technicalIssues.join('\n') || (p.analysis?.missingFields || []).join(', ') || '';
     const isHighlighted = !isAgg && idx === deployState._highlightIdx;
     if (isHighlighted) deployState._highlightIdx = null; // consommer une seule fois
     const isScan = isScanPolicy(p);
     const objectState = technicalIssues.length > 0
       ? `<span class="policy-needs-work" title="${escHtml(statusTitle)}">${backendIncomplete ? 'À compléter' : 'Erreur technique'}</span>`
-      : riskIssues.length > 0
-      ? `<span class="policy-needs-work" title="${escHtml(statusTitle)}">À risque</span>`
       : fieldComplete
-      ? p._backendValidated
-        ? '<span class="policy-ready">Prête</span>'
-        : '<span class="policy-ready">Complète</span>'
+      ? '<span class="policy-ready">Complète</span>'
       : `<span class="policy-needs-work" title="${escHtml(statusTitle)}">À compléter</span>`;
     const interfaceSummary = `<span class="policy-interface-pair">${srcIntf}<span class="policy-interface-arrow">→</span>${dstIntf}</span>`;
     return `
@@ -8013,23 +8967,32 @@ function syncNoRcvdInfoBtn() {
   if (count > 0) updateNoRcvdToggleBtn();
 }
 
+function isNonBlockingPolicyIssue(issue) {
+  return ['risk', 'warn'].includes(String(issue?.level || '').toLowerCase());
+}
+
 function formatPolicyValidationError(payload) {
   const issues = Array.isArray(payload?.issues) ? payload.issues
     : Array.isArray(payload?.preflight?.issues) ? payload.preflight.issues : [];
   const title = payload?.error || 'Validation backend refusée';
   if (issues.length === 0) return title;
-  const prefix = payload?.code === 'POLICY_RISK_CONFIRMATION_REQUIRED' ? 'À risque'
-    : payload?.code === 'POLICY_DECISION_INVALID' ? 'Erreur technique'
-    : payload?.preflight ? 'À compléter' : 'Validation bloquante';
-  return `${prefix} — ${title}\n\n${issues.map(issue =>
-    `• ${issue.msg || issue.code || 'Cause non précisée'}`).join('\n')}`;
+  const prefix = payload?.preflight ? 'À compléter' : 'Erreur technique';
+  const blocking = issues.filter(issue => !isNonBlockingPolicyIssue(issue));
+  const nonBlocking = issues.filter(isNonBlockingPolicyIssue);
+  const sections = [];
+  if (blocking.length) sections.push(blocking.map(issue =>
+    `• ${issue.msg || issue.code || 'Cause non précisée'}`).join('\n'));
+  if (nonBlocking.length) sections.push(`Avertissement non bloquant :\n${nonBlocking.map(issue =>
+    `• ${issue.msg || issue.code || 'Risque non précisé'}`).join('\n')}`);
+  return `${blocking.length ? prefix : 'Information'} — ${title}\n\n${sections.join('\n\n')}`;
 }
 
 function markSelectedPolicyIssues(issues, selectedIndexes, kind = 'security') {
+  const blockingIssues = (issues || []).filter(issue => !isNonBlockingPolicyIssue(issue));
   const groups = Array.isArray(selectedIndexes[0])
     ? selectedIndexes : selectedIndexes.map(index => [index]);
   for (const index of groups.flat()) delete deployState.analyzed[index]._backendIssues;
-  for (const issue of issues) {
+  for (const issue of blockingIssues) {
     const position = String(issue?.msg || '').match(/^Policy #(\d+):/);
     const indexes = position && groups[Number(position[1]) - 1]
       ? groups[Number(position[1]) - 1] : groups.flat();
@@ -8045,55 +9008,49 @@ function markSelectedPolicyIssues(issues, selectedIndexes, kind = 'security') {
   renderDeployPolicies(filterDeployPolicies(), false);
 }
 
-function acceptSelectedPolicyRisks(issues, selectedIndexes, selectedPolicies) {
-  const groups = Array.isArray(selectedIndexes[0])
-    ? selectedIndexes : selectedIndexes.map(index => [index]);
-  for (const issue of issues) {
-    const position = String(issue?.msg || '').match(/^Policy #(\d+):/);
-    const offset = position ? Number(position[1]) - 1 : 0;
-    const submitted = selectedPolicies[offset];
-    if (!submitted || !issue?.code) continue;
-    submitted._acceptedRisks = [...new Set([...(submitted._acceptedRisks || []), issue.code])];
-    const detail = [issue.msg, issue.detail, issue.recommendation].filter(Boolean).join(' — ');
-    for (const sourceIndex of groups[offset] || []) {
-      const source = deployState.analyzed[sourceIndex];
-      if (!source) continue;
-      source._acceptedRiskIssues = [...new Set([...(source._acceptedRiskIssues || []), detail])];
-      delete source._backendIssues;
-      delete source._backendIssueKind;
-      delete source._backendValidated;
-    }
-  }
-}
-
 async function generateDeployConf() {
   if (!deployState.analyzed) return;
+
+  try {
+    const recovery = await recoverInvalidSpecificServiceState(
+      deployState.analyzed,
+      'preflight-service-name-conflict',
+    );
+    if (recovery.applied.length) {
+      deployState.generatedCli = null;
+      renderDeployPolicies(filterDeployPolicies(), false);
+      if (_drawerIdx !== null) populateDrawer(_drawerIdx);
+      alert(`Récupération services : ${recovery.applied.length} association(s) invalide(s) retirée(s). Sauvegarde : ${recovery.backupId}`);
+    }
+  } catch (recoveryError) {
+    alert(`Génération annulée — sauvegarde de récupération impossible : ${recoveryError.message}`);
+    return;
+  }
 
   const selectedIndexes = [...deployState.selected]
     .filter(index => index >= 0 && index < deployState.analyzed.length)
     .sort((a, b) => a - b);
 
-  // Vérification services non qualifiés dans la sélection
-  const _selectedForCheck = selectedIndexes.map(index => deployState.analyzed[index]);
-  const _unqualMap = _collectUnqualifiedSvcs(_selectedForCheck);
-  if (_unqualMap.size > 0) {
-    const lines = [..._unqualMap.values()]
-      .sort((a, b) => b.count - a.count).slice(0, 12)
-      .map(e => `  \u2022 ${e.isNamed ? e.label : `${(e.proto||'TCP').toUpperCase()}/${e.port}`} (${e.count} police${e.count > 1 ? 's' : ''})`)
-      .join('\n');
-    const more = _unqualMap.size > 12 ? `\n  \u2026 et ${_unqualMap.size - 12} autre(s)` : '';
-    const ok = confirm(
-      `\u26a0 ${_unqualMap.size} service(s) non qualifi\u00e9(s) dans la s\u00e9lection :\n\n${lines}${more}\n\n`
-      + `Ces services seront cr\u00e9\u00e9s avec un nom auto-g\u00e9n\u00e9r\u00e9 (FF_SVC_...) dans le .conf.\n\n`
-      + `Cliquer "Annuler" pour les qualifier d\u2019abord, ou "OK" pour continuer quand m\u00eame.`
-    );
-    if (!ok) return;
+  if (selectedIndexes.length === 0) { alert('Sélectionnez au moins une policy'); return; }
+  const incompleteSelectedIndexes = selectedIndexes
+    .filter(index => !isPolicyComplete(deployState.analyzed[index]));
+  if (incompleteSelectedIndexes.length > 0) {
+    const details = incompleteSelectedIndexes.map(index => {
+      const policy = deployState.analyzed[index];
+      const fields = policyMissingMandatoryFields(policy);
+      if (fields.length > 0) {
+        return `Policy #${index + 1} — champ obligatoire manquant :\n${fields.map(field => `  • ${field}`).join('\n')}`;
+      }
+      const technical = (policy._backendIssues || []).join(', ');
+      return `Policy #${index + 1} — erreur technique : ${technical || 'incohérence de génération'}`;
+    }).join('\n');
+    alert(details);
+    return;
   }
 
   let selectedPolicies;
   let selectedPolicyIndexGroups;
-  const selectedCompleteIndexes = selectedIndexes
-    .filter(index => isPolicyComplete(deployState.analyzed[index]));
+  const selectedCompleteIndexes = selectedIndexes;
   if (deployState.viewMode === 'sequence') {
     // In sequence mode, aggregate selected policies before sending
     const selected = selectedCompleteIndexes.map(index => deployState.analyzed[index]);
@@ -8102,8 +9059,8 @@ async function generateDeployConf() {
       ? policy._sequenceMembers : [deployState.analyzed.indexOf(policy)]);
     selectedPolicies = aggregated.map(p => ({
       ...p,
-      services:        (p.analysis?.services || []).filter(s => !s._isMerged).map(s => s.label),
-      _mergedServices: (p.analysis?.services || []).filter(s => s._isMerged).map(s => ({ name: s.suggestedName, ports: s.ports || null, portRange: s.portRange || null, proto: s.proto, sourcePorts: s.sourcePorts || [] })),
+      services:        serializePolicyServiceLabels(p),
+      _mergedServices: serializeMergedServiceDecisions(p),
       srcintf:      p._isAggregated ? (p._srcintfList || []) : (p._srcintf || p.srcintf || ''),
       dstintf:      p._isAggregated ? (p._dstintfList || []) : (p._dstintf || p.dstintf || ''),
       srcAddrName:  p._srcAddrName,
@@ -8125,8 +9082,8 @@ async function generateDeployConf() {
       .map(index => deployState.analyzed[index])
       .map(p => ({
         ...p,
-        services:        (p.analysis?.services || []).filter(s => !s._isMerged).map(s => s.label),
-        _mergedServices: (p.analysis?.services || []).filter(s => s._isMerged).map(s => ({ name: s.suggestedName, ports: s.ports || null, portRange: s.portRange || null, proto: s.proto, sourcePorts: s.sourcePorts || [] })),
+        services:        serializePolicyServiceLabels(p),
+        _mergedServices: serializeMergedServiceDecisions(p),
         srcintf:      p._srcintf || p.srcintf || '',
         dstintf:      p._dstintf || p.dstintf || '',
         srcAddrName:  p._srcAddrName,
@@ -8142,23 +9099,6 @@ async function generateDeployConf() {
         log:          p._log    || null,
         disabled:     p._disabled || false,
       }));
-  }
-
-  const skippedCount = selectedIndexes.length - selectedCompleteIndexes.length;
-  if (!selectedPolicies.length) {
-    const details = selectedIndexes.map(index => {
-      const p = deployState.analyzed[index];
-      const missing = (p._backendIssues || p.analysis?.missingFields || []).join(', ') || 'ouvrir le drawer pour compléter les champs obligatoires';
-      return `Policy ${index + 1} — ${missing}`;
-    }).join('\n');
-    alert(skippedCount > 0
-      ? `Aucune policy complète à générer.\n\n${details}`
-      : 'Sélectionnez au moins une policy');
-    return;
-  }
-  if (skippedCount > 0) {
-    const proceed = confirm(`${skippedCount} policy${skippedCount > 1 ? 's' : ''} incomplète${skippedCount > 1 ? 's' : ''} ignorée${skippedCount > 1 ? 's' : ''} (badge non vert).\n${selectedPolicies.length} policy${selectedPolicies.length > 1 ? 's' : ''} complète${selectedPolicies.length > 1 ? 's' : ''} seront générées.\n\nContinuer ?`);
-    if (!proceed) return;
   }
 
   // Security profiles from dropdowns
@@ -8187,20 +9127,8 @@ async function generateDeployConf() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ selectedPolicies, opts }),
     });
-    let pfRes = await submitPreflight();
-    let pf = await pfRes.json().catch(() => ({}));
-    if (!pfRes.ok && pf.code === 'POLICY_RISK_CONFIRMATION_REQUIRED') {
-      markSelectedPolicyIssues(pf.issues || [], selectedPolicyIndexGroups, 'risk');
-      const accepted = await showRiskOverrideModal(pf.issues || []);
-      if (!accepted) {
-        if (selectedPolicyIndexGroups.length === 1) openDrawer(selectedPolicyIndexGroups[0][0]);
-        resetGenerateButton();
-        return;
-      }
-      acceptSelectedPolicyRisks(pf.issues || [], selectedPolicyIndexGroups, selectedPolicies);
-      pfRes = await submitPreflight();
-      pf = await pfRes.json().catch(() => ({}));
-    }
+    const pfRes = await submitPreflight();
+    const pf = await pfRes.json().catch(() => ({}));
     if (!pfRes.ok) {
       const pfIssues = pf.issues || pf.preflight?.issues || [];
       markSelectedPolicyIssues(
@@ -8212,16 +9140,7 @@ async function generateDeployConf() {
       resetGenerateButton();
       return;
     }
-    for (const index of selectedPolicyIndexGroups.flat()) {
-      deployState.analyzed[index]._backendValidated = true;
-      delete deployState.analyzed[index]._backendIssues;
-      delete deployState.analyzed[index]._backendIssueKind;
-    }
     renderDeployPolicies(filterDeployPolicies(), false);
-    if (pf.errors > 0 || pf.warnings > 0) {
-      const proceed = await showPreflightModal(pf);
-      if (!proceed) { resetGenerateButton(); return; }
-    }
   } catch (err) {
     alert(`Validation backend indisponible — ${err.message}`);
     resetGenerateButton();
@@ -8248,7 +9167,7 @@ async function generateDeployConf() {
       alert(formatPolicyValidationError(e));
       return;
     }
-    const { cli, existingPoliciesCli, acceptedRisks = [] } = await r.json();
+    const { cli, existingPoliciesCli } = await r.json();
 
     deployState.generatedCli      = cli;
     deployState.existingPoliciesCli = existingPoliciesCli || '';
@@ -8259,7 +9178,7 @@ async function generateDeployConf() {
     const info = el('deploy-gen-info');
     if (pre)  pre.value = cli;
     if (wrap) wrap.style.display = '';
-    if (info) info.textContent = `${selectedPolicies.length} policies · ${cli.split('\n').length} lignes${acceptedRisks.length ? ` · ${acceptedRisks.length} risque${acceptedRisks.length > 1 ? 's' : ''} accepté${acceptedRisks.length > 1 ? 's' : ''}` : ''}`;
+    if (info) info.textContent = `${selectedPolicies.length} policies · ${cli.split('\n').length} lignes`;
 
     // Show diff button only if existing config available
     const diffBtn = el('btn-diff-toggle');
@@ -8330,68 +9249,6 @@ async function generateDeployConf() {
   } finally {
     resetGenerateButton();
   }
-}
-
-// ─── Preflight modal ─────────────────────────────────────────────────────────
-
-function showRiskOverrideModal(issues) {
-  return new Promise(resolve => {
-    const overlay = document.createElement('div');
-    overlay.className = 'preflight-overlay';
-    const items = issues.map(issue => `
-      <div class="preflight-item pf-warn">
-        <strong>${escHtml(issue.code || 'RISQUE')}</strong><br>
-        ${escHtml(issue.msg || 'Permission plus large détectée')}
-        ${issue.detail ? `<details open><summary>Voir le détail</summary><div>${escHtml(issue.detail)}</div></details>` : ''}
-        ${issue.recommendation ? `<div><b>Recommandation :</b> ${escHtml(issue.recommendation)}</div>` : ''}
-      </div>`).join('');
-    overlay.innerHTML = `
-      <div class="preflight-modal">
-        <div class="preflight-title">⚠ Risque détecté</div>
-        <p>Cette policy peut autoriser des combinaisons qui n’ont pas été observées dans les logs.</p>
-        <div class="preflight-section">${items}</div>
-        <div class="preflight-actions">
-          <button class="btn-sm" id="risk-correct">Corriger</button>
-          <button class="btn-accent" id="risk-accept">Générer quand même</button>
-        </div>
-      </div>`;
-    document.body.appendChild(overlay);
-    overlay.querySelector('#risk-correct').addEventListener('click', () => { overlay.remove(); resolve(false); });
-    overlay.querySelector('#risk-accept').addEventListener('click', () => { overlay.remove(); resolve(true); });
-    overlay.addEventListener('click', event => {
-      if (event.target === overlay) { overlay.remove(); resolve(false); }
-    });
-  });
-}
-
-function showPreflightModal(pf) {
-  return new Promise(resolve => {
-    const errors  = pf.issues.filter(i => i.level === 'error');
-    const warns   = pf.issues.filter(i => i.level === 'warn');
-    const icon    = pf.errors > 0 ? '🛑' : '⚠️';
-    const title   = pf.errors > 0 ? 'Erreurs détectées' : 'Avertissements';
-
-    const errHtml = errors.map(i => `<div class="preflight-item pf-error">✗ ${escHtml(i.msg)}</div>`).join('');
-    const warnHtml = warns.map(i => `<div class="preflight-item pf-warn">⚠ ${escHtml(i.msg)}</div>`).join('');
-
-    const overlay = document.createElement('div');
-    overlay.className = 'preflight-overlay';
-    overlay.innerHTML = `
-      <div class="preflight-modal">
-        <div class="preflight-title">${icon} ${title}</div>
-        ${errors.length ? `<div class="preflight-section"><div class="preflight-section-title">Erreurs (${errors.length})</div>${errHtml}</div>` : ''}
-        ${warns.length ? `<div class="preflight-section"><div class="preflight-section-title">Avertissements (${warns.length})</div>${warnHtml}</div>` : ''}
-        <div class="preflight-actions">
-          <button class="btn-sm" id="pf-cancel">Annuler</button>
-          ${pf.errors === 0 ? `<button class="btn-accent" id="pf-continue">Continuer quand même</button>` : `<button class="btn-accent" id="pf-continue">Forcer la génération</button>`}
-        </div>
-      </div>`;
-
-    document.body.appendChild(overlay);
-    overlay.querySelector('#pf-cancel').addEventListener('click', () => { overlay.remove(); resolve(false); });
-    overlay.querySelector('#pf-continue').addEventListener('click', () => { overlay.remove(); resolve(true); });
-    overlay.addEventListener('click', e => { if (e.target === overlay) { overlay.remove(); resolve(false); } });
-  });
 }
 
 // ═══════════════════════════════════════════════════════════════

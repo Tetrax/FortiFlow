@@ -194,7 +194,7 @@ end
 test('FF2-04 sérialise les décisions du drawer dans les deux modes de vue', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
   const start = source.indexOf('async function generateDeployConf()');
-  const end = source.indexOf('\n// ─── Preflight modal', start);
+  const end = source.length;
   assert.ok(start >= 0 && end > start);
   const generate = source.slice(start, end);
 
@@ -204,10 +204,32 @@ test('FF2-04 sérialise les décisions du drawer dans les deux modes de vue', ()
   assert.match(generate, /body:\s*JSON\.stringify\(\{\s*selectedPolicies,\s*opts\s*\}\)/);
 });
 
+test('le payload de génération conserve les tuples sources d’un service fusionné', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  const start = source.indexOf('function serializePolicyServiceLabels');
+  const end = source.indexOf('\nfunction ', start + 20);
+  assert.ok(start >= 0 && end > start, 'sérialiseur des services introuvable');
+  const context = { Set };
+  vm.createContext(context);
+  vm.runInContext(source.slice(start, end), context);
+
+  assert.deepEqual(
+    [...context.serializePolicyServiceLabels({
+      analysis: {
+        services: [
+          { label: 'DNS', found: true },
+          { label: 'dce-rpc-range', _isMerged: true, proto: 'tcp', sourcePorts: [52121, 52134, 62966] },
+        ],
+      },
+    })],
+    ['DNS', 'TCP/52121', 'TCP/52134', 'TCP/62966'],
+  );
+});
+
 test('la génération restitue les causes backend et marque uniquement les policies sélectionnées', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
-  const start = source.indexOf('function formatPolicyValidationError');
-  const end = source.indexOf('\nfunction ', start + 20);
+  const start = source.indexOf('function isNonBlockingPolicyIssue');
+  const end = source.indexOf('\nfunction markSelectedPolicyIssues', start);
   assert.ok(start >= 0 && end > start, 'formatter de validation introuvable');
   const context = {};
   vm.createContext(context);
@@ -223,21 +245,22 @@ test('la génération restitue les causes backend et marque uniquement les polic
   assert.match(message, /Décision utilisateur invalide/);
   assert.match(message, /Policy #1: service LDAP stale/);
   assert.match(message, /Policy #1: combinaison non prouvée/);
+  const mixedMessage = context.formatPolicyValidationError({
+    error: 'Décision utilisateur invalide',
+    issues: [
+      { level: 'error', code: 'SERVICE_NAME_CONFLICT', msg: 'Policy #1: conflit service' },
+      { level: 'risk', code: 'POLICY_AFFINITY_UNPROVEN', msg: 'Policy #1: affinité non prouvée' },
+    ],
+  });
+  assert.match(mixedMessage, /Erreur technique[\s\S]*conflit service/);
+  assert.match(mixedMessage, /Avertissement non bloquant[\s\S]*affinité non prouvée/);
   const incompleteMessage = context.formatPolicyValidationError({
     error: 'Preflight refusé',
     preflight: { issues: [{ level: 'error', msg: 'Policy #1: interface destination manquante' }] },
   });
   assert.match(incompleteMessage, /À compléter/);
   assert.match(incompleteMessage, /Policy #1: interface destination manquante/);
-  const riskMessage = context.formatPolicyValidationError({
-    error: 'Confirmation de risque requise',
-    code: 'POLICY_RISK_CONFIRMATION_REQUIRED',
-    issues: [{ level: 'risk', msg: 'Policy #1: combinaison non prouvée' }],
-  });
-  assert.match(riskMessage, /À risque/);
-  assert.match(riskMessage, /Policy #1: combinaison non prouvée/);
-
-  const markStart = source.indexOf('function markSelectedPolicyIssues');
+  const markStart = source.indexOf('function isNonBlockingPolicyIssue');
   const markEnd = source.indexOf('\nasync function generateDeployConf', markStart);
   const markContext = {
     deployState: { analyzed: [{}, {}] },
@@ -263,8 +286,18 @@ test('la génération restitue les causes backend et marque uniquement les polic
   assert.equal(markContext.deployState.analyzed[1]._backendIssues, undefined);
   assert.ok(markContext.deployState.analyzed[2]._backendIssues);
 
+  markContext.deployState.analyzed = [{}];
+  markContext.markSelectedPolicyIssues([
+    { level: 'error', code: 'SERVICE_NAME_CONFLICT', msg: 'Policy #1: conflit service' },
+    { level: 'risk', code: 'POLICY_AFFINITY_UNPROVEN', msg: 'Policy #1: affinité non prouvée' },
+  ], [0], 'security');
+  assert.deepEqual(
+    [...markContext.deployState.analyzed[0]._backendIssues],
+    ['[SERVICE_NAME_CONFLICT] Policy #1: conflit service'],
+  );
+
   const generateStart = source.indexOf('async function generateDeployConf()');
-  const generateEnd = source.indexOf('\n// ─── Preflight modal', generateStart);
+  const generateEnd = source.length;
   const generate = source.slice(generateStart, generateEnd);
   assert.match(generate, /if \(!pfRes\.ok\)[\s\S]*formatPolicyValidationError[\s\S]*return;/);
   assert.match(generate, /if \(!pfRes\.ok\)[\s\S]*resetGenerateButton\(\)[\s\S]*return;/);
@@ -277,31 +310,116 @@ test('la génération restitue les causes backend et marque uniquement les polic
   assert.match(generate, /selectedPolicies = selectedCompleteIndexes[\s\S]*\.map\(index => deployState\.analyzed\[index\]\)/);
   assert.doesNotMatch(generate, /selectedPolicies\s*=\s*deployState\.analyzed\.map/);
   assert.match(source, /_backendIssues[\s\S]*Erreur technique/);
-  assert.match(source, /_acceptedRiskIssues[\s\S]*À risque/);
-  assert.match(source, /_backendValidated[\s\S]*Prête[\s\S]*Complète/);
+  assert.doesNotMatch(source, /_acceptedRiskIssues/);
+  assert.doesNotMatch(source, /À risque/);
+  assert.doesNotMatch(source, /_backendValidated[\s\S]*Prête/);
+  assert.match(source, /Complète/);
   assert.match(source, /delete p\._backendIssues/);
 });
 
-test('le frontend demande un override explicite avant de générer une policy à risque', () => {
+test('le frontend ne bloque plus la génération pour les risques métier', () => {
   const appSource = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
   const serverSource = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
   const generateStart = appSource.indexOf('async function generateDeployConf()');
-  const generateEnd = appSource.indexOf('\n// ─── Preflight modal', generateStart);
+  const generateEnd = appSource.length;
   const generate = appSource.slice(generateStart, generateEnd);
 
-  assert.match(serverSource, /POLICY_RISK_CONFIRMATION_REQUIRED/);
-  assert.match(serverSource, /overridable/);
-  assert.match(appSource, /function showRiskOverrideModal/);
-  assert.match(appSource, />Corriger</);
-  assert.match(appSource, />Générer quand même</);
-  assert.match(appSource, /À risque/);
-  assert.match(generate, /POLICY_RISK_CONFIRMATION_REQUIRED/);
-  assert.match(generate, /showRiskOverrideModal/);
-  assert.match(generate, /if \(!accepted\)[\s\S]*openDrawer/);
-  assert.match(appSource, /_acceptedRisks/);
-  assert.match(generate, /acceptSelectedPolicyRisks/);
-  assert.match(generate, /selectedPolicyIndexGroups/);
-  assert.doesNotMatch(appSource, /source\._acceptedRisks\s*=/);
+  assert.doesNotMatch(serverSource, /POLICY_RISK_CONFIRMATION_REQUIRED/);
+  assert.doesNotMatch(appSource, /function showRiskOverrideModal/);
+  assert.doesNotMatch(generate, /POLICY_RISK_CONFIRMATION_REQUIRED/);
+  assert.doesNotMatch(generate, /showRiskOverrideModal/);
+  assert.doesNotMatch(generate, /acceptSelectedPolicyRisks/);
+  assert.match(generate, /incompleteSelectedIndexes/);
+  assert.match(generate, /champ obligatoire manquant/);
+  assert.doesNotMatch(generate, /showPreflightModal/);
+});
+
+test('les champs obligatoires manquants sont exposés précisément', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  const start = source.indexOf('function policyMissingMandatoryFields');
+  const end = source.indexOf('\nfunction ', start + 20);
+  assert.ok(start >= 0 && end > start, 'calcul des champs obligatoires introuvable');
+  const context = { Set };
+  vm.createContext(context);
+  vm.runInContext(source.slice(start, end), context);
+
+  assert.deepEqual(
+    [...context.policyMissingMandatoryFields({
+      analysis: {
+        missingFields: ['srcAddr', 'dstAddr', 'svc:TCP/443'],
+        services: [{ found: false, label: 'TCP/443' }],
+      },
+    })],
+    ['interface source', 'interface destination', 'source', 'destination', 'service'],
+  );
+  assert.deepEqual(
+    [...context.policyMissingMandatoryFields({
+      _srcintf: 'LAN',
+      _dstintf: 'DMZ',
+      _resolvedServiceKeys: { 'TCP/443': 'existing:HTTPS' },
+      _serviceReuse: { 'TCP/443': 'HTTPS' },
+      analysis: {
+        srcAddr: { found: true },
+        dstAddr: { found: true },
+        missingFields: ['svc:TCP/443'],
+        services: [{ found: false, label: 'TCP/443', reuseKeys: ['TCP/443'] }],
+      },
+    })],
+    [],
+  );
+  assert.deepEqual(
+    [...context.policyMissingMandatoryFields({
+      _srcintf: 'LAN',
+      _dstintf: 'DMZ',
+      _srcAddrName: 'SRC_OVERRIDE',
+      _dstAddrName: 'DST_OVERRIDE',
+      analysis: {
+        srcAddr: { found: true },
+        dstAddr: { found: true },
+        missingFields: ['srcAddr', 'dstAddr', 'srcIface', 'svc:TCP/443'],
+        services: [{ found: true, label: 'HTTPS' }],
+      },
+    })],
+    [],
+  );
+  assert.deepEqual(
+    [...context.policyMissingMandatoryFields({
+      _srcintf: 'LAN',
+      _dstintf: 'DMZ',
+      analysis: { srcAddr: { found: true }, dstAddr: { found: true }, services: [] },
+    })],
+    ['service'],
+  );
+
+  const completeStart = source.indexOf('function isPolicyComplete');
+  const completeEnd = source.indexOf('\nfunction syncRowStatus', completeStart);
+  assert.ok(completeStart >= 0 && completeEnd > completeStart, 'calcul de complétude introuvable');
+  const completeContext = { Set, cleanHostName() { return ''; } };
+  vm.createContext(completeContext);
+  vm.runInContext(source.slice(completeStart, completeEnd), completeContext);
+  assert.equal(completeContext.isPolicyComplete({
+    _srcintf: 'LAN',
+    _dstintf: 'DMZ',
+    analysis: { srcAddr: { found: true }, dstAddr: { found: true }, services: [] },
+  }), false);
+});
+
+test('les profils de sécurité vides restent optionnels pour une policy complète', () => {
+  const config = fortiConfig();
+  const authoritative = analyzePolicies([policy()], config);
+  const submitted = structuredClone(authoritative);
+  delete submitted[0].securityProfiles;
+
+  const options = validateGenerationOptions({ securityProfiles: {} }, config);
+  assert.equal(options.ok, true, JSON.stringify(options.issues));
+  const decision = applyPolicyUserDecisions(authoritative, submitted, config, [observedFlow()]);
+  assert.equal(decision.ok, true, JSON.stringify(decision.issues));
+  const cli = generateConfig(decision.policies, {
+    addresses: config.addresses,
+    addressGroups: config.addressGroups,
+    zones: config.zones,
+  });
+  assert.match(cli, /config firewall policy/);
 });
 
 test('FF2-01 refuse une interface utilisateur absente de la configuration', () => {
@@ -408,6 +526,77 @@ test('FF2-01 accepte un range uniquement depuis les ports sources observés', ()
   }]);
 });
 
+test('autorise explicitement un range fusionné plus large comme risque ingénieur', () => {
+  const config = fortiConfig();
+  const selected = policy({
+    dstHosts: ['10.0.1.20', '10.0.1.21'],
+    _use32Dst: true,
+    _dstMode: 'hosts',
+    services: ['TCP/12000', 'TCP/12005', 'TCP/13000'],
+    ports: [12000, 12005, 13000],
+    protos: ['TCP'],
+  });
+  const flows = [
+    observedFlow({ service: 'TCP/12000', dstport: '12000', dstip: '10.0.1.20' }),
+    observedFlow({ service: 'TCP/12005', dstport: '12005', dstip: '10.0.1.21' }),
+    observedFlow({ service: 'TCP/13000', dstport: '13000', dstip: '10.0.1.20' }),
+  ];
+  const authoritative = analyzePolicies([selected], config, undefined, flows);
+  const submitted = structuredClone(authoritative);
+  submitted[0].services = [];
+  submitted[0].analysis.services = [{
+    label: 'dce-rpc-range',
+    found: false,
+    name: null,
+    source: null,
+    suggestedName: 'dce-rpc-range',
+    isNamed: false,
+    proto: 'tcp',
+    portRange: '12000-13000',
+    sourcePorts: [12000, 12005, 13000],
+    _isMerged: true,
+  }];
+  submitted[0]._mergedServices = [{
+    name: 'dce-rpc-range',
+    ports: null,
+    portRange: '12000-13000',
+    proto: 'tcp',
+    sourcePorts: [12000, 12005, 13000],
+  }];
+
+  const decision = applyPolicyUserDecisions(authoritative, [submitted[0]], config, flows);
+  assert.equal(decision.ok, false);
+  const rangeRisk = decision.issues.find(issue => issue.code === 'MERGED_SERVICE_DECISION_INVALID');
+  assert.equal(rangeRisk.level, 'risk');
+  assert.equal(rangeRisk.overridable, true);
+  assert.match(rangeRisk.msg, /dce-rpc-range/);
+  assert.match(rangeRisk.detail, /12000-13000/);
+  const affinityRisk = decision.issues.find(issue => issue.code === 'POLICY_AFFINITY_UNPROVEN');
+  assert.equal(affinityRisk.level, 'risk');
+
+  submitted[0]._acceptedRisks = [
+    'MERGED_SERVICE_DECISION_INVALID',
+    'POLICY_AFFINITY_UNPROVEN',
+  ];
+  const accepted = applyPolicyUserDecisions(authoritative, [submitted[0]], config, flows);
+  assert.equal(accepted.ok, true, JSON.stringify(accepted.issues));
+  assert.ok(accepted.issues.some(issue =>
+    issue.code === 'MERGED_SERVICE_DECISION_INVALID' && issue.accepted === true && issue.level === 'warn'
+  ));
+  assert.ok(accepted.issues.some(issue =>
+    issue.code === 'POLICY_AFFINITY_UNPROVEN' && issue.accepted === true && issue.level === 'warn'
+  ));
+
+  const cli = generateConfig(accepted.policies, {
+    addresses: config.addresses,
+    addressGroups: config.addressGroups,
+    zones: config.zones,
+  });
+  assert.match(cli, /edit "dce-rpc-range"/);
+  assert.match(cli, /set tcp-portrange 12000-13000/);
+  assert.match(cli, /set service "dce-rpc-range"/);
+});
+
 test('FF2-01 refuse les fusions de services forgées ou non prouvées', () => {
   const config = fortiConfig();
   const authoritative = analyzePolicies([policy({
@@ -419,11 +608,11 @@ test('FF2-01 refuse les fusions de services forgées ou non prouvées', () => {
     observedFlow({ service: 'TCP/13000', dstport: '13000' }),
   ];
   const forged = [
-    { name: 'EVIL-ALL', proto: 'TCP', portRange: '1-65535', sourcePorts: [12000, 13000] },
-    { name: 'GAPPED', proto: 'TCP', portRange: '12000-13000', sourcePorts: [12000, 13000] },
-    { name: 'NO-PROOF', proto: 'TCP', portRange: '12000-13000' },
-    { name: 'UNOBSERVED', proto: 'TCP', ports: [12000, 14000], sourcePorts: [12000, 14000] },
-    { name: 'CONTRADICTORY', proto: 'TCP', ports: [12000, 13000], portRange: '1-65535', sourcePorts: [12000, 13000] },
+    { expectedLevel: 'error', name: 'EVIL-ALL', proto: 'TCP', portRange: '1-65535', sourcePorts: [12000, 13000] },
+    { expectedLevel: 'risk', name: 'GAPPED', proto: 'TCP', portRange: '12000-13000', sourcePorts: [12000, 13000] },
+    { expectedLevel: 'error', name: 'NO-PROOF', proto: 'TCP', portRange: '12000-13000' },
+    { expectedLevel: 'error', name: 'UNOBSERVED', proto: 'TCP', ports: [12000, 14000], sourcePorts: [12000, 14000] },
+    { expectedLevel: 'error', name: 'CONTRADICTORY', proto: 'TCP', ports: [12000, 13000], portRange: '1-65535', sourcePorts: [12000, 13000] },
   ];
 
   for (const merged of forged) {
@@ -433,8 +622,35 @@ test('FF2-01 refuse les fusions de services forgées ou non prouvées', () => {
     submitted[0]._mergedServices = [merged];
     const decision = applyPolicyUserDecisions(authoritative, submitted, config, flows);
     assert.equal(decision.ok, false, `${merged.name} aurait dû être refusé`);
-    assert.ok(decision.issues.some(issue => issue.code === 'MERGED_SERVICE_DECISION_INVALID'));
+    const issue = decision.issues.find(item => item.code === 'MERGED_SERVICE_DECISION_INVALID');
+    assert.equal(issue.level, merged.expectedLevel, `${merged.name}: ${JSON.stringify(decision.issues)}`);
   }
+
+  const forgedAcceptance = structuredClone(authoritative);
+  forgedAcceptance[0].analysis.services = [];
+  forgedAcceptance[0].services = [];
+  forgedAcceptance[0]._mergedServices = [{
+    name: 'EVIL-ALL', proto: 'TCP', portRange: '1-65535', sourcePorts: [12000, 13000],
+  }];
+  forgedAcceptance[0]._acceptedRisks = ['MERGED_SERVICE_DECISION_INVALID'];
+  const forgedDecision = applyPolicyUserDecisions(authoritative, forgedAcceptance, config, flows);
+  assert.equal(forgedDecision.ok, false);
+  assert.ok(forgedDecision.issues.some(issue =>
+    issue.code === 'MERGED_SERVICE_DECISION_INVALID' && issue.level === 'error'
+  ));
+
+  const malformedRange = structuredClone(authoritative);
+  malformedRange[0].analysis.services = [];
+  malformedRange[0].services = [];
+  malformedRange[0]._mergedServices = [{
+    name: 'BAD-PORTS', proto: 'TCP', ports: '12000', portRange: '12000-13000',
+    sourcePorts: [12000, 13000],
+  }];
+  const malformedDecision = applyPolicyUserDecisions(authoritative, malformedRange, config, flows);
+  assert.equal(malformedDecision.ok, false);
+  assert.ok(malformedDecision.issues.some(issue =>
+    issue.code === 'MERGED_SERVICE_DECISION_INVALID' && issue.level === 'error'
+  ));
 });
 
 test('FF2-01 refuse une fusion dont les labels ne correspondent pas aux flux', () => {
@@ -461,7 +677,9 @@ test('FF2-01 refuse une fusion dont les labels ne correspondent pas aux flux', (
 test('FF2-01 transmet la preuve des ports sources pour chaque fusion UI', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
   assert.equal((source.match(/sourcePorts:\s*ports/g) || []).length, 2);
-  assert.equal((source.match(/sourcePorts:\s*s\.sourcePorts\s*\|\|\s*\[\]/g) || []).length, 2);
+  assert.match(source, /function serializeMergedServiceDecisions[\s\S]*sourcePorts:\s*\[\.\.\.\(service\.sourcePorts\s*\|\|\s*\[\]\)\]/);
+  assert.equal((source.match(/_mergedServices:\s*serializeMergedServiceDecisions\(p\)/g) || []).length, 2);
+  assert.doesNotMatch(source, /ports:\s*s\.ports\s*\|\|\s*null/);
 });
 
 test('FF2-01 ignore les champs techniques forgés d’un service standard', () => {
@@ -498,7 +716,7 @@ test('FF2-01 applique le validateur autoritatif au preflight et à la générati
     assert.match(route, /sendPolicyDecisionFailure\(/);
   }
   assert.match(source, /POLICY_DECISION_INVALID/);
-  assert.match(source, /POLICY_RISK_CONFIRMATION_REQUIRED/);
+  assert.doesNotMatch(source, /POLICY_RISK_CONFIRMATION_REQUIRED/);
   const generateStart = source.indexOf("app.post('/api/deploy/generate'");
   const generateEnd = source.indexOf('\n});', generateStart);
   const generateRoute = source.slice(generateStart, generateEnd);
@@ -507,6 +725,20 @@ test('FF2-01 applique le validateur autoritatif au preflight et à la générati
   const preflightStart = source.indexOf("app.post('/api/deploy/preflight'");
   const preflightEnd = source.indexOf('\n});', preflightStart);
   assert.match(source.slice(preflightStart, preflightEnd), /Preflight refusé/);
+});
+
+test('la récupération sauvegarde le deployState contaminé avant toute correction automatique', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+  const marker = "app.post('/api/deploy/recovery-backup'";
+  const start = source.indexOf(marker);
+  const end = source.indexOf('\n});', start);
+  assert.ok(start >= 0 && end > start, 'route de sauvegarde de récupération absente');
+  const route = source.slice(start, end);
+  assert.match(route, /requireSession\(/);
+  assert.match(route, /SERVICE_RECOVERY_BACKUP_DIR/);
+  assert.match(route, /fs\.promises\.writeFile/);
+  assert.match(route, /fs\.promises\.rename/);
+  assert.match(route, /analyzed/);
 });
 
 test('FF2-01 refuse un service trouvé mais absent des flux observés de la policy', () => {
@@ -1093,4 +1325,10 @@ end
     assert.equal(decision.ok, false);
     assert.ok(decision.issues.some(issue => issue.code === 'RISK_DECISION_INVALID'));
   }
+
+  const forgedAcceptance = structuredClone(authoritative);
+  forgedAcceptance[0]._acceptedRisks = ['MERGED_SERVICE_DECISION_INVALID'];
+  const forgedDecision = applyPolicyUserDecisions(authoritative, forgedAcceptance, config, [observedFlow()]);
+  assert.equal(forgedDecision.ok, false);
+  assert.ok(forgedDecision.issues.some(issue => issue.code === 'RISK_DECISION_INVALID'));
 });

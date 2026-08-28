@@ -8,7 +8,15 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 
 const { buildAnalysis } = require('../lib/analyzer');
-const { parseFortiConfig, extractKnownSubnets } = require('../lib/forticonfig');
+const {
+  parseFortiConfig,
+  extractKnownSubnets,
+  resolveDestinationSubnets,
+  analyzePolicies,
+  applyPolicyUserDecisions,
+  generateConfig,
+  validatePolicyDecisionShapes,
+} = require('../lib/forticonfig');
 
 function acceptedFlow(srcip, dstip, srcintf = 'Stations', dstintf = 'Admin') {
   return {
@@ -79,6 +87,45 @@ end
   ]);
 });
 
+test('ne regroupe pas plusieurs destinations sous la clé d’un objet RFC1918 /8', () => {
+  const fortiConfig = parseFortiConfig(`
+config firewall address
+    edit "RFC1918-10.0.0.0/8"
+        set subnet 10.0.0.0 255.0.0.0
+    next
+end
+`);
+  const analysis = buildAnalysis([
+    acceptedFlow('10.250.16.49', '10.42.1.252', 'Stations', 'Interco_MPLS', 'SMB', '445'),
+    acceptedFlow('10.250.16.49', '10.44.2.1', 'Stations', 'Interco_MPLS', 'SMB', '445'),
+  ], extractKnownSubnets(fortiConfig));
+
+  assert.deepEqual(analysis.policies.map(policy => policy.dstTarget).sort(), [
+    '10.42.1.252/32', '10.44.2.1/32',
+  ]);
+  assert.ok(analysis.policies.every(policy => policy.dstTarget !== '10.0.0.0/8'));
+});
+
+test('conserve une interface /8 comme preuve réseau même si un objet /8 générique existe', () => {
+  const fortiConfig = parseFortiConfig(`
+config firewall address
+    edit "RFC1918-10.0.0.0/8"
+        set subnet 10.0.0.0 255.0.0.0
+    next
+end
+config system interface
+    edit "REMOTE"
+        set ip 10.42.0.1 255.0.0.0
+    next
+end
+`);
+  const analysis = buildAnalysis([
+    acceptedFlow('192.168.10.10', '10.42.1.252', 'LAN', 'REMOTE'),
+  ], extractKnownSubnets(fortiConfig));
+
+  assert.equal(analysis.policies[0].dstTarget, '10.0.0.0/8');
+});
+
 test('prefers a more specific firewall address object over an interface network', () => {
   const fortiConfig = parseFortiConfig(`
 config firewall address
@@ -117,6 +164,499 @@ end
 
   assert.equal(analysis.flows[0].srcSubnet, '10.99.1.12/32');
   assert.equal(analysis.flows[0].dstSubnet, '10.99.2.34/32');
+});
+
+test('exposes the most specific detected destination subnets without promoting a broad /8', () => {
+  const fortiConfig = parseFortiConfig(`
+config firewall address
+    edit "RFC1918"
+        set subnet 10.0.0.0 255.0.0.0
+    next
+end
+config system interface
+    edit "LAN"
+        set ip 192.168.10.1 255.255.255.0
+    next
+    edit "Z-INTERSITE"
+        set ip 172.20.0.1 255.255.255.0
+    next
+end
+config router static
+    edit 1
+        set dst 10.42.0.0 255.255.254.0
+        set gateway 172.20.0.2
+        set device "Z-INTERSITE"
+    next
+    edit 2
+        set dst 10.44.2.0 255.255.255.0
+        set gateway 172.20.0.2
+        set device "Z-INTERSITE"
+    next
+    edit 3
+        set dst 10.45.0.0 255.255.252.0
+        set gateway 172.20.0.2
+        set device "Z-INTERSITE"
+    next
+    edit 4
+        set dst 0.0.0.0 0.0.0.0
+        set gateway 172.20.0.2
+        set device "Z-INTERSITE"
+    next
+end
+`);
+  const destinations = ['10.42.1.252', '10.44.2.1', '10.45.2.1'];
+  const observedFlows = destinations.map(dstip => ({
+    srcip: '192.168.10.10', dstip, dstSubnet: '10.0.0.0/8', dstType: 'private',
+    srcSubnet: '192.168.10.0/24', srcintf: 'LAN', dstintf: 'Z-INTERSITE',
+    service: 'HTTPS', dstport: '443', proto: '6', protoName: 'TCP', action: 'accept',
+  }));
+
+  const [analyzed] = analyzePolicies([{
+    srcSubnet: '192.168.10.0/24',
+    dstTarget: '10.0.0.0/8',
+    dstType: 'private',
+    services: ['HTTPS'], ports: [443], protos: ['TCP'],
+    srcHosts: ['192.168.10.10'], dstHosts: destinations,
+    flowSrcintf: 'LAN',
+  }], fortiConfig, undefined, observedFlows);
+
+  assert.ok(Array.isArray(analyzed._dstDetectedSubnets), 'candidats de sous-réseaux destination absents');
+  assert.deepEqual(analyzed._dstDetectedSubnets.map(item => [item.subnet, item.hosts]), [
+    ['10.42.0.0/23', ['10.42.1.252']],
+    ['10.44.2.0/24', ['10.44.2.1']],
+    ['10.45.0.0/22', ['10.45.2.1']],
+  ]);
+  assert.deepEqual(analyzed._dstDetectedSubnets.map(item => [item.route.source, item.route.device]), [
+    ['static', 'Z-INTERSITE'],
+    ['static', 'Z-INTERSITE'],
+    ['static', 'Z-INTERSITE'],
+  ]);
+  assert.ok(analyzed._dstDetectedSubnets.every(item => item.subnet !== '10.0.0.0/8'));
+});
+
+test('deduplicates detected destinations, preserves /27 and /28, and ignores the default route as a subnet', () => {
+  const fortiConfig = parseFortiConfig(`
+config firewall address
+    edit "NET_27"
+        set subnet 10.60.0.0 255.255.255.224
+    next
+end
+config system interface
+    edit "LAN"
+        set ip 192.168.10.1 255.255.255.0
+    next
+    edit "Z-INTERSITE"
+        set ip 172.20.0.1 255.255.255.0
+    next
+    edit "REMOTE-IF"
+        set ip 10.62.5.1 255.255.255.224
+    next
+end
+config router static
+    edit 1
+        set dst 10.61.1.0 255.255.255.240
+        set gateway 172.20.0.2
+        set device "Z-INTERSITE"
+    next
+    edit 2
+        set dst 0.0.0.0 0.0.0.0
+        set gateway 172.20.0.2
+        set device "Z-INTERSITE"
+    next
+end
+`);
+
+  const detected = resolveDestinationSubnets([
+    '10.60.0.1', '10.60.0.2', '10.61.1.14', '10.62.5.4', '10.99.1.7',
+  ], fortiConfig);
+
+  assert.deepEqual(detected.map(item => [item.subnet, item.hosts, item.useSubnet]), [
+    ['10.60.0.0/27', ['10.60.0.1', '10.60.0.2'], true],
+    ['10.61.1.0/28', ['10.61.1.14'], true],
+    ['10.62.5.0/27', ['10.62.5.4'], true],
+    ['10.99.1.7/32', ['10.99.1.7'], false],
+  ]);
+  assert.equal(detected[0].addrName, 'NET_27');
+  assert.deepEqual(detected[2].sources, [
+    { type: 'interface', name: 'REMOTE-IF', cidr: '10.62.5.0/27' },
+    { type: 'route', dst: '10.62.5.0/27', device: 'REMOTE-IF', gateway: '', distance: 0, priority: 0, source: 'connected' },
+  ]);
+  assert.deepEqual(detected[2].route, {
+    dst: '10.62.5.0/27', device: 'REMOTE-IF', gateway: '', distance: 0, priority: 0, source: 'connected',
+  });
+  assert.deepEqual(detected[3].route, {
+    dst: '0.0.0.0/0', gateway: '172.20.0.2', device: 'Z-INTERSITE',
+    distance: 10, priority: 0, source: 'static',
+  });
+  assert.notEqual(detected[3].subnet, '0.0.0.0/0');
+});
+
+test('valide la sélection de sous-réseaux détectés et génère CONFIG puis FF_NET_*', () => {
+  const fortiConfig = parseFortiConfig(`
+config firewall address
+    edit "NET_42"
+        set subnet 10.42.0.0 255.255.254.0
+    next
+end
+config system interface
+    edit "LAN"
+        set ip 192.168.10.1 255.255.255.0
+    next
+    edit "Z-INTERSITE"
+        set ip 172.20.0.1 255.255.255.0
+    next
+end
+config router static
+    edit 1
+        set dst 10.42.0.0 255.255.254.0
+        set gateway 172.20.0.2
+        set device "Z-INTERSITE"
+    next
+    edit 2
+        set dst 10.44.2.0 255.255.255.0
+        set gateway 172.20.0.2
+        set device "Z-INTERSITE"
+    next
+    edit 3
+        set dst 10.45.0.0 255.255.252.0
+        set gateway 172.20.0.2
+        set device "Z-INTERSITE"
+    next
+end
+`);
+  const destinations = ['10.42.1.252', '10.44.2.1', '10.45.2.1'];
+  const observedFlows = destinations.map(dstip => ({
+    srcip: '192.168.10.10', dstip, dstSubnet: '10.0.0.0/8', dstType: 'private',
+    srcSubnet: '192.168.10.0/24', srcintf: 'LAN', dstintf: 'Z-INTERSITE',
+    service: 'SSH', dstport: '22', proto: '6', protoName: 'TCP', action: 'accept',
+  }));
+  const detected = resolveDestinationSubnets(destinations, fortiConfig);
+  const selected = {
+    srcSubnet: '192.168.10.0/24',
+    dstTarget: detected[0].subnet,
+    dstTargets: detected.map(item => item.subnet),
+    dstType: 'private',
+    _dstMode: 'detected-subnets',
+    _isMultiDst: true,
+    _use32Dst: false,
+    _multiDstSubnets: detected,
+    services: ['SSH'], ports: [22], protos: ['TCP'],
+    srcHosts: ['192.168.10.10'], dstHosts: destinations, flowSrcintf: 'LAN',
+  };
+  const authoritative = analyzePolicies([selected], fortiConfig, undefined, observedFlows);
+  const decision = applyPolicyUserDecisions(authoritative, [selected], fortiConfig, observedFlows);
+  assert.equal(decision.ok, true, JSON.stringify(decision.issues));
+
+  const cli = generateConfig(decision.policies, {
+    addresses: fortiConfig.addresses,
+    addressGroups: fortiConfig.addressGroups,
+    zones: fortiConfig.zones,
+  });
+  assert.match(cli, /set dstaddr "NET_42" "FF_NET_10_44_2_0_24" "FF_NET_10_45_0_0_22"/);
+  assert.doesNotMatch(cli, /set dstaddr "RFC1918"/);
+});
+
+test('refuse une représentation destination détectée forgée hors des candidats LPM', () => {
+  const fortiConfig = parseFortiConfig(`
+config firewall address
+    edit "RFC1918"
+        set subnet 10.0.0.0 255.0.0.0
+    next
+end
+config system interface
+    edit "LAN"
+        set ip 192.168.10.1 255.255.255.0
+    next
+    edit "Z-INTERSITE"
+        set ip 172.20.0.1 255.255.255.0
+    next
+end
+config router static
+    edit 1
+        set dst 10.42.0.0 255.255.254.0
+        set gateway 172.20.0.2
+        set device "Z-INTERSITE"
+    next
+end
+`);
+  const destinations = ['10.42.1.252'];
+  const observedFlows = [{
+    srcip: '192.168.10.10', dstip: destinations[0], dstSubnet: '10.0.0.0/8', dstType: 'private',
+    srcSubnet: '192.168.10.0/24', srcintf: 'LAN', dstintf: 'Z-INTERSITE',
+    service: 'SSH', dstport: '22', proto: '6', protoName: 'TCP', action: 'accept',
+  }];
+  const forged = {
+    srcSubnet: '192.168.10.0/24',
+    dstTarget: '10.0.0.0/8', dstTargets: ['10.0.0.0/8'], dstType: 'private',
+    _dstMode: 'detected-subnets', _isMultiDst: true, _use32Dst: false,
+    _srcintf: 'LAN', _dstintf: 'Z-INTERSITE',
+    srcintf: 'LAN', dstintf: 'Z-INTERSITE',
+    _multiDstSubnets: [{ subnet: '10.0.0.0/8', hosts: destinations, useSubnet: true, addrName: 'RFC1918', addrFound: true }],
+    services: ['SSH'], ports: [22], protos: ['TCP'],
+    srcHosts: ['192.168.10.10'], dstHosts: destinations, flowSrcintf: 'LAN',
+  };
+  const authoritative = analyzePolicies([forged], fortiConfig, undefined, observedFlows);
+  const decision = applyPolicyUserDecisions(authoritative, [forged], fortiConfig, observedFlows);
+  assert.equal(decision.ok, false);
+  assert.ok(decision.issues.some(issue => issue.code === 'DESTINATION_SUBNET_DECISION_INVALID'), JSON.stringify(decision.issues));
+});
+
+test('une seule destination détectée depuis un agrégat reste par défaut en /32', () => {
+  const fortiConfig = parseFortiConfig(`
+config firewall address
+    edit "RFC1918"
+        set subnet 10.0.0.0 255.0.0.0
+    next
+end
+config system interface
+    edit "LAN"
+        set ip 192.168.10.1 255.255.255.0
+    next
+    edit "Z-INTERSITE"
+        set ip 172.20.0.1 255.255.255.0
+    next
+end
+config router static
+    edit 1
+        set dst 10.42.0.0 255.255.254.0
+        set gateway 172.20.0.2
+        set device "Z-INTERSITE"
+    next
+end
+`);
+  const flow = {
+    srcip: '192.168.10.10', dstip: '10.42.1.252', dstSubnet: '10.0.0.0/8', dstType: 'private',
+    srcSubnet: '192.168.10.0/24', srcintf: 'LAN', dstintf: 'Z-INTERSITE',
+    service: 'SSH', dstport: '22', proto: '6', protoName: 'TCP', action: 'accept',
+  };
+  const [analyzed] = analyzePolicies([{
+    srcSubnet: '192.168.10.0/24', dstTarget: '10.0.0.0/8', dstType: 'private',
+    services: ['SSH'], ports: [22], protos: ['TCP'],
+    srcHosts: ['192.168.10.10'], dstHosts: ['10.42.1.252'], flowSrcintf: 'LAN',
+  }], fortiConfig, undefined, [flow]);
+
+  assert.equal(analyzed._dstMode, 'hosts');
+  assert.equal(analyzed._use32Dst, true);
+  const cli = generateConfig([analyzed], {
+    addresses: fortiConfig.addresses,
+    addressGroups: fortiConfig.addressGroups,
+    zones: fortiConfig.zones,
+  });
+  assert.match(cli, /set dstaddr "FF_HOST_10_42_1_252"/);
+  assert.doesNotMatch(cli, /set dstaddr "RFC1918"/);
+});
+
+test('les invariants de mode destination empêchent une sélection détectée ignorée ou un /32 agrégé', () => {
+  const base = {
+    srcSubnet: '192.168.10.0/24', dstTarget: '10.42.0.0/23', dstType: 'private',
+    services: ['SSH'], ports: [22], protos: ['TCP'],
+    srcHosts: ['192.168.10.10'], dstHosts: ['10.42.1.252'],
+  };
+  const detected = validatePolicyDecisionShapes([{
+    ...base,
+    _dstMode: 'detected-subnets', _isMultiDst: false, _use32Dst: false,
+    _multiDstSubnets: [{ subnet: '10.42.0.0/23', hosts: ['10.42.1.252'], useSubnet: true }],
+  }]);
+  const aggregate = validatePolicyDecisionShapes([{
+    ...base,
+    _dstMode: 'aggregate', _isMultiDst: false, _use32Dst: true,
+  }]);
+  assert.equal(detected.ok, false, JSON.stringify(detected.issues));
+  assert.equal(aggregate.ok, false, JSON.stringify(aggregate.issues));
+  assert.ok([...detected.issues, ...aggregate.issues]
+    .some(issue => issue.code === 'SCOPE_DECISION_INVALID'));
+});
+
+test('conserve la provenance BGP des pseudo-routes utilisées pour une destination', () => {
+  const fortiConfig = parseFortiConfig(`
+config system interface
+    edit "LAN"
+        set ip 192.168.10.1 255.255.255.0
+    next
+    edit "Z-INTERSITE"
+        set ip 172.20.0.1 255.255.255.0
+    next
+end
+config router bgp
+    set router-id 192.168.10.1
+    config neighbor
+        edit "10.99.1.1"
+            set remote-as 65000
+            set interface "Z-INTERSITE"
+        next
+    end
+end
+`);
+  const [detected] = resolveDestinationSubnets(['10.99.1.1'], fortiConfig);
+  assert.equal(detected.route.source, 'bgp');
+  assert.equal(detected.route.dst, '10.99.1.1/32');
+  assert.ok(detected.sources.some(source => source.type === 'route' && source.source === 'bgp'));
+});
+
+test('n’utilise ni un objet /32 ni le RFC1918 /8 pour inférer le subnet détecté', () => {
+  const fortiConfig = parseFortiConfig(`
+config firewall address
+    edit "RFC1918"
+        set subnet 10.0.0.0 255.0.0.0
+    next
+    edit "HOST-10.40.1.211"
+        set subnet 10.40.1.211 255.255.255.255
+    next
+    edit "HOST-10.42.1.252"
+        set subnet 10.42.1.252 255.255.255.255
+    next
+end
+config system interface
+    edit "LAN"
+        set ip 192.168.10.1 255.255.255.0
+    next
+    edit "REMOTE"
+        set ip 10.40.1.1 255.255.0.0
+    next
+end
+config router static
+    edit 1
+        set dst 0.0.0.0 0.0.0.0
+        set gateway 10.40.0.254
+        set device "REMOTE"
+    next
+end
+`);
+
+  const withNetwork = resolveDestinationSubnets(['10.40.1.211'], fortiConfig)[0];
+  assert.equal(withNetwork.subnet, '10.40.0.0/16');
+  assert.equal(withNetwork.addrFound, false);
+  assert.ok(withNetwork.sources.some(source => source.type === 'interface' && source.name === 'REMOTE'));
+
+  const withoutNetwork = resolveDestinationSubnets(['10.42.1.252'], fortiConfig)[0];
+  assert.equal(withoutNetwork.subnet, '10.42.1.252/32');
+  assert.equal(withoutNetwork.useSubnet, false);
+  assert.equal(withoutNetwork.addrFound, false);
+  assert.equal(withoutNetwork.sources.some(source => source.type === 'object'), false);
+  assert.equal(withoutNetwork.route.dst, '0.0.0.0/0');
+  assert.equal(withoutNetwork.route.device, 'REMOTE');
+});
+
+test('accepte un CIDR destination saisi manuellement s’il contient les IP observées', () => {
+  const fortiConfig = parseFortiConfig(`
+config system interface
+    edit "LAN"
+        set ip 192.168.10.1 255.255.255.0
+    next
+    edit "REMOTE"
+        set ip 172.20.0.1 255.255.255.0
+    next
+end
+`);
+  const observedFlows = [{
+    srcip: '192.168.10.10', dstip: '10.42.1.252', dstSubnet: '10.0.0.0/8', dstType: 'private',
+    srcSubnet: '192.168.10.0/24', srcintf: 'LAN', dstintf: 'REMOTE',
+    service: 'SSH', dstport: '22', proto: '6', protoName: 'TCP', action: 'accept',
+  }];
+  const selected = {
+    srcSubnet: '192.168.10.0/24', dstTarget: '10.42.1.224/27', dstTargets: ['10.42.1.224/27'],
+    dstType: 'private', srcintf: 'LAN', dstintf: 'REMOTE', flowSrcintf: 'LAN',
+    _dstMode: 'detected-subnets', _isMultiDst: true, _use32Dst: false,
+    _multiDstSubnets: [{
+      subnet: '10.42.1.224/27', hosts: ['10.42.1.252'], useSubnet: true,
+      manual: true, addrName: 'FF_NET_10_42_1_224_27', addrFound: false,
+    }],
+    services: ['SSH'], ports: [22], protos: ['TCP'],
+    srcHosts: ['192.168.10.10'], dstHosts: ['10.42.1.252'],
+  };
+  const authoritative = analyzePolicies([selected], fortiConfig, undefined, observedFlows);
+  const decision = applyPolicyUserDecisions(authoritative, [selected], fortiConfig, observedFlows);
+  assert.equal(decision.ok, true, JSON.stringify(decision.issues));
+  const cli = generateConfig(decision.policies, {
+    addresses: fortiConfig.addresses, addressGroups: fortiConfig.addressGroups, zones: fortiConfig.zones,
+  });
+  assert.match(cli, /edit "FF_NET_10_42_1_224_27"/);
+  assert.match(cli, /set subnet 10\.42\.1\.224 255\.255\.255\.224/);
+});
+
+test('refuse un CIDR destination manuel qui ne contient pas l’IP observée sans crash', () => {
+  const fortiConfig = parseFortiConfig(`
+config system interface
+    edit "LAN"
+        set ip 192.168.10.1 255.255.255.0
+    next
+    edit "REMOTE"
+        set ip 172.20.0.1 255.255.255.0
+    next
+end
+`);
+  const observedFlows = [{
+    srcip: '192.168.10.10', dstip: '10.42.1.252', dstSubnet: '10.0.0.0/8', dstType: 'private',
+    srcSubnet: '192.168.10.0/24', srcintf: 'LAN', dstintf: 'REMOTE',
+    service: 'SSH', dstport: '22', proto: '6', protoName: 'TCP', action: 'accept',
+  }];
+  const selected = {
+    srcSubnet: '192.168.10.0/24', dstTarget: '10.42.1.0/28', dstTargets: ['10.42.1.0/28'],
+    dstType: 'private', srcintf: 'LAN', dstintf: 'REMOTE', flowSrcintf: 'LAN',
+    _dstMode: 'detected-subnets', _isMultiDst: true, _use32Dst: false,
+    _multiDstSubnets: [{ subnet: '10.42.1.0/28', hosts: ['10.42.1.252'], useSubnet: true, manual: true }],
+    services: ['SSH'], ports: [22], protos: ['TCP'],
+    srcHosts: ['192.168.10.10'], dstHosts: ['10.42.1.252'],
+  };
+  const authoritative = analyzePolicies([selected], fortiConfig, undefined, observedFlows);
+  const decision = applyPolicyUserDecisions(authoritative, [selected], fortiConfig, observedFlows);
+  assert.equal(decision.ok, false);
+  assert.ok(decision.issues.some(issue => issue.code === 'DESTINATION_SUBNET_DECISION_INVALID'));
+});
+
+test('calcule un seul agrégat minimal depuis les seules IP observées et accepte son édition', () => {
+  const fortiConfig = parseFortiConfig(`
+config firewall address
+    edit "RFC1918"
+        set subnet 10.0.0.0 255.0.0.0
+    next
+end
+config system interface
+    edit "LAN"
+        set ip 192.168.10.1 255.255.255.0
+    next
+    edit "REMOTE"
+        set ip 172.20.0.1 255.255.255.0
+    next
+end
+config router static
+    edit 1
+        set dst 0.0.0.0 0.0.0.0
+        set gateway 172.20.0.2
+        set device "REMOTE"
+    next
+end
+`);
+  const destinations = ['10.42.1.252', '10.44.2.1', '10.45.2.1'];
+  const observedFlows = destinations.map(dstip => ({
+    srcip: '192.168.10.10', dstip, dstSubnet: '10.0.0.0/8', dstType: 'private',
+    srcSubnet: '192.168.10.0/24', srcintf: 'LAN', dstintf: 'REMOTE',
+    service: 'SSH', dstport: '22', proto: '6', protoName: 'TCP', action: 'accept',
+  }));
+  const selected = {
+    srcSubnet: '192.168.10.0/24', dstTarget: '10.40.0.0/13', dstTargets: ['10.40.0.0/13'],
+    dstType: 'private', srcintf: 'LAN', dstintf: 'REMOTE', flowSrcintf: 'LAN',
+    _dstMode: 'aggregate', _isMultiDst: false, _use32Dst: false,
+    dstAddrName: 'FF_NET_10_40_0_0_13',
+    services: ['SSH'], ports: [22], protos: ['TCP'],
+    srcHosts: ['192.168.10.10'], dstHosts: destinations,
+  };
+  const authoritative = analyzePolicies([selected], fortiConfig, undefined, observedFlows);
+  const decision = applyPolicyUserDecisions(authoritative, [selected], fortiConfig, observedFlows);
+  assert.equal(decision.ok, true, JSON.stringify(decision.issues));
+  const cli = generateConfig(decision.policies, {
+    addresses: fortiConfig.addresses, addressGroups: fortiConfig.addressGroups, zones: fortiConfig.zones,
+  });
+  assert.match(cli, /set dstaddr "FF_NET_10_40_0_0_13"/);
+  assert.match(cli, /set subnet 10\.40\.0\.0 255\.248\.0\.0/);
+  assert.doesNotMatch(cli, /set dstaddr "RFC1918"/);
+
+  const invalidSelected = {
+    ...selected, dstTarget: '10.42.1.0/28', dstTargets: ['10.42.1.0/28'],
+  };
+  const invalidDecision = applyPolicyUserDecisions(authoritative, [invalidSelected], fortiConfig, observedFlows);
+  assert.equal(invalidDecision.ok, false);
+  assert.ok(invalidDecision.issues.some(issue => issue.code === 'DESTINATION_AGGREGATE_DECISION_INVALID'));
 });
 
 test('reanalyzes imported logs with the networks from the selected VDOM', async t => {

@@ -49,6 +49,21 @@ function getSubnetForIP(ip, knownSubnets) {
   return isNaN(ip2int(ip)) ? null : `${ip}/32`;
 }
 
+// Destination-specific evidence: broad address objects such as RFC1918 /8
+// are inventory, not a topology proof. Smaller configured networks remain
+// available as fallback evidence when no route/interface resolver is present.
+function getDestinationSubnetForIP(ip, knownSubnets) {
+  const destinationSubnets = (knownSubnets || [])
+    .filter(candidate => {
+      const sources = Array.isArray(candidate?.sources)
+        ? candidate.sources : [candidate?.source].filter(Boolean);
+      const objectOnly = sources.length > 0 && sources.every(source => source === 'object');
+      return Number(candidate?.prefix) > 0 && Number(candidate?.prefix) < 32
+        && !(objectOnly && Number(candidate.prefix) <= 8);
+    });
+  return getSubnetForIP(ip, destinationSubnets);
+}
+
 // ─── Proto labels ─────────────────────────────────────────────────────────────
 
 const PROTO_MAP = { '1': 'ICMP', '6': 'TCP', '17': 'UDP', '47': 'GRE', '50': 'ESP', '58': 'ICMP6', '89': 'OSPF' };
@@ -78,6 +93,7 @@ function buildAllSubnetGroupsAndPorts(flows, topN = 25, knownSubnets = []) {
   const tcpMap = new Map();
   const udpMap = new Map();
   const subnetOf = (ip) => getSubnetForIP(ip, knownSubnets);
+  const destinationSubnetOf = (ip) => getDestinationSubnetForIP(ip, knownSubnets);
 
   // groupKey: explicit key override (e.g. "10.1.6.0/24|vlan850"); defaults to srcSubnet
   function addToGroup(groups, flow, groupKey) {
@@ -90,7 +106,7 @@ function buildAllSubnetGroupsAndPorts(flows, topN = 25, knownSubnets = []) {
     }
     const sg = groups[key];
     sg.srcIPs.add(flow.srcip);
-    const dstKey  = isPrivate(flow.dstip) ? subnetOf(flow.dstip) : flow.dstip;
+    const dstKey  = isPrivate(flow.dstip) ? destinationSubnetOf(flow.dstip) : flow.dstip;
     const dstType = isPrivate(flow.dstip) ? 'private' : 'public';
     if (!dstKey) return;
     if (!sg.dsts[dstKey]) {
@@ -165,6 +181,7 @@ function buildAllSubnetGroupsAndPorts(flows, topN = 25, knownSubnets = []) {
 function buildAnalysis(flowInput, knownSubnets = []) {
   const flows = Array.isArray(flowInput) ? flowInput : Array.from(flowInput.values());
   const subnetOf = (ip) => getSubnetForIP(ip, knownSubnets);
+  const destinationSubnetOf = (ip) => getDestinationSubnetForIP(ip, knownSubnets);
 
   // ── Single pass: all subnet groups + port stats ──
   const { subnetGroups, allowedSubnetGroups, allowedByIntfGroups, acceptSubnetGroups, denySubnetGroups, portStats } =
@@ -238,7 +255,7 @@ function buildAnalysis(flowInput, knownSubnets = []) {
       srcType:    ipType(f.srcip),
       dstType:    dstPriv ? 'private' : 'public',
       srcSubnet:  isPrivate(f.srcip) ? subnetOf(f.srcip) : null,
-      dstSubnet:  dstPriv ? subnetOf(f.dstip) : null,
+      dstSubnet:  dstPriv ? destinationSubnetOf(f.dstip) : null,
       totalBytes: f.sentBytes + f.rcvdBytes,
     };
   });
@@ -257,7 +274,7 @@ function buildAnalysis(flowInput, knownSubnets = []) {
       }
     }
     if (f.dstintf && isPrivate(f.dstip)) {
-      const sub = subnetOf(f.dstip);
+      const sub = destinationSubnetOf(f.dstip);
       if (sub) {
         if (!subnetIntfMap[sub]) subnetIntfMap[sub] = new Set();
         subnetIntfMap[sub].add(f.dstintf);
