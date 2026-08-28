@@ -2012,19 +2012,6 @@ function strategyStableSort(policies) {
     || strategyServiceSetKey(a.analysis?.services).localeCompare(strategyServiceSetKey(b.analysis?.services)));
 }
 
-function strategyPassThroughPolicy(policy) {
-  const output = { ...policy, _generationPassThrough: true };
-  if (!Array.isArray(output._mergedFrom) || output._mergedFrom.length === 0) {
-    output._mergedFrom = strategyAtomicOrigins([policy]).map(origin => ({
-      srcSubnet: origin.srcSubnet,
-      dstTarget: origin.dstTarget,
-      action: origin.action,
-      analysis: { services: [...origin.analysis.services] },
-    }));
-  }
-  return output;
-}
-
 function buildPolicyStrategyPreviews(policies, { scope = 'all' } = {}) {
   const normalizedScope = ['all', 'internet', 'lan'].includes(scope) ? scope : 'all';
   const original = Array.isArray(policies) ? policies : [];
@@ -2039,16 +2026,22 @@ function buildPolicyStrategyPreviews(policies, { scope = 'all' } = {}) {
   const strategies = {};
   const labels = { balanced: 'Équilibrée', compact: 'Compacte', synthetic: 'Synthétique' };
   for (const [name, builder] of Object.entries(builders)) {
-    const result = strategyStableSort([...builder(origins), ...outScope.map(strategyPassThroughPolicy)]);
+    const result = strategyStableSort(builder(origins));
     strategies[name] = {
       id: name,
       label: labels[name],
       policyCount: result.length,
       policies: result,
-      metrics: strategyMetrics(original, result),
+      metrics: strategyMetrics(inScope, result),
     };
   }
-  return { scope: normalizedScope, strategies };
+  return {
+    scope: normalizedScope,
+    datasetPolicyCount: original.length,
+    scopedPolicyCount: inScope.length,
+    outsideScopeCount: outScope.length,
+    strategies,
+  };
 }
 
 function strategyMetricsShapeValid(metrics) {

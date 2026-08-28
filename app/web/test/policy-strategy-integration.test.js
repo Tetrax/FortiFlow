@@ -33,6 +33,7 @@ test('la barre principale expose les stratégies et vues compactes sans l’anci
   assert.match(appSource, /additional/);
   assert.match(appSource, /expansion/);
   assert.match(appSource, /Pré-déploiement/);
+  assert.match(appSource, /hors périmètre non modifiées/);
   assert.doesNotMatch(appSource, /function showMergeDiff/);
   assert.doesNotMatch(appSource, /data-merge="apply"/);
   assert.doesNotMatch(appSource, /Détailler/);
@@ -91,7 +92,7 @@ test('une preview synthétique marquée est validée puis conservée sans re-spl
   }).ok, false);
 });
 
-test('Synthétique accepte les policies hors périmètre uniquement comme pass-through exact', () => {
+test('Synthétique exclut les policies hors périmètre de la preview et de l’application', () => {
   const https = { label: 'HTTPS', name: 'HTTPS', found: true, isNamed: true, reuseKeys: ['TCP/443'] };
   const policies = [
     { srcSubnet: 'LAN-A', dstTarget: 'APP-A', dstType: 'private', _srcintf: 'LAN', _dstintf: 'SERVERS', action: 'accept', analysis: { services: [https] } },
@@ -104,19 +105,16 @@ test('Synthétique accepte les policies hors périmètre uniquement comme pass-t
     policy._generationStrategy = 'synthetic';
     policy._generationScope = 'lan';
     policy._generationMetrics = synthetic.metrics;
-    if (!policy._mergedFrom?.length) policy._generationPassThrough = true;
   }
 
+  assert.equal(preview.scopedPolicyCount, 2);
+  assert.equal(preview.outsideScopeCount, 1);
+  assert.equal(synthetic.metrics.before, 2);
+  assert.ok(synthetic.policies.every(policy => policy._generationPassThrough !== true));
   const validation = validatePolicyStrategyBatch(synthetic.policies);
   assert.equal(validation.ok, true, JSON.stringify(validation.issues));
   assert.equal(validation.metrics.observed, synthetic.metrics.observed);
   assert.equal(validation.metrics.allowed, synthetic.metrics.allowed);
-
-  const forgedPassThrough = structuredClone(synthetic.policies);
-  const passThrough = forgedPassThrough.find(policy => policy._generationPassThrough === true);
-  assert.ok(passThrough?._mergedFrom?.length, 'la provenance pass-through doit venir du backend');
-  delete passThrough._mergedFrom;
-  assert.equal(validatePolicyStrategyBatch(forgedPassThrough).ok, false);
 });
 
 test('la provenance volumineuse reste bornée et réservée aux stratégies revalidées', () => {

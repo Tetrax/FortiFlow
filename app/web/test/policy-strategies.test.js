@@ -101,7 +101,7 @@ test('Compacte fusionne un rectangle exact partageant le même ensemble complet 
   assert.deepEqual(compact.policies[0].dstTargets, ['APP-A', 'APP-B']);
 });
 
-test('le périmètre recalcule les previews sans retirer les policies hors périmètre', () => {
+test('le périmètre limite previews et application au scope métier sélectionné', () => {
   const lan = referencePolicies();
   const internet = [
     policy('203.0.113.10', [service('HTTPS', 'TCP/443')], { dstType: 'public', _isWan: true, _dstintf: 'WAN' }),
@@ -112,13 +112,42 @@ test('le périmètre recalcule les previews sans retirer les policies hors péri
   const lanOnly = buildPolicyStrategyPreviews(policies, { scope: 'lan' });
   const internetOnly = buildPolicyStrategyPreviews(policies, { scope: 'internet' });
 
+  assert.deepEqual(
+    [all.scopedPolicyCount, all.outsideScopeCount],
+    [5, 0],
+  );
+  assert.deepEqual(
+    [lanOnly.scopedPolicyCount, lanOnly.outsideScopeCount],
+    [3, 2],
+  );
+  assert.deepEqual(
+    [internetOnly.scopedPolicyCount, internetOnly.outsideScopeCount],
+    [2, 3],
+  );
   assert.notDeepEqual(lanOnly.strategies, internetOnly.strategies);
   assert.notEqual(all.strategies.synthetic.metrics.after, lanOnly.strategies.synthetic.metrics.after);
+  assert.equal(lanOnly.strategies.compact.metrics.before, 3);
+  assert.equal(internetOnly.strategies.compact.metrics.before, 2);
+  assert.ok(lanOnly.strategies.compact.policies.every(item => item.dstType !== 'public' && item._isWan !== true));
+  assert.ok(internetOnly.strategies.compact.policies.every(item => item.dstType === 'public' || item._isWan === true));
   for (const previews of [all, lanOnly, internetOnly]) {
     for (const result of Object.values(previews.strategies)) {
       assert.equal(result.metrics.after, result.policies.length);
     }
   }
+});
+
+test('Compacte retient une fusion exacte source-destination déjà connue si elle est plus courte', () => {
+  const policies = [
+    policy('APP-A', [service('HTTPS', 'TCP/443')]),
+    policy('APP-A', [service('SSH', 'TCP/22')]),
+    policy('APP-B', [service('DNS', 'UDP/53')]),
+  ];
+  const compact = buildPolicyStrategyPreviews(policies, { scope: 'lan' }).strategies.compact;
+
+  assert.equal(compact.policyCount, 2);
+  assert.equal(compact.metrics.additional, 0);
+  assert.equal(compact.metrics.allowed, compact.metrics.observed);
 });
 
 test('Synthétique conserve les frontières action et interfaces', () => {

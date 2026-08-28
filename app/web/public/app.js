@@ -2292,9 +2292,13 @@ function renderStrategyToolbar() {
   const info = active
     ? `${fmtNum(active.metrics.before)} policies · ${strategyLabel(strategyName)} · ${strategyMetricDetail(active.metrics, strategyName)}`
     : 'Analysez les policies pour calculer les previews';
+  const outsideScopeInfo = preview?.outsideScopeCount > 0
+    ? `${fmtNum(preview.outsideScopeCount)} policies hors périmètre non modifiées`
+    : '';
   return `
     <div class="strategy-toolbar-main">
       <span id="deploy-merge-info" class="strategy-toolbar-info">${escHtml(info)}</span>
+      ${outsideScopeInfo ? `<span class="strategy-toolbar-outside">${escHtml(outsideScopeInfo)}</span>` : ''}
       <div class="strategy-toolbar-group" role="group" aria-label="Périmètre">
         <span class="strategy-toolbar-label">Périmètre</span>
         ${['all', 'internet', 'lan'].map(scope => `<button class="btn-sm strategy-scope-btn ${deployState.strategyScope === scope ? 'btn-accent' : ''}"
