@@ -2241,104 +2241,116 @@ function computeMerge(original, scope, strategy) {
   return [...merged, ...outScope].sort((a, b) => (b.sessions || 0) - (a.sessions || 0));
 }
 
-function strategyLabel(name) {
-  return { balanced: 'Équilibrée ★', compact: 'Compacte', synthetic: 'Synthétique' }[name] || name;
-}
-
-function strategyMetricSummary(metric) {
-  if (!metric) return '—';
-  const delta = metric.saved >= 0 ? `−${fmtNum(metric.saved)}` : `+${fmtNum(Math.abs(metric.saved))}`;
-  return `${fmtNum(metric.before)} → ${fmtNum(metric.after)} · ${delta}`;
-}
-
-function strategyMetricDetail(metric, name) {
-  if (!metric) return 'Preview indisponible';
-  const exact = name === 'synthetic'
-    ? `⚠ +${fmtNum(metric.additional)} flux · expansion +${metric.expansionPercent.toFixed(1)}%`
-    : `+${fmtNum(metric.additional)} flux · exact${name === 'balanced' ? ' · Recommandé' : ''}`;
-  return `${exact} · ${fmtNum(metric.observed)} observés / ${fmtNum(metric.allowed)} autorisés`;
-}
-
 function renderStrategyToolbar() {
   const preview = deployState.strategyPreviews;
   const strategyName = deployState.strategyName || 'balanced';
-  const active = preview?.strategies?.[strategyName];
-  const strategyButtons = ['balanced', 'compact', 'synthetic'].map(name => {
+  const strategies = [
+    {
+      name: 'balanced',
+      label: 'Équilibrée',
+      description: 'Réduit le nombre de règles tout en conservant une segmentation raisonnable.',
+      recommended: true,
+    },
+    {
+      name: 'compact',
+      label: 'Compacte',
+      description: 'Réduit davantage le nombre de règles tout en restant fidèle aux communications.',
+    },
+    {
+      name: 'synthetic',
+      label: 'Synthétique',
+      description: 'Regroupe fortement les communications pour obtenir un jeu de règles très synthétique.',
+    },
+  ];
+  const strategyButtons = strategies.map(strategy => {
+    const { name, label, description, recommended } = strategy;
     const result = preview?.strategies?.[name];
-    const metric = result?.metrics;
+    const policyCount = result?.policyCount ?? result?.metrics?.after;
+    const count = Number.isFinite(policyCount) ? fmtNum(policyCount) : null;
+    const countDisplay = count || (deployState.strategyPreviewLoading ? 'Calcul…' : '—');
+    const selected = name === strategyName;
     return `<button class="strategy-preview ${name === strategyName ? 'active' : ''}"
-      data-strategy-name="${name}" aria-pressed="${name === strategyName}"
-      title="${escHtml(strategyMetricDetail(metric, name))}">
-      <span class="strategy-preview-name">${strategyLabel(name)}</span>
-      <span class="strategy-preview-metric">${escHtml(strategyMetricSummary(metric))}</span>
-      <span class="strategy-preview-detail">${escHtml(strategyMetricDetail(metric, name))}</span>
+      data-strategy-name="${name}" aria-pressed="${selected}" aria-label="${escHtml(label)}${count ? `, ${count} policies` : ''}">
+      <span class="strategy-preview-heading">
+        <span class="strategy-preview-name">${escHtml(label)}${recommended ? ' <span class="strategy-preview-star" aria-hidden="true">★</span>' : ''}</span>
+        ${recommended ? '<span class="strategy-recommended-badge">Recommandée</span>' : ''}
+        <span class="strategy-preview-selected" aria-hidden="true">
+          <svg viewBox="0 0 16 16" focusable="false"><path d="m3.5 8.3 2.8 2.8 6.2-6.2"/></svg>
+        </span>
+      </span>
+      <span class="strategy-preview-count ${count ? '' : 'is-pending'}"><strong>${countDisplay}</strong>${count ? '<span class="strategy-preview-unit"> policies</span>' : ''}</span>
+      <span class="strategy-preview-description">${escHtml(description)}</span>
     </button>`;
   }).join('');
-  const synthetic = preview?.strategies?.synthetic;
-  const examples = (synthetic?.metrics?.examples || []).slice(0, 4).map(example =>
-    `<li><span class="mono">${escHtml(example.source)}</span> → <span class="mono">${escHtml(example.destination)}</span> · ${escHtml(example.service)}</li>`
+  const scopeOptions = [
+    { value: 'all', label: 'Tout' },
+    { value: 'lan', label: 'LAN' },
+    { value: 'internet', label: 'Internet' },
+  ];
+  const scopeButtons = scopeOptions.map(({ value, label }) =>
+    `<button class="strategy-segment-btn strategy-scope-btn ${deployState.strategyScope === value ? 'active' : ''}"
+      data-strategy-scope="${value}" aria-pressed="${deployState.strategyScope === value}">${label}</button>`
   ).join('');
-  const syntheticDetail = strategyName === 'synthetic' && synthetic?.metrics?.additional > 0
-    ? `<details class="strategy-synthetic-detail" open>
-        <summary>Détail Synthétique</summary>
-        <span>Observed <strong>${fmtNum(synthetic.metrics.observed)}</strong> · Allowed <strong>${fmtNum(synthetic.metrics.allowed)}</strong> · Additional <strong>+${fmtNum(synthetic.metrics.additional)}</strong> · Expansion <strong>${synthetic.metrics.expansion.toFixed(3)}</strong> · <strong>+${synthetic.metrics.expansionPercent.toFixed(1)}%</strong></span>
-        ${examples ? `<ul>${examples}</ul>` : '<span>Aucun tuple additionnel.</span>'}
-      </details>`
-    : '';
-  const viewLabels = {
-    off: 'Synthèse', service: 'Services', host: 'IP à IP', 'src-agg-dst-detail': 'Réseau → Serveur',
-  };
-  const currentView = viewLabels[deployState.bruteMode] || 'Synthèse';
-  const info = active
-    ? `${fmtNum(active.metrics.before)} policies · ${strategyLabel(strategyName)} · ${strategyMetricDetail(active.metrics, strategyName)}`
-    : 'Analysez les policies pour calculer les previews';
-  const outsideScopeInfo = preview?.outsideScopeCount > 0
-    ? `${fmtNum(preview.outsideScopeCount)} policies hors périmètre non modifiées`
-    : '';
+  const status = deployState.strategyPreviewLoading
+    ? '<span class="strategy-status-spinner" aria-hidden="true"></span><span>Calcul…</span>'
+    : escHtml(deployState.strategyPreviewError || '');
   return `
     <div class="strategy-toolbar-main">
-      <span id="deploy-merge-info" class="strategy-toolbar-info">${escHtml(info)}</span>
-      ${outsideScopeInfo ? `<span class="strategy-toolbar-outside">${escHtml(outsideScopeInfo)}</span>` : ''}
-      <div class="strategy-toolbar-group" role="group" aria-label="Périmètre">
-        <span class="strategy-toolbar-label">Périmètre</span>
-        ${['all', 'internet', 'lan'].map(scope => `<button class="btn-sm strategy-scope-btn ${deployState.strategyScope === scope ? 'btn-accent' : ''}"
-          data-strategy-scope="${scope}" aria-pressed="${deployState.strategyScope === scope}">${scope === 'all' ? 'Tout' : scope === 'internet' ? 'Internet' : 'LAN'}</button>`).join('')}
-      </div>
-      <div class="strategy-toolbar-group strategy-toolbar-strategies" role="group" aria-label="Stratégie">
-        <span class="strategy-toolbar-label">Stratégie</span>${strategyButtons}
-      </div>
-      <div class="strategy-toolbar-group strategy-toolbar-view" role="group" aria-label="Vue">
-        <span class="strategy-toolbar-label">Vue</span>
-        <div class="dropdown-wrap" id="detail-dropdown-wrap">
-          <button class="btn-sm dropdown-trigger ${deployState.bruteMode !== 'off' ? 'btn-active' : ''}" id="btn-brute-mode">${currentView} ▾</button>
-          <div class="dropdown-menu strategy-view-menu">
-            <div class="strategy-toolbar-label">Modes de vue</div>
-            <div class="strategy-view-options">
-              ${Object.entries(viewLabels).map(([mode, label]) => `<button class="btn-sm detail-mode-btn ${deployState.bruteMode === mode ? 'btn-accent' : ''}" data-detail-mode="${mode}">${label}</button>`).join('')}
-            </div>
-            <div class="detail-mode-hint">Les modes conservent leur comportement actuel.</div>
-            <button class="btn-sm btn-accent" style="width:100%;margin-top:8px" data-detail-action="apply">▶ Appliquer</button>
+      <section class="strategy-control-group strategy-control-scope" aria-labelledby="strategy-scope-label">
+        <div class="strategy-control-heading">
+          <span class="strategy-toolbar-label" id="strategy-scope-label">Périmètre</span>
+          <span class="strategy-control-hint">Sur quels flux je travaille ?</span>
+        </div>
+        <div class="strategy-segmented" role="group" aria-label="Périmètre">${scopeButtons}</div>
+      </section>
+
+      <section class="strategy-control-group strategy-control-strategies" aria-labelledby="strategy-name-label">
+        <div class="strategy-control-heading">
+          <span class="strategy-toolbar-label" id="strategy-name-label">Stratégie</span>
+          <span class="strategy-control-hint">Comment FortiFlow doit-il construire les policies ?</span>
+        </div>
+        <div class="strategy-preview-grid" role="group" aria-label="Stratégie">${strategyButtons}</div>
+      </section>
+
+      <section class="strategy-control-group strategy-control-view" aria-labelledby="strategy-view-label">
+        <div class="strategy-control-heading">
+          <span class="strategy-toolbar-label" id="strategy-view-label">Vue</span>
+          <span class="strategy-control-hint">Comment je veux visualiser le résultat ?</span>
+        </div>
+        <div class="strategy-segmented strategy-view-options" role="group" aria-label="Vue">
+          <button class="strategy-segment-btn detail-mode-btn ${deployState.bruteMode === 'off' ? 'active' : ''}"
+            data-detail-mode="off" aria-pressed="${deployState.bruteMode === 'off'}">Synthèse</button>
+          <button class="strategy-segment-btn detail-mode-btn ${deployState.bruteMode === 'service' ? 'active' : ''}"
+            data-detail-mode="service" aria-pressed="${deployState.bruteMode === 'service'}">Services</button>
+          <button class="strategy-segment-btn detail-mode-btn ${deployState.bruteMode === 'host' ? 'active' : ''}"
+            data-detail-mode="host" aria-pressed="${deployState.bruteMode === 'host'}">IP à IP</button>
+          <button class="strategy-segment-btn detail-mode-btn ${deployState.bruteMode === 'src-agg-dst-detail' ? 'active' : ''}"
+            data-detail-mode="src-agg-dst-detail" aria-pressed="${deployState.bruteMode === 'src-agg-dst-detail'}">Réseau → Serveur</button>
+        </div>
+      </section>
+
+      <div class="strategy-toolbar-actions" aria-label="Actions secondaires">
+        <button class="strategy-reset-btn" id="btn-reset-strategy" ${deployState.strategyPreviews ? '' : 'disabled'}>
+          <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true"><path d="M13 5V2.5L11.4 4A5.5 5.5 0 1 0 13.5 9"/></svg>
+          Réinitialiser
+        </button>
+        <div class="dropdown-wrap" id="analyse-dropdown">
+          <button class="btn-sm dropdown-trigger ${deployState.riskPanelOpen ? 'btn-active' : ''}" id="btn-analyse-menu" aria-haspopup="true">Analyse ▾</button>
+          <div class="dropdown-menu strategy-analysis-menu">
+            <div class="dropdown-item" id="btn-risk-toggle">⚠ Risques</div>
+            <div class="dropdown-item" id="btn-risk-ports">⚙ Ports à risque</div>
           </div>
         </div>
+        <span class="toolbar-sep"></span>
+        <span class="history-btn-group" title="Historique des modifications (10 max)">
+          <button class="btn-sm btn-history" id="btn-policy-undo" ${_policyUndo.length ? '' : 'disabled'} title="Annuler la dernière modification">‹</button>
+          <button class="btn-sm btn-history" id="btn-policy-redo" ${_policyRedo.length ? '' : 'disabled'} title="Rétablir">›</button>
+        </span>
+        <button class="btn-sm" id="btn-merge-selection" style="display:none">Fusionner la sélection (<span id="merge-sel-count">0</span>)</button>
       </div>
-      <button class="btn-sm btn-accent strategy-apply-btn" id="btn-apply-strategy" data-strategy-action="apply" ${active ? '' : 'disabled'}>▶ Appliquer</button>
-      <button class="btn-sm strategy-reset-btn" id="btn-reset-strategy" data-strategy-action="reset" ${deployState.strategyPreviews ? '' : 'disabled'}>↺ Réinitialiser</button>
-      <div class="dropdown-wrap" id="analyse-dropdown">
-        <button class="btn-sm dropdown-trigger ${deployState.riskPanelOpen ? 'btn-accent' : ''}" id="btn-analyse-menu">Analyse ▾</button>
-        <div class="dropdown-menu strategy-analysis-menu">
-          <div class="dropdown-item" id="btn-risk-toggle">⚠ Risques</div>
-          <div class="dropdown-item" id="btn-risk-ports">⚙ Ports à risque</div>
-        </div>
-      </div>
-      <span class="toolbar-sep"></span>
-      <span class="history-btn-group" title="Historique des modifications (10 max)">
-        <button class="btn-sm btn-history" id="btn-policy-undo" disabled title="Annuler la dernière modification">‹</button>
-        <button class="btn-sm btn-history" id="btn-policy-redo" disabled title="Rétablir">›</button>
-      </span>
-      <button class="btn-sm" id="btn-merge-selection" style="display:none">Fusionner la sélection (<span id="merge-sel-count">0</span>)</button>
+      <div class="strategy-toolbar-status" role="status" aria-live="polite">${status}</div>
     </div>
-    ${syntheticDetail}
-    <div class="strategy-toolbar-status" aria-live="polite">${deployState.strategyPreviewLoading ? 'Calcul des previews…' : escHtml(deployState.strategyPreviewError || '')}</div>`;
+  `;
 }
 
 function updateStrategyToolbar() {
@@ -2350,6 +2362,10 @@ async function loadPolicyStrategyPreviews(scope = deployState.strategyScope || '
   if (!deployState.analyzed?.length || !state.session) return false;
   const source = deployState.strategySourcePolicies || deployState.baseAnalyzedPolicies || deployState.analyzed;
   const requestId = ++deployState.strategyPreviewRequest;
+  if (deployState.strategyPreviews?.scope !== scope) {
+    deployState.strategyPreviews = null;
+    deployState.strategyMetrics = null;
+  }
   deployState.strategyScope = scope;
   deployState.strategyPreviewLoading = true;
   deployState.strategyPreviewError = '';
@@ -2377,6 +2393,20 @@ async function loadPolicyStrategyPreviews(scope = deployState.strategyScope || '
     updateStrategyToolbar();
     return false;
   }
+}
+
+async function activatePolicyStrategyScope(scope) {
+  const loaded = await loadPolicyStrategyPreviews(scope);
+  if (!loaded) return false;
+  return applyPolicyStrategyPreview(deployState.strategyName || 'balanced');
+}
+
+function activatePolicyStrategy(name) {
+  if (!['balanced', 'compact', 'synthetic'].includes(name)) return false;
+  deployState.strategyName = name;
+  updateStrategyToolbar();
+  if (deployState.strategyPreviewLoading) return false;
+  return applyPolicyStrategyPreview(name);
 }
 
 function applyPolicyStrategyPreview(name) {
@@ -5317,8 +5347,8 @@ async function deploy() {
     });
   });
 
-  // Strategy/view toolbar — keep all changes compact and explicit.
-  el('deploy-merge-bar')?.addEventListener('click', e => {
+  // Strategy/view toolbar — every control applies immediately.
+  el('deploy-merge-bar')?.addEventListener('click', async e => {
     const trigger = e.target.closest('.dropdown-trigger');
     if (trigger) {
       const wrap = trigger.closest('.dropdown-wrap');
@@ -5333,7 +5363,7 @@ async function deploy() {
     if (scopeBtn) {
       e.stopImmediatePropagation();
       if (scopeBtn.dataset.strategyScope !== deployState.strategyScope) {
-        loadPolicyStrategyPreviews(scopeBtn.dataset.strategyScope);
+        await activatePolicyStrategyScope(scopeBtn.dataset.strategyScope);
       }
       return;
     }
@@ -5341,36 +5371,33 @@ async function deploy() {
     const strategyBtn = e.target.closest('.strategy-preview');
     if (strategyBtn) {
       e.stopImmediatePropagation();
-      deployState.strategyName = strategyBtn.dataset.strategyName;
-      updateStrategyToolbar();
+      activatePolicyStrategy(strategyBtn.dataset.strategyName);
       return;
     }
 
-    const strategyAction = e.target.closest('[data-strategy-action]');
-    if (strategyAction) {
+    const resetStrategyBtn = e.target.closest('#btn-reset-strategy');
+    if (resetStrategyBtn) {
       e.stopImmediatePropagation();
-      const action = strategyAction.dataset.strategyAction;
       document.querySelectorAll('.dropdown-wrap.open').forEach(w => w.classList.remove('open'));
-      if (action === 'apply') {
-        applyPolicyStrategyPreview(deployState.strategyName || 'balanced');
-      } else if (action === 'reset') {
-        const source = deployState.strategySourcePolicies || deployState.baseAnalyzedPolicies;
-        if (source?.length) {
-          _savePolicySnapshot();
-          deployState.analyzed = deserializeAnalyzed(structuredClone(source));
-          deployState._analyzedOriginal = null;
-          deployState._detailOriginal = null;
-          deployState.strategyMetrics = null;
-          deployState.generatedCli = null;
-          deployState.selected = defaultSelectedSet(deployState.analyzed);
-          deployState.mergeSelected = new Set();
-          deployState._noRcvdCount = deployState.analyzed.filter(isScanPolicy).length;
-          refreshDeployViewPolicies();
-          updateStrategyToolbar();
-          renderDeployPolicies(filterDeployPolicies(), false);
-          syncNoRcvdInfoBtn();
-        }
-      }
+      deployState.strategyName = 'balanced';
+      deployState.bruteMode = 'off';
+      _applyDetailMode();
+      await activatePolicyStrategyScope('all');
+      return;
+    }
+
+    if (e.target.closest('#btn-policy-undo')) {
+      _policyUndoStep();
+      return;
+    }
+
+    if (e.target.closest('#btn-policy-redo')) {
+      _policyRedoStep();
+      return;
+    }
+
+    if (e.target.closest('#btn-merge-selection')) {
+      mergeSelectedDeployPolicies();
       return;
     }
 
@@ -5392,20 +5419,12 @@ async function deploy() {
       return;
     }
 
-    // View mode selection: preserve the existing deferred Apply behavior.
+    // Vue is presentation-only: switch the projection without touching strategy previews.
     const detailModeBtn = e.target.closest('.detail-mode-btn');
     if (detailModeBtn) {
       e.stopImmediatePropagation();
       deployState.bruteMode = detailModeBtn.dataset.detailMode;
       updateStrategyToolbar();
-      return;
-    }
-
-    const detailAction = e.target.closest('[data-detail-action]');
-    if (detailAction) {
-      const action = detailAction.dataset.detailAction;
-      document.querySelectorAll('.dropdown-wrap.open').forEach(w => w.classList.remove('open'));
-      if (action === 'reset') deployState.bruteMode = 'off';
       _applyDetailMode();
       return;
     }
@@ -5479,14 +5498,8 @@ async function deploy() {
   // Export/Import session
   // (the compact pre-deployment line opens the existing naming workflow)
 
-  // Applique le mode Vue courant sans changer le comportement historique.
+  // Applique uniquement la projection visuelle courante.
   function _applyDetailMode() {
-    const labels = { 'off': 'Vue ▾', 'service': 'Services ✓', 'host': 'IP à IP ✓', 'src-agg-dst-detail': 'Réseau → Serveur ✓' };
-    const btn = el('btn-brute-mode');
-    if (btn) {
-      btn.textContent = labels[deployState.bruteMode] || 'Vue ▾';
-      btn.classList.toggle('btn-active', deployState.bruteMode !== 'off');
-    }
     const hpsAvailable = deployState.hostPairServices && Object.keys(deployState.hostPairServices).length > 0;
     const warn = el('deploy-hps-warn');
     if (!hpsAvailable && deployState.bruteMode !== 'off') {
@@ -5501,15 +5514,6 @@ async function deploy() {
     refreshDeployViewPolicies();
     renderDeployPolicies(filterDeployPolicies(), false);
   }
-
-  // Merge selection button
-  el('btn-merge-selection')?.addEventListener('click', () => {
-    mergeSelectedDeployPolicies();
-  });
-
-  // Undo / Redo
-  el('btn-policy-undo')?.addEventListener('click', _policyUndoStep);
-  el('btn-policy-redo')?.addEventListener('click', _policyRedoStep);
 
   // Global /32 toggle (wired once — button persists in DOM)
   el('btn-32-global')?.addEventListener('click', () => {
@@ -7775,8 +7779,9 @@ async function analyzeDeployPolicies() {
   }
   syncNoRcvdInfoBtn();
 
-  // The toolbar always reflects the real backend previews, not a local merge approximation.
-  await loadPolicyStrategyPreviews('all');
+  // Équilibrée is the usable default, not only a preselected card.
+  // The latest-request guard inside loadPolicyStrategyPreviews prevents stale scope results.
+  await activatePolicyStrategyScope('all');
 
   // Load available security profiles for the dropdown selectors
   try {
@@ -7809,7 +7814,7 @@ async function analyzeDeployPolicies() {
   document.querySelectorAll('.wizard-connector').forEach((c, i) => c.classList.toggle('done', i < 3));
 
   resetAnalyzeBtn();
-  renderDeployPolicies(analyzed);
+  renderDeployPolicies(filterDeployPolicies());
 }
 
 function resetAnalyzeBtn() {

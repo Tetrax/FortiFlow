@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
+const vm = require('node:vm');
 
 const {
   buildPolicyStrategyPreviews,
@@ -24,16 +25,25 @@ function functionBlock(name, nextName) {
 }
 
 // RED: le serveur doit exposer la preview calculée depuis le payload analysé.
-test('la barre principale expose les stratégies et vues compactes sans l’ancien modal', () => {
+test('la barre principale compare les trois stratégies par nombre final de policies', () => {
+  const toolbar = functionBlock('renderStrategyToolbar', 'updateStrategyToolbar');
+
   assert.match(appSource, /id="deploy-strategy-toolbar"/);
-  for (const label of ['Équilibrée ★', 'Compacte', 'Synthétique', 'Tout', 'Internet', 'LAN', 'Synthèse', 'Services', 'IP à IP', 'Réseau → Serveur', 'Appliquer']) {
-    assert.match(appSource, new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  for (const label of ['Équilibrée', 'Compacte', 'Synthétique', 'Recommandée', 'Tout', 'LAN', 'Internet', 'Synthèse', 'Services', 'IP à IP', 'Réseau → Serveur']) {
+    assert.match(toolbar, new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
-  assert.match(appSource, /preview\.strategies\[name\]\.policies/);
-  assert.match(appSource, /additional/);
-  assert.match(appSource, /expansion/);
+  for (const description of [
+    'Réduit le nombre de règles tout en conservant une segmentation raisonnable.',
+    'Réduit davantage le nombre de règles tout en restant fidèle aux communications.',
+    'Regroupe fortement les communications pour obtenir un jeu de règles très synthétique.',
+  ]) {
+    assert.ok(toolbar.includes(description), `description absente: ${description}`);
+  }
+  assert.match(toolbar, /result\?\.policyCount/);
+  assert.match(toolbar, /strategy-preview-count/);
+  assert.doesNotMatch(toolbar, /Observed|Allowed|Additional|expansion|observés|autorisés|flux supplémentaires/i);
+  assert.doesNotMatch(toolbar, /data-strategy-action="apply"|data-detail-action="apply"|id="detail-dropdown-wrap"/);
   assert.match(appSource, /Pré-déploiement/);
-  assert.match(appSource, /hors périmètre non modifiées/);
   assert.doesNotMatch(appSource, /function showMergeDiff/);
   assert.doesNotMatch(appSource, /data-merge="apply"/);
   assert.doesNotMatch(appSource, /Détailler/);
@@ -43,6 +53,105 @@ test('la barre principale expose les stratégies et vues compactes sans l’anci
   assert.match(serverSource, /buildPolicyStrategyPreviews\(selectedPolicies, \{ scope \}\)/);
   assert.match(serverSource, /strategyMetrics:\s*decision\.strategyMetrics/);
   assert.doesNotMatch(appSource, /id="deploy-missing-bar"|id="no-rcvd-bar"/);
+});
+
+test('les cartes de stratégie restent compactes sur un écran très large', () => {
+  const gridRule = styleSource.match(/\.strategy-preview-grid\s*\{[^}]+\}/)?.[0] || '';
+
+  assert.match(gridRule, /repeat\(auto-fit,\s*minmax\(190px,\s*280px\)\)/);
+  assert.doesNotMatch(gridRule, /minmax\(190px,\s*1fr\)/);
+});
+
+test('Périmètre et Stratégie appliquent immédiatement le dernier choix utilisateur', () => {
+  const loadPreviews = functionBlock('loadPolicyStrategyPreviews', 'activatePolicyStrategyScope');
+  const activateScope = functionBlock('activatePolicyStrategyScope', 'activatePolicyStrategy');
+  const activateStrategy = functionBlock('activatePolicyStrategy', 'applyPolicyStrategyPreview');
+  const analyze = functionBlock('analyzeDeployPolicies', 'resetAnalyzeBtn');
+
+  assert.match(loadPreviews, /const requestId = \+\+deployState\.strategyPreviewRequest/);
+  assert.match(loadPreviews, /requestId !== deployState\.strategyPreviewRequest/);
+  assert.match(activateScope, /await loadPolicyStrategyPreviews\(scope\)/);
+  assert.match(activateScope, /if \(!loaded\) return false/);
+  assert.match(activateScope, /applyPolicyStrategyPreview\(deployState\.strategyName \|\| 'balanced'\)/);
+  assert.match(activateStrategy, /deployState\.strategyName = name/);
+  assert.match(activateStrategy, /if \(deployState\.strategyPreviewLoading\) return false/);
+  assert.match(activateStrategy, /applyPolicyStrategyPreview\(name\)/);
+  assert.match(appSource, /activatePolicyStrategyScope\(scopeBtn\.dataset\.strategyScope\)/);
+  assert.match(appSource, /activatePolicyStrategy\(strategyBtn\.dataset\.strategyName\)/);
+  assert.match(analyze, /deployState\.strategyName\s*=\s*'balanced'/);
+  assert.match(analyze, /await activatePolicyStrategyScope\('all'\)/);
+});
+
+test('une réponse de périmètre obsolète ne remplace ni la preview ni la stratégie la plus récente', async () => {
+  const pending = [];
+  const applied = [];
+  const context = {
+    deployState: {
+      analyzed: [{ id: 1 }], strategyScope: 'all', strategyName: 'balanced',
+      strategyPreviews: null, strategyMetrics: null, strategyPreviewRequest: 0,
+      strategyPreviewLoading: false, strategyPreviewError: '',
+    },
+    state: { session: 'test-session' },
+    serializeAnalyzed: value => value,
+    updateStrategyToolbar: () => {},
+    fetch: (_url, options) => new Promise(resolve => pending.push({
+      scope: JSON.parse(options.body).scope,
+      resolve,
+    })),
+    applyPolicyStrategyPreview: name => {
+      applied.push({ name, scope: context.deployState.strategyPreviews.scope });
+      return true;
+    },
+  };
+  const loadFunction = functionBlock('loadPolicyStrategyPreviews', 'activatePolicyStrategyScope').replace(/\s+async\s*$/, '');
+  const activateScopeFunction = functionBlock('activatePolicyStrategyScope', 'activatePolicyStrategy');
+  vm.createContext(context);
+  vm.runInContext(
+    `async ${loadFunction}\n`
+      + `async ${activateScopeFunction}\n`
+      + 'globalThis.activateScope = activatePolicyStrategyScope;',
+    context,
+  );
+  const response = scope => ({
+    ok: true,
+    json: async () => ({ scope, strategies: { balanced: {}, compact: {}, synthetic: {} } }),
+  });
+
+  const lan = context.activateScope('lan');
+  const internet = context.activateScope('internet');
+  pending.find(item => item.scope === 'internet').resolve(response('internet'));
+  assert.equal(await internet, true);
+  pending.find(item => item.scope === 'lan').resolve(response('lan'));
+  assert.equal(await lan, false);
+
+  assert.equal(context.deployState.strategyPreviews.scope, 'internet');
+  assert.deepEqual(applied, [{ name: 'balanced', scope: 'internet' }]);
+});
+
+test('Vue est un contrôle segmenté immédiat sans recalcul de stratégie', () => {
+  const toolbar = functionBlock('renderStrategyToolbar', 'updateStrategyToolbar');
+  const applyView = functionBlock('refreshDeployViewPolicies', '_updateMergeSelectionBtn');
+
+  assert.match(toolbar, /strategy-view-options/);
+  assert.match(toolbar, /data-detail-mode="off"/);
+  assert.doesNotMatch(toolbar, /detail-dropdown-wrap|btn-brute-mode|data-detail-action/);
+  assert.match(appSource, /deployState\.bruteMode = detailModeBtn\.dataset\.detailMode[\s\S]{0,180}_applyDetailMode\(\)/);
+  assert.match(applyView, /deployState\.viewPolicies\s*=/);
+  assert.doesNotMatch(applyView, /deployState\.analyzed\s*=/);
+});
+
+test('les actions secondaires restent câblées après chaque nouveau rendu de la toolbar', () => {
+  const toolbar = functionBlock('renderStrategyToolbar', 'updateStrategyToolbar');
+  const toolbarEvents = appSource.slice(
+    appSource.indexOf('// Strategy/view toolbar'),
+    appSource.indexOf('// Close dropdowns on outside click'),
+  );
+
+  assert.match(toolbar, /id="btn-policy-undo"[^>]*\$\{_policyUndo\.length/);
+  assert.match(toolbar, /id="btn-policy-redo"[^>]*\$\{_policyRedo\.length/);
+  assert.match(toolbarEvents, /closest\('#btn-policy-undo'\)[\s\S]{0,160}_policyUndoStep\(\)/);
+  assert.match(toolbarEvents, /closest\('#btn-policy-redo'\)[\s\S]{0,160}_policyRedoStep\(\)/);
+  assert.match(toolbarEvents, /closest\('#btn-merge-selection'\)[\s\S]{0,160}mergeSelectedDeployPolicies\(\)/);
 });
 
 test('Vue reste une projection indépendante de la stratégie et de la génération', () => {
@@ -56,7 +165,7 @@ test('Vue reste une projection indépendante de la stratégie et de la générat
   assert.doesNotMatch(applyStrategy, /bruteMode\s*=\s*'off'/);
   assert.match(generate, /deployState\.analyzed/);
   assert.doesNotMatch(generate, /viewPolicies/);
-  assert.match(appSource, /loadPolicyStrategyPreviews\(scopeBtn\.dataset\.strategyScope\)/);
+  assert.match(appSource, /activatePolicyStrategyScope\(scopeBtn\.dataset\.strategyScope\)/);
 });
 
 test('une preview synthétique marquée est validée puis conservée sans re-split silencieux', () => {
