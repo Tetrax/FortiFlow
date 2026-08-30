@@ -33,9 +33,9 @@ test('la barre principale compare les trois stratégies par nombre final de poli
     assert.match(toolbar, new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
   for (const description of [
-    'Réduit le nombre de règles tout en conservant une segmentation raisonnable.',
-    'Réduit davantage le nombre de règles tout en restant fidèle aux communications.',
-    'Regroupe fortement les communications pour obtenir un jeu de règles très synthétique.',
+    'Fusionne les règles quand les mêmes services sont utilisés sur plusieurs destinations.',
+    'Fusionne encore plus de règles en recherchant la combinaison exacte qui donne le moins de policies.',
+    'Regroupe au maximum sources, destinations et services pour obtenir le moins de policies possible.',
   ]) {
     assert.ok(toolbar.includes(description), `description absente: ${description}`);
   }

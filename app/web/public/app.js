@@ -2245,18 +2245,18 @@ function renderStrategyToolbar() {
     {
       name: 'balanced',
       label: 'Équilibrée',
-      description: 'Réduit le nombre de règles tout en conservant une segmentation raisonnable.',
+      description: 'Fusionne les règles quand les mêmes services sont utilisés sur plusieurs destinations.',
       recommended: true,
     },
     {
       name: 'compact',
       label: 'Compacte',
-      description: 'Réduit davantage le nombre de règles tout en restant fidèle aux communications.',
+      description: 'Fusionne encore plus de règles en recherchant la combinaison exacte qui donne le moins de policies.',
     },
     {
       name: 'synthetic',
       label: 'Synthétique',
-      description: 'Regroupe fortement les communications pour obtenir un jeu de règles très synthétique.',
+      description: 'Regroupe au maximum sources, destinations et services pour obtenir le moins de policies possible.',
     },
   ];
   const strategyButtons = strategies.map(strategy => {
