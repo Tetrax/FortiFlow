@@ -55,6 +55,31 @@ test('la barre principale compare les trois stratégies par nombre final de poli
   assert.doesNotMatch(appSource, /id="deploy-missing-bar"|id="no-rcvd-bar"/);
 });
 
+test('Options est entièrement retiré de l’écran Déployer sans changer les valeurs globales par défaut', () => {
+  assert.doesNotMatch(appSource, /id="deploy-options-wrap"|id="opt-(?:nat|action|log)"|deploy-options-menu|deploy-option-row/);
+  assert.doesNotMatch(appSource, /_deployDropdownWired|dropdown-trigger|dropdown-wrap\.open/);
+  assert.doesNotMatch(styleSource, /\.deploy-options-menu|\.deploy-option-row|\.dropdown-wrap|\.dropdown-menu|\.dropdown-item|\.dropdown-sep/);
+  assert.match(appSource, /const opts = \{\s*nat:\s*false,\s*action:\s*'accept',\s*log:\s*'all',\s*securityProfiles,/);
+});
+
+test('le bandeau explique discrètement les destinations silencieuses lorsqu’elles existent', () => {
+  const updateSilent = functionBlock('updateNoRcvdToggleBtn', 'isScanPolicy');
+  const explanation = 'Destinations silencieuses : équipements vus dans les flux mais n’ayant pas répondu lors de l’analyse.';
+
+  assert.match(appSource, /id="no-rcvd-help"/);
+  assert.ok(appSource.includes(explanation));
+  assert.match(updateSilent, /const help\s*=\s*document\.getElementById\('no-rcvd-help'\)/);
+  assert.match(updateSilent, /help\.style\.display\s*=\s*count > 0 \? '' : 'none'/);
+  assert.match(styleSource, /#no-rcvd-help\s*\{[^}]*color:\s*var\(--text2\)[^}]*font-size:\s*10px/);
+});
+
+test('le bandeau pré-déploiement garde une composition compacte sur écran étroit', () => {
+  assert.match(styleSource, /@media \(max-width: 700px\)[\s\S]*?\.predeploy-bar\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto/);
+  assert.match(styleSource, /@media \(max-width: 700px\)[\s\S]*?\.predeploy-silent-summary\s*\{[^}]*grid-column:\s*1\s*\/\s*-1/);
+  assert.match(styleSource, /@media \(max-width: 580px\)[\s\S]*?\.predeploy-bar\s*\{[^}]*margin:\s*8px 8px 0[^}]*padding:\s*8px 10px/);
+  assert.match(styleSource, /@media \(max-width: 580px\)[\s\S]*?\.predeploy-bar-title\s*\{[^}]*white-space:\s*normal/);
+});
+
 test('les cartes de stratégie occupent trois colonnes équilibrées puis se replient', () => {
   const gridRule = styleSource.match(/\.strategy-preview-grid\s*\{[^}]+\}/)?.[0] || '';
 

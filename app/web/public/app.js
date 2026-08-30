@@ -5063,16 +5063,6 @@ async function deploy() {
         <div class="deploy-step-header">
           <span class="deploy-step-num">4</span>
           Policies à générer
-          <div style="margin-left:auto;display:flex;gap:8px;align-items:center;font-size:12px;font-weight:400">
-            <div class="dropdown-wrap" id="deploy-options-wrap">
-              <button class="btn-sm dropdown-trigger">Options ▾</button>
-              <div class="dropdown-menu deploy-options-menu">
-                <label class="deploy-option-row"><span>NAT WAN</span><input type="checkbox" id="opt-nat"></label>
-                <label class="deploy-option-row"><span>Action</span><select id="opt-action" class="deploy-select"><option value="accept">accept</option><option value="deny">deny</option></select></label>
-                <label class="deploy-option-row"><span>Logs</span><select id="opt-log" class="deploy-select"><option value="all">log all</option><option value="utm">log utm</option><option value="disable">log disable</option></select></label>
-              </div>
-            </div>
-          </div>
         </div>
         <div class="deploy-toolbar strategy-toolbar-shell" id="deploy-merge-bar" style="display:none">
           <div id="deploy-strategy-toolbar">${renderStrategyToolbar()}</div>
@@ -5080,7 +5070,10 @@ async function deploy() {
         <div class="predeploy-bar missing-bar" id="deploy-predeploy-bar" style="display:none" title="Cliquer pour nommer les objets manquants">
           <span class="predeploy-bar-title">Pré-déploiement</span>
           <span id="deploy-missing-text"></span>
-          <span id="no-rcvd-bar-text"></span>
+          <span class="predeploy-silent-summary">
+            <span id="no-rcvd-bar-text"></span>
+            <span id="no-rcvd-help" style="display:none">Destinations silencieuses : équipements vus dans les flux mais n’ayant pas répondu lors de l’analyse.</span>
+          </span>
           <button id="no-rcvd-toggle" class="missing-bar-btn" type="button"></button>
         </div>
         <div class="deploy-legend" id="deploy-legend" style="display:none">
@@ -5306,26 +5299,8 @@ async function deploy() {
     }
   });
 
-  // Global NAT toggle → apply only to WAN rows (wired here since opt-nat is stable in deploy DOM)
-  el('opt-nat')?.addEventListener('change', e => {
-    document.querySelectorAll('.deploy-nat-chk').forEach(chk => {
-      const p = deployState.analyzed?.[+chk.dataset.idx];
-      if (p?._isWan) { chk.checked = e.target.checked; p._nat = e.target.checked; }
-    });
-  });
-
   // Strategy toolbar — every control applies immediately.
   el('deploy-merge-bar')?.addEventListener('click', async e => {
-    const trigger = e.target.closest('.dropdown-trigger');
-    if (trigger) {
-      const wrap = trigger.closest('.dropdown-wrap');
-      const wasOpen = wrap.classList.contains('open');
-      document.querySelectorAll('.dropdown-wrap.open').forEach(w => w.classList.remove('open'));
-      if (!wasOpen) wrap.classList.add('open');
-      e.stopPropagation();
-      return;
-    }
-
     const scopeBtn = e.target.closest('.strategy-scope-btn');
     if (scopeBtn) {
       e.stopImmediatePropagation();
@@ -5345,7 +5320,6 @@ async function deploy() {
     const resetStrategyBtn = e.target.closest('#btn-reset-strategy');
     if (resetStrategyBtn) {
       e.stopImmediatePropagation();
-      document.querySelectorAll('.dropdown-wrap.open').forEach(w => w.classList.remove('open'));
       deployState.strategyName = 'balanced';
       await activatePolicyStrategyScope('all');
       return;
@@ -5367,14 +5341,6 @@ async function deploy() {
     }
 
   });
-
-  // Close dropdowns on outside click (guard: single listener)
-  if (!window._deployDropdownWired) {
-    window._deployDropdownWired = true;
-    document.addEventListener('click', () => {
-      document.querySelectorAll('.dropdown-wrap.open').forEach(w => w.classList.remove('open'));
-    });
-  }
 
   // Toggle "sans réponse" (rcvdBytes=0) — wired once
   if (!window._noRcvdToggleWired) {
@@ -6027,11 +5993,13 @@ function policyDecisionKey(policy) {
 function updateNoRcvdToggleBtn() {
   const btn     = document.getElementById('no-rcvd-toggle');
   const barText = document.getElementById('no-rcvd-bar-text');
+  const help    = document.getElementById('no-rcvd-help');
   const count   = deployState._noRcvdCount || 0;
   if (barText) {
     barText.textContent = count > 0 ? `⚠ ${count} destination${count > 1 ? 's' : ''} silencieuse${count > 1 ? 's' : ''}` : '';
     barText.title = count > 0 ? 'Au moins 80 % des flux sont sans réponse : port fermé ou hôte injoignable.' : '';
   }
+  if (help) help.style.display = count > 0 ? '' : 'none';
   if (btn) {
     btn.textContent = deployState.hideNoRcvd ? 'Afficher' : 'Masquer';
     btn.style.display = count > 0 ? '' : 'none';
@@ -8568,9 +8536,9 @@ async function generateDeployConf() {
   const spSsl = el('sp-ssl')?.value;   if (spSsl) securityProfiles.sslSsh     = spSsl;
 
   const opts = {
-    nat:    el('opt-nat')?.checked || false,
-    action: el('opt-action')?.value || 'accept',
-    log:    el('opt-log')?.value   || 'all',
+    nat: false,
+    action: 'accept',
+    log: 'all',
     securityProfiles,
   };
   if (deployState.strategyMetrics) {
