@@ -1919,7 +1919,7 @@ const deployState = {
   strategyPreviewError: '',
   strategyPreviewRequest: 0,
   strategyMetrics: null,      // authoritative metrics for the applied preview
-  viewPolicies:   null,       // derived presentation only; never used for generation
+  policyPreparationInProgress: false,
   page:          1,
   pageSize:      100,
   selectedSdwan: null,  // user-selected SD-WAN priority interface
@@ -1928,9 +1928,6 @@ const deployState = {
   collapsedGroups: new Set(),      // collapsed group keys for interface-pair view
   wizardStep:    1,                // 1: config upload, 2: routes, 3: interfaces, 4: policies
   use32Global:   false,            // global /32 mode (use real hosts instead of /24)
-  bruteMode:     'off',            // 'off' | 'service' (split by svc) | 'host' (split by src+svc)
-  _detailOriginal: null,           // M3: snapshot pré-détail (≠ _analyzedOriginal pré-fusion)
-  riskPanelOpen: false,
   sortCol:       null,             // active sort column key
   sortDir:       'desc',           // 'asc' | 'desc'
   availableProfiles: null,         // { antivirus, webfilter, ips, sslSsh } chargés depuis l'API
@@ -2312,35 +2309,12 @@ function renderStrategyToolbar() {
         <div class="strategy-preview-grid" role="group" aria-label="Stratégie">${strategyButtons}</div>
       </section>
 
-      <section class="strategy-control-group strategy-control-view" aria-labelledby="strategy-view-label">
-        <div class="strategy-control-heading">
-          <span class="strategy-toolbar-label" id="strategy-view-label">Vue</span>
-          <span class="strategy-control-hint">Comment je veux visualiser le résultat ?</span>
-        </div>
-        <div class="strategy-segmented strategy-view-options" role="group" aria-label="Vue">
-          <button class="strategy-segment-btn detail-mode-btn ${deployState.bruteMode === 'off' ? 'active' : ''}"
-            data-detail-mode="off" aria-pressed="${deployState.bruteMode === 'off'}">Synthèse</button>
-          <button class="strategy-segment-btn detail-mode-btn ${deployState.bruteMode === 'service' ? 'active' : ''}"
-            data-detail-mode="service" aria-pressed="${deployState.bruteMode === 'service'}">Services</button>
-          <button class="strategy-segment-btn detail-mode-btn ${deployState.bruteMode === 'host' ? 'active' : ''}"
-            data-detail-mode="host" aria-pressed="${deployState.bruteMode === 'host'}">IP à IP</button>
-          <button class="strategy-segment-btn detail-mode-btn ${deployState.bruteMode === 'src-agg-dst-detail' ? 'active' : ''}"
-            data-detail-mode="src-agg-dst-detail" aria-pressed="${deployState.bruteMode === 'src-agg-dst-detail'}">Réseau → Serveur</button>
-        </div>
-      </section>
-
       <div class="strategy-toolbar-actions" aria-label="Actions secondaires">
+        <div class="strategy-toolbar-status" role="status" aria-live="polite">${status}</div>
         <button class="strategy-reset-btn" id="btn-reset-strategy" ${deployState.strategyPreviews ? '' : 'disabled'}>
           <svg viewBox="0 0 16 16" focusable="false" aria-hidden="true"><path d="M13 5V2.5L11.4 4A5.5 5.5 0 1 0 13.5 9"/></svg>
           Réinitialiser
         </button>
-        <div class="dropdown-wrap" id="analyse-dropdown">
-          <button class="btn-sm dropdown-trigger ${deployState.riskPanelOpen ? 'btn-active' : ''}" id="btn-analyse-menu" aria-haspopup="true">Analyse ▾</button>
-          <div class="dropdown-menu strategy-analysis-menu">
-            <div class="dropdown-item" id="btn-risk-toggle">⚠ Risques</div>
-            <div class="dropdown-item" id="btn-risk-ports">⚙ Ports à risque</div>
-          </div>
-        </div>
         <span class="toolbar-sep"></span>
         <span class="history-btn-group" title="Historique des modifications (10 max)">
           <button class="btn-sm btn-history" id="btn-policy-undo" ${_policyUndo.length ? '' : 'disabled'} title="Annuler la dernière modification">‹</button>
@@ -2348,7 +2322,6 @@ function renderStrategyToolbar() {
         </span>
         <button class="btn-sm" id="btn-merge-selection" style="display:none">Fusionner la sélection (<span id="merge-sel-count">0</span>)</button>
       </div>
-      <div class="strategy-toolbar-status" role="status" aria-live="polite">${status}</div>
     </div>
   `;
 }
@@ -2427,12 +2400,10 @@ function applyPolicyStrategyPreview(name) {
   deployState.strategyMetrics = result.metrics;
   deployState.mergeScope = preview.scope;
   deployState._analyzedOriginal = null;
-  deployState._detailOriginal = null;
   deployState.selected = defaultSelectedSet(appliedPolicies);
   deployState.mergeSelected = new Set();
   deployState.generatedCli = null;
   deployState._noRcvdCount = appliedPolicies.filter(isScanPolicy).length;
-  refreshDeployViewPolicies();
   updateStrategyToolbar();
   renderDeployPolicies(filterDeployPolicies(), false);
   syncNoRcvdInfoBtn();
@@ -5101,13 +5072,10 @@ async function deploy() {
                 <label class="deploy-option-row"><span>Logs</span><select id="opt-log" class="deploy-select"><option value="all">log all</option><option value="utm">log utm</option><option value="disable">log disable</option></select></label>
               </div>
             </div>
-            <button class="btn-accent" id="btn-analyze">⚡ Analyser les policies</button>
           </div>
         </div>
-        <div id="deploy-hps-warn" style="display:none;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);border-radius:6px;padding:5px 12px;font-size:12px;color:var(--danger,#ef4444);margin-bottom:4px"></div>
         <div class="deploy-toolbar strategy-toolbar-shell" id="deploy-merge-bar" style="display:none">
           <div id="deploy-strategy-toolbar">${renderStrategyToolbar()}</div>
-          <input type="text" id="deploy-search" class="deploy-search-input" placeholder="Rechercher une policy…" value="${escHtml(deployState.searchFilter || '')}" title="Filtrer par IP, subnet, service ou identifiant">
         </div>
         <div class="predeploy-bar missing-bar" id="deploy-predeploy-bar" style="display:none" title="Cliquer pour nommer les objets manquants">
           <span class="predeploy-bar-title">Pré-déploiement</span>
@@ -5121,9 +5089,11 @@ async function deploy() {
           <div class="deploy-legend-item"><span class="deploy-legend-dot auto"></span> Auto-détecté</div>
           <span style="margin-left:auto;font-size:10px;color:var(--text2)">Cliquez sur une ligne pour la personnaliser</span>
         </div>
-        <div id="deploy-risk-panel" style="display:none;padding:0 4px 12px"></div>
+        <div class="policy-table-tools" id="policy-table-tools" style="display:none">
+          <input type="text" id="deploy-search" class="deploy-search-input" placeholder="Rechercher une policy…" value="${escHtml(deployState.searchFilter || '')}" title="Filtrer par IP, subnet, service ou identifiant">
+        </div>
         <div class="deploy-step-body" id="deploy-policy-body">
-          <div class="empty-state" style="padding:24px">Cliquez sur <strong>Analyser les policies</strong> pour commencer</div>
+          <div class="empty-state" style="padding:24px">Préparation des policies…</div>
         </div>
         <div class="deploy-step-footer" id="deploy-step4-footer" style="display:none">
           <div id="security-profiles-bar" style="display:none;margin-bottom:10px;padding:8px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);font-size:11px">
@@ -5336,9 +5306,6 @@ async function deploy() {
     }
   });
 
-  // Analyze
-  el('btn-analyze')?.addEventListener('click', analyzeDeployPolicies);
-
   // Global NAT toggle → apply only to WAN rows (wired here since opt-nat is stable in deploy DOM)
   el('opt-nat')?.addEventListener('change', e => {
     document.querySelectorAll('.deploy-nat-chk').forEach(chk => {
@@ -5347,7 +5314,7 @@ async function deploy() {
     });
   });
 
-  // Strategy/view toolbar — every control applies immediately.
+  // Strategy toolbar — every control applies immediately.
   el('deploy-merge-bar')?.addEventListener('click', async e => {
     const trigger = e.target.closest('.dropdown-trigger');
     if (trigger) {
@@ -5380,8 +5347,6 @@ async function deploy() {
       e.stopImmediatePropagation();
       document.querySelectorAll('.dropdown-wrap.open').forEach(w => w.classList.remove('open'));
       deployState.strategyName = 'balanced';
-      deployState.bruteMode = 'off';
-      _applyDetailMode();
       await activatePolicyStrategyScope('all');
       return;
     }
@@ -5401,33 +5366,6 @@ async function deploy() {
       return;
     }
 
-    if (e.target.id === 'btn-risk-ports') {
-      document.querySelectorAll('.dropdown-wrap.open').forEach(w => w.classList.remove('open'));
-      showRiskPortsModal();
-      return;
-    }
-
-    if (e.target.id === 'btn-risk-toggle') {
-      document.querySelectorAll('.dropdown-wrap.open').forEach(w => w.classList.remove('open'));
-      deployState.riskPanelOpen = !deployState.riskPanelOpen;
-      const panel = el('deploy-risk-panel');
-      const body  = el('deploy-policy-body');
-      panel.style.display = deployState.riskPanelOpen ? '' : 'none';
-      body.style.display  = deployState.riskPanelOpen ? 'none' : '';
-      el('btn-analyse-menu')?.classList.toggle('btn-accent', deployState.riskPanelOpen);
-      if (deployState.riskPanelOpen) loadRiskPanel();
-      return;
-    }
-
-    // Vue is presentation-only: switch the projection without touching strategy previews.
-    const detailModeBtn = e.target.closest('.detail-mode-btn');
-    if (detailModeBtn) {
-      e.stopImmediatePropagation();
-      deployState.bruteMode = detailModeBtn.dataset.detailMode;
-      updateStrategyToolbar();
-      _applyDetailMode();
-      return;
-    }
   });
 
   // Close dropdowns on outside click (guard: single listener)
@@ -5498,22 +5436,6 @@ async function deploy() {
   // Export/Import session
   // (the compact pre-deployment line opens the existing naming workflow)
 
-  // Applique uniquement la projection visuelle courante.
-  function _applyDetailMode() {
-    const hpsAvailable = deployState.hostPairServices && Object.keys(deployState.hostPairServices).length > 0;
-    const warn = el('deploy-hps-warn');
-    if (!hpsAvailable && deployState.bruteMode !== 'off') {
-      // Sans l'index de flows bruts, les modes de détail /32 produiraient des associations fictives
-      if (warn) {
-        warn.textContent = '⚠ Index de flows absent — résultats potentiellement imprécis. Relancez l\'analyse pour des données exactes.';
-        warn.style.display = '';
-      }
-    } else if (warn) {
-      warn.style.display = 'none';
-    }
-    refreshDeployViewPolicies();
-    renderDeployPolicies(filterDeployPolicies(), false);
-  }
 
   // Global /32 toggle (wired once — button persists in DOM)
   el('btn-32-global')?.addEventListener('click', () => {
@@ -5536,6 +5458,7 @@ async function deploy() {
   // Restore analyzed policies if already present (tab switch preservation)
   if (deployState.analyzed && deployState.analyzed.length > 0) {
     el('deploy-merge-bar').style.display = '';
+    el('policy-table-tools').style.display = '';
     renderDeployPolicies(filterDeployPolicies(), false);
     // Restore CLI preview if generated
     if (deployState.generatedCli) {
@@ -5544,6 +5467,9 @@ async function deploy() {
       if (pre)  pre.value = deployState.generatedCli;
       if (wrap) wrap.style.display = '';
     }
+  }
+  if (ws === 4 && deployState.fortiConfig && !deployState.analyzed && !deployState.policyPreparationInProgress) {
+    void analyzeDeployPolicies();
   }
 }
 
@@ -5786,251 +5712,6 @@ async function uploadConf(file) {
     deploy(); // re-render
   } catch (err) {
     alert('Erreur : ' + err.message);
-  }
-}
-
-// ─── Brute /32 modes ──────────────────────────────────────────────────────────
-// Mode 'service' : 1 policy par service (sources groupées)
-// Mode 'host'    : 1 policy par source /32 × service (vrai 1:1)
-
-function splitPoliciesByService(analyzedPolicies, baseAnalyzed, hostPairServices) {
-  const result = [];
-  const forceHosts = { _use32Src: true, _use32Dst: true, _srcMode: 'hosts', _dstMode: 'hosts' };
-  const subnetIdx = baseAnalyzed && baseAnalyzed.length ? _buildSubnetServiceIndex(baseAnalyzed) : null;
-
-  for (const p of analyzedPolicies) {
-    // Union des services réels pour toutes les paires (srcHost, dstHost) de cette policy
-    const srcHosts = p.srcHosts || [];
-    const dstHosts = p.dstHosts || [];
-    let services;
-    if (srcHosts.length > 0 && dstHosts.length > 0) {
-      const svcMap = new Map();
-      for (const src of srcHosts) {
-        for (const dst of dstHosts) {
-          for (const svc of _getServicesForPair(src, dst, p, hostPairServices, subnetIdx)) {
-            svcMap.set(svc.label || svc.name, svc);
-          }
-        }
-      }
-      if (svcMap.size > 0) services = [...svcMap.values()];
-    }
-    if (!services) services = p.analysis?.services || [];
-
-    if (services.length <= 1) {
-      result.push({ ...p, ...forceHosts, analysis: services.length === 1 ? { ...p.analysis, services } : p.analysis });
-    } else {
-      for (const svc of services) {
-        // Filtre srcHosts ET dstHosts aux seuls hôtes ayant réellement utilisé ce service.
-        let svcSrcHosts = srcHosts;
-        let svcDstHosts = dstHosts;
-        if (hostPairServices && srcHosts.length > 0 && dstHosts.length > 0) {
-          const svcName = (svc.label || svc.name || '').toUpperCase();
-          const filteredSrc = srcHosts.filter(src =>
-            dstHosts.some(dst => {
-              const flowSvcs = hostPairServices[src + '|' + dst];
-              return flowSvcs && flowSvcs.some(s => s.toUpperCase() === svcName);
-            })
-          );
-          const filteredDst = dstHosts.filter(dst =>
-            srcHosts.some(src => {
-              const flowSvcs = hostPairServices[src + '|' + dst];
-              return flowSvcs && flowSvcs.some(s => s.toUpperCase() === svcName);
-            })
-          );
-          if (filteredSrc.length > 0) svcSrcHosts = filteredSrc;
-          if (filteredDst.length > 0) svcDstHosts = filteredDst;
-        }
-        result.push({
-          ...p,
-          ...forceHosts,
-          srcHosts:    svcSrcHosts,
-          dstHosts:    svcDstHosts,
-          serviceDesc: svc.label || svc.name || '',
-          analysis:    { ...p.analysis, services: [svc] },
-        });
-      }
-    }
-  }
-  return result;
-}
-
-// Retourne les services réels pour une paire (srcHost, dstHost) spécifique.
-// Priorité 1 : hostPairServices (index exact par IP depuis les flows bruts)
-// Priorité 2 : index subnet depuis baseAnalyzed (pré-fusion, moins précis)
-// Fallback   : services de la policy courante (comportement d'origine)
-function _getServicesForPair(srcHost, dstHost, p, hostPairServices, subnetIdx) {
-  // Niveau 1 : flows bruts — service exactement observé pour cette paire IP
-  if (hostPairServices && srcHost && dstHost) {
-    const flowSvcs = hostPairServices[srcHost + '|' + dstHost];
-    if (flowSvcs && flowSvcs.length > 0) {
-      const flowSvcSet = new Set(flowSvcs.map(s => s.toUpperCase()));
-      // Filtre les objets service complets de la policy (conserve les métadonnées : found, suggestedName, port…)
-      const filtered = (p.analysis?.services || []).filter(s =>
-        flowSvcSet.has((s.label || s.name || '').toUpperCase())
-      );
-      if (filtered.length > 0) return filtered;
-    }
-  }
-  // Niveau 2 : index subnet pré-fusion
-  if (subnetIdx && srcHost && dstHost) {
-    const pairMap = subnetIdx.get(srcHost + '|' + dstHost);
-    if (pairMap && pairMap.size > 0) return [...pairMap.values()];
-  }
-  // Fallback
-  return p.analysis?.services || [];
-}
-
-// Construit un index subnet srcHost→dstHost→services[] depuis les policies brutes (pré-fusion)
-// Utilisé comme fallback quand les flows bruts ne sont pas disponibles
-function _buildSubnetServiceIndex(baseAnalyzed) {
-  const idx = new Map(); // "srcHost|dstHost" → Map<svcName, svc>
-  for (const p of (baseAnalyzed || [])) {
-    const srcHosts = p.srcHosts || [];
-    const dstHosts = p.dstHosts || [];
-    const services = p.analysis?.services || [];
-    for (const src of srcHosts) {
-      for (const dst of dstHosts) {
-        const key = src + '|' + dst;
-        if (!idx.has(key)) idx.set(key, new Map());
-        const svcMap = idx.get(key);
-        for (const svc of services) {
-          svcMap.set(svc.name || svc.label, svc);
-        }
-      }
-    }
-  }
-  return idx;
-}
-
-function splitPoliciesByHostAndService(analyzedPolicies, baseAnalyzed, hostPairServices) {
-  const result = [];
-  const forceHosts = { _use32Src: true, _use32Dst: true, _srcMode: 'hosts', _dstMode: 'hosts' };
-  const subnetIdx = baseAnalyzed && baseAnalyzed.length ? _buildSubnetServiceIndex(baseAnalyzed) : null;
-
-  for (const p of analyzedPolicies) {
-    const srcHosts = p.srcHosts || [];
-    const dstHosts = p.dstHosts || [];
-    const srcList  = srcHosts.length > 0 ? srcHosts : [null];
-    const dstList  = dstHosts.length > 0 ? dstHosts : [null];
-
-    const noRcvdSrcSet = new Set(p.noRcvdSrcHosts || []);
-
-    for (const srcHost of srcList) {
-      const hostNoRcvd = srcHost ? (noRcvdSrcSet.has(srcHost) ? 1 : 0) : (p.noRcvdFlows || 0);
-      for (const dstHost of dstList) {
-        // Si l'index exact est disponible, ignorer les paires non observées dans les flows bruts
-        // (artefacts du produit cartésien après fusion — ne correspondent à aucun trafic réel)
-        if (hostPairServices && srcHost && dstHost && !hostPairServices[srcHost + '|' + dstHost]) continue;
-        const svcs = _getServicesForPair(srcHost, dstHost, p, hostPairServices, subnetIdx);
-        const svcList = svcs.length > 0 ? svcs : [null];
-
-        const splitCount  = srcList.length * dstList.length * svcList.length;
-        const sessionsPer = Math.max(1, Math.round((p.sessions || 0) / splitCount));
-
-        for (const svc of svcList) {
-          result.push({
-            ...p,
-            ...forceHosts,
-            srcSubnet:    srcHost ? srcHost + '/32' : p.srcSubnet,
-            srcHosts:     srcHost ? [srcHost] : (p.srcHosts || []),
-            dstTarget:    dstHost ? dstHost + '/32' : p.dstTarget,
-            dstHosts:     dstHost ? [dstHost] : (p.dstHosts || []),
-            serviceDesc:  svc ? (svc.label || svc.name || '') : p.serviceDesc,
-            analysis:     svc ? { ...p.analysis, services: [svc] } : p.analysis,
-            noRcvdFlows:  hostNoRcvd,
-            sessions:     sessionsPer,
-          });
-        }
-      }
-    }
-  }
-  return result;
-}
-
-// Mode 'src-agg-dst-detail' : source agrégée en subnet /24, destination détaillée par IP /32
-// Cas d'usage : flux utilisateurs (mêmes droits → subnet) vers serveurs (distincts → IP individuelle)
-// srcHosts est filtré aux seuls hôtes ayant réellement communiqué avec dstHost+service
-// → si l'utilisateur bascule en /32, seuls ces hôtes apparaissent
-function splitPoliciesBySrcAggDstDetail(analyzedPolicies, baseAnalyzed, hostPairServices) {
-  const result = [];
-  const subnetIdx = baseAnalyzed && baseAnalyzed.length ? _buildSubnetServiceIndex(baseAnalyzed) : null;
-
-  for (const p of analyzedPolicies) {
-    const srcHosts = p.srcHosts || [];
-    const dstHosts = p.dstHosts || [];
-    const dstList  = dstHosts.length > 0 ? dstHosts : [null];
-
-    for (const dstHost of dstList) {
-      // Hôtes sources ayant réellement du trafic vers cette destination
-      let realSrcHosts = srcHosts;
-      if (hostPairServices && dstHost && srcHosts.length > 0) {
-        realSrcHosts = srcHosts.filter(src => hostPairServices[src + '|' + dstHost]);
-        if (realSrcHosts.length === 0) continue;
-      }
-
-      // Agrège les services de toutes les paires réelles (srcHost → dstHost)
-      const svcMap = new Map();
-      if (realSrcHosts.length > 0 && dstHost) {
-        for (const src of realSrcHosts) {
-          for (const svc of _getServicesForPair(src, dstHost, p, hostPairServices, subnetIdx)) {
-            svcMap.set(svc.label || svc.name, svc);
-          }
-        }
-      }
-      const svcs = svcMap.size > 0 ? [...svcMap.values()] : (p.analysis?.services || [null]);
-      const svcList = svcs.length > 0 ? svcs : [null];
-
-      const splitCount  = dstList.length * svcList.length;
-      const sessionsPer = Math.max(1, Math.round((p.sessions || 0) / splitCount));
-
-      for (const svc of svcList) {
-        // Pour ce service précis, ne garder que les hôtes sources qui l'ont réellement utilisé
-        let svcSrcHosts = realSrcHosts;
-        if (svc && hostPairServices && dstHost && realSrcHosts.length > 0) {
-          const svcName = (svc.label || svc.name || '').toUpperCase();
-          const filtered = realSrcHosts.filter(src => {
-            const flowSvcs = hostPairServices[src + '|' + dstHost];
-            return flowSvcs && flowSvcs.some(s => s.toUpperCase() === svcName);
-          });
-          if (filtered.length > 0) svcSrcHosts = filtered;
-        }
-
-        result.push({
-          ...p,
-          _use32Src: false,
-          _use32Dst: true,
-          _srcMode: 'subnet',
-          _dstMode: 'hosts',
-          srcHosts:    svcSrcHosts,
-          dstTarget:   dstHost ? dstHost + '/32' : p.dstTarget,
-          dstHosts:    dstHost ? [dstHost] : (p.dstHosts || []),
-          serviceDesc: svc ? (svc.label || svc.name || '') : p.serviceDesc,
-          analysis:    svc ? { ...p.analysis, services: [svc] } : p.analysis,
-          sessions:    sessionsPer,
-        });
-      }
-    }
-  }
-  return result;
-}
-
-// Vue is a presentation projection only. The authoritative policies remain in
-// deployState.analyzed and are the sole source used by preflight/generation.
-function refreshDeployViewPolicies() {
-  const base = deployState.analyzed || [];
-  if (deployState.bruteMode === 'off') {
-    deployState.viewPolicies = null;
-    return;
-  }
-  const indexed = base.map((policy, index) => ({ ...policy, _viewSourceIndex: index }));
-  if (deployState.bruteMode === 'service') {
-    deployState.viewPolicies = splitPoliciesByService(indexed, deployState.baseAnalyzedPolicies, deployState.hostPairServices);
-  } else if (deployState.bruteMode === 'host') {
-    deployState.viewPolicies = splitPoliciesByHostAndService(indexed, deployState.baseAnalyzedPolicies, deployState.hostPairServices);
-  } else if (deployState.bruteMode === 'src-agg-dst-detail') {
-    deployState.viewPolicies = splitPoliciesBySrcAggDstDetail(indexed, deployState.baseAnalyzedPolicies, deployState.hostPairServices);
-  } else {
-    deployState.viewPolicies = null;
   }
 }
 
@@ -6371,7 +6052,7 @@ function defaultSelectedSet(arr) {
 
 function filterDeployPolicies() {
   const q = (deployState.searchFilter || '').toLowerCase().trim();
-  let result = deployState.viewPolicies || deployState.analyzed || [];
+  let result = deployState.analyzed || [];
 
   // Masquer les policies dont ≥80% des flows sont sans réponse (scan probable)
   if (deployState.hideNoRcvd) {
@@ -6877,301 +6558,6 @@ function mergeByPolicyId(policies) {
   return merged.map(syncMergedServiceMetadata).map(normalizeInternetMerge);
 }
 
-// ── Analyse de risques ──
-function renderRiskPanel(data) {
-  const LEVEL_BADGE = {
-    critical: `<span style="background:#c0392b;color:#fff;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700">CRITIQUE</span>`,
-    high:     `<span style="background:#e67e22;color:#fff;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700">ÉLEVÉ</span>`,
-    medium:   `<span style="background:#f1c40f;color:#222;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:700">MOYEN</span>`,
-  };
-  const sectionStyle = `background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:10px;overflow:hidden`;
-  const headerStyle  = `padding:8px 12px;font-weight:600;font-size:12px;cursor:pointer;display:flex;align-items:center;gap:6px;user-select:none;border-bottom:1px solid var(--border)`;
-  const bodyStyle    = `padding:8px 12px`;
-  const thStyle      = `text-align:left;padding:4px 8px;font-size:10px;font-weight:600;color:var(--text2);border-bottom:1px solid var(--border)`;
-  const tdStyle      = `padding:4px 8px;font-size:11px;border-bottom:1px solid var(--border)`;
-  const tableStyle   = `width:100%;border-collapse:collapse`;
-  let html = '';
-
-  const rp = data.riskPolicies || [];
-  let s1Body = '';
-  if (rp.length === 0) {
-    s1Body = `<div style="color:var(--success,#27ae60);padding:8px 0">Aucun flux à risque détecté ✓</div>`;
-  } else {
-    s1Body = `<table style="${tableStyle}"><thead><tr>
-      <th style="${thStyle}">Src subnet</th><th style="${thStyle}">Destination</th>
-      <th style="${thStyle}">Ports à risque</th><th style="${thStyle}">Niveau</th><th style="${thStyle}">Sessions</th>
-    </tr></thead><tbody>`;
-    for (const row of rp) {
-      const portsDesc = row.ports.map(p => `${escHtml(String(p.port))} (${escHtml(p.label)})`).join('<br>');
-      s1Body += `<tr>
-        <td style="${tdStyle}">${escHtml(row.srcSubnet||'')}</td>
-        <td style="${tdStyle}">${escHtml(row.dstTarget||'')} <span style="font-size:10px;color:var(--text2)">${escHtml(row.dstType||'')}</span></td>
-        <td style="${tdStyle}">${portsDesc}</td>
-        <td style="${tdStyle}">${LEVEL_BADGE[row.level]||escHtml(row.level)}</td>
-        <td style="${tdStyle}">${escHtml(String(row.sessions))}</td>
-      </tr>`;
-    }
-    s1Body += `</tbody></table>`;
-  }
-  html += `<div style="${sectionStyle}">
-    <div class="risk-section-header" style="${headerStyle}"><span class="risk-chevron">⌄</span><span>⚠ ${rp.length} flux à risque</span></div>
-    <div style="${bodyStyle}">${s1Body}</div></div>`;
-
-
-  if (data.hasFortiConfig) {
-    const shadows = data.shadows;
-    const cleanJoin = (arr) => (arr||[]).filter(v => v && String(v).trim()).join(', ');
-    const wrapStyle = 'word-break:break-word;white-space:normal;';
-    const renderPermTable = (list) => {
-      if (list.length === 0) return `<div style="color:var(--text2);font-size:11px;padding:4px 0">Aucune</div>`;
-      let t = `<table style="${tableStyle}table-layout:fixed;width:100%"><thead><tr>
-        <th style="${thStyle};width:40px">ID</th>
-        <th style="${thStyle};width:8%">Nom</th>
-        <th style="${thStyle};width:10%">Src intf</th>
-        <th style="${thStyle};width:22%">Src addr</th>
-        <th style="${thStyle};width:10%">Dst intf</th>
-        <th style="${thStyle};width:22%">Dst addr</th>
-        <th style="${thStyle};width:10%">Service</th>
-        <th style="${thStyle}">Raison</th>
-      </tr></thead><tbody>`;
-      for (const sh of list) {
-        const srcAddr = cleanJoin(sh.srcaddr);
-        const dstAddr = cleanJoin(sh.dstaddr);
-        const svc     = cleanJoin(sh.service);
-        t += `<tr>
-          <td style="${tdStyle}">${escHtml(String(sh.id))}</td>
-          <td style="${tdStyle}${wrapStyle}">${escHtml(sh.name)}</td>
-          <td style="${tdStyle}${wrapStyle}font-family:var(--mono);font-size:10px">${escHtml(cleanJoin(sh.srcintf))}</td>
-          <td style="${tdStyle}${wrapStyle}">${escHtml(srcAddr)}</td>
-          <td style="${tdStyle}${wrapStyle}font-family:var(--mono);font-size:10px">${escHtml(cleanJoin(sh.dstintf))}</td>
-          <td style="${tdStyle}${wrapStyle}">${escHtml(dstAddr)}</td>
-          <td style="${tdStyle}${wrapStyle}">${escHtml(svc)}</td>
-          <td style="${tdStyle};color:var(--warn,#f39c12)">${escHtml(sh.reason)}</td>
-        </tr>`;
-      }
-      t += `</tbody></table>`;
-      return t;
-    };
-
-    let s3Body = '';
-    if (!shadows) {
-      s3Body = `<div style="color:var(--text2);padding:8px 0">Chargez une config FortiGate pour activer cette analyse</div>`;
-    } else if (shadows.length === 0) {
-      s3Body = `<div style="color:var(--success,#27ae60);padding:8px 0">Aucune policy trop permissive détectée ✓</div>`;
-    } else {
-      const dirs = [
-        { key: 'lan-wan', label: '🌐 LAN → WAN' },
-        { key: 'wan-lan', label: '⬇ WAN → LAN' },
-        { key: 'lan-lan', label: '🔁 LAN → LAN' },
-      ];
-      for (const d of dirs) {
-        const list = shadows.filter(sh => sh.direction === d.key);
-        if (list.length === 0) continue;
-        s3Body += `<div style="margin-bottom:14px">
-          <div style="font-size:11px;font-weight:600;color:var(--text2);margin-bottom:4px;padding:2px 0;border-bottom:1px solid var(--border)">${d.label} (${list.length})</div>
-          ${renderPermTable(list)}
-        </div>`;
-      }
-    }
-    html += `<div style="${sectionStyle}">
-      <div class="risk-section-header" style="${headerStyle}"><span class="risk-chevron">⌄</span><span>⚠ Policies trop permissives (${shadows?shadows.length:0})</span></div>
-      <div style="${bodyStyle}">${s3Body}</div></div>`;
-  }
-
-  return html;
-}
-
-async function loadRiskPanel() {
-  const panel = el('deploy-risk-panel');
-  panel.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text2)">Chargement…</div>';
-  try {
-    const data = await api('/api/risk-analysis');
-    panel.innerHTML = renderRiskPanel(data);
-    panel.querySelectorAll('.risk-section-header').forEach(h => {
-      h.addEventListener('click', () => {
-        const body = h.nextElementSibling;
-        const isOpen = body.style.display !== 'none';
-        body.style.display = isOpen ? 'none' : '';
-        h.querySelector('.risk-chevron').textContent = isOpen ? '›' : '⌄';
-      });
-    });
-  } catch(e) {
-    panel.innerHTML = `<div style="padding:20px;color:var(--error)">Erreur : ${escHtml(e.message)}</div>`;
-  }
-}
-
-// ── Configuration des ports à risque ──
-// Note: All dynamic values inserted into HTML strings below are escaped via escHtml()
-// before insertion, following the same XSS-prevention pattern used throughout app.js.
-function buildRiskPortsModalHtml(cfg) {
-  const inputStyle = 'background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:3px;padding:2px 5px';
-  const SECTIONS = [
-    { key: 'always_critical', label: '🔴 Toujours CRITIQUE',                color: '#c0392b' },
-    { key: 'always_high',     label: '🟠 Toujours ÉLEVÉ',                   color: '#e67e22' },
-    { key: 'critical_if_wan', label: '🔴/🟡 CRITIQUE si WAN, MOYEN si LAN', color: '#c0392b' },
-    { key: 'high_if_wan',     label: '🟠/🟡 ÉLEVÉ si WAN, MOYEN si LAN',   color: '#e67e22' },
-  ];
-  let sectionsHtml = '';
-  for (const sec of SECTIONS) {
-    const ports = cfg[sec.key] || {};
-    let rows = '';
-    for (const [port, label] of Object.entries(ports)) {
-      // escHtml() applied to all dynamic values (port number and label from saved config)
-      rows += `<tr>`
-        + `<td style="padding:3px 5px"><input class="rp-port" type="number" min="1" max="65535"`
-        + ` value="${escHtml(String(port))}" style="${inputStyle};width:64px;font-family:var(--mono);font-size:11px"></td>`
-        + `<td style="padding:3px 5px"><input class="rp-label" type="text"`
-        + ` value="${escHtml(String(label))}" style="${inputStyle};width:260px;font-size:11px"></td>`
-        + `<td style="padding:3px 5px"><button class="rp-del btn-sm" style="padding:1px 5px;font-size:10px;color:var(--error,#e74c3c)">✕</button></td>`
-        + `</tr>`;
-    }
-    sectionsHtml += `<div class="rp-section" data-section="${escHtml(sec.key)}" style="margin-bottom:18px">`
-      + `<div style="font-size:11px;font-weight:700;color:${sec.color};margin-bottom:6px;border-bottom:1px solid var(--border);padding-bottom:4px">${sec.label}</div>`
-      + `<table style="border-collapse:collapse;width:100%"><thead><tr>`
-      + `<th style="text-align:left;padding:2px 5px;font-size:10px;color:var(--text2);width:80px">Port</th>`
-      + `<th style="text-align:left;padding:2px 5px;font-size:10px;color:var(--text2)">Description</th>`
-      + `<th style="width:28px"></th></tr></thead>`
-      + `<tbody class="rp-tbody">${rows}</tbody></table>`
-      + `<button class="rp-add btn-sm" data-section="${escHtml(sec.key)}" style="margin-top:6px;font-size:11px">+ Ajouter</button>`
-      + `</div>`;
-  }
-  return `<div style="background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:20px;width:540px;max-height:88vh;overflow-y:auto">`
-    + `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">`
-    + `<span style="font-weight:700;font-size:13px">⚙ Ports à risque</span>`
-    + `<button id="rp-close" class="btn-sm">✕</button></div>`
-    + `<div style="font-size:11px;color:var(--text2);margin-bottom:16px;line-height:1.5">`
-    + `Classification des ports pour l'analyse de risques.<br>`
-    + `Les ports conditionnels sont évalués selon la nature de la destination (WAN/public vs LAN/privé).</div>`
-    + sectionsHtml
-    + `<div style="display:flex;gap:8px;padding-top:12px;border-top:1px solid var(--border)">`
-    + `<button id="rp-save" class="btn-sm btn-accent" style="font-size:12px">💾 Sauvegarder et relancer</button>`
-    + `<button id="rp-reset" class="btn-sm" style="font-size:12px;opacity:0.7">↺ Réinitialiser aux défauts</button>`
-    + `</div></div>`;
-}
-
-async function showRiskPortsModal() {
-  const existing = document.getElementById('risk-ports-modal-overlay');
-  if (existing) { existing.remove(); return; }
-
-  const overlay = document.createElement('div');
-  overlay.id = 'risk-ports-modal-overlay';
-  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center';
-  document.body.appendChild(overlay);
-
-  const inputStyle = 'background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:3px;padding:2px 5px';
-
-  function setLoading() {
-    const d = document.createElement('div');
-    d.style.cssText = 'padding:30px;color:var(--text2);font-size:12px';
-    d.textContent = 'Chargement…';
-    overlay.replaceChildren(d);
-  }
-
-  function setError(msg) {
-    const wrap = document.createElement('div');
-    wrap.style.cssText = 'background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:24px;font-size:12px';
-    const p = document.createElement('p');
-    p.style.color = 'var(--error,#e74c3c)';
-    p.textContent = 'Erreur : ' + msg;
-    const btn = document.createElement('button');
-    btn.className = 'btn-sm'; btn.textContent = 'Fermer'; btn.style.marginTop = '12px';
-    btn.addEventListener('click', () => overlay.remove());
-    wrap.appendChild(p); wrap.appendChild(btn);
-    overlay.replaceChildren(wrap);
-  }
-
-  function collectConfig() {
-    const result = { always_critical: {}, always_high: {}, critical_if_wan: {}, high_if_wan: {} };
-    overlay.querySelectorAll('.rp-section').forEach(sec => {
-      const key = sec.dataset.section;
-      sec.querySelectorAll('.rp-tbody tr').forEach(row => {
-        const port  = parseInt(row.querySelector('.rp-port')?.value?.trim(), 10);
-        const label = row.querySelector('.rp-label')?.value?.trim();
-        if (!isNaN(port) && port > 0 && label) result[key][port] = label;
-      });
-    });
-    return result;
-  }
-
-  function addNewRow(tbody) {
-    const tr = document.createElement('tr');
-    const tdPort = document.createElement('td'); tdPort.style.padding = '3px 5px';
-    const inPort = document.createElement('input');
-    inPort.className = 'rp-port'; inPort.type = 'number'; inPort.min = '1'; inPort.max = '65535';
-    inPort.placeholder = 'Port'; inPort.style.cssText = inputStyle + ';width:64px;font-family:var(--mono);font-size:11px';
-    tdPort.appendChild(inPort);
-    const tdLabel = document.createElement('td'); tdLabel.style.padding = '3px 5px';
-    const inLabel = document.createElement('input');
-    inLabel.className = 'rp-label'; inLabel.type = 'text'; inLabel.placeholder = 'Description';
-    inLabel.style.cssText = inputStyle + ';width:260px;font-size:11px';
-    tdLabel.appendChild(inLabel);
-    const tdDel = document.createElement('td'); tdDel.style.padding = '3px 5px';
-    const btnDel = document.createElement('button');
-    btnDel.className = 'rp-del btn-sm'; btnDel.textContent = '✕';
-    btnDel.style.cssText = 'padding:1px 5px;font-size:10px;color:var(--error,#e74c3c)';
-    tdDel.appendChild(btnDel);
-    tr.appendChild(tdPort); tr.appendChild(tdLabel); tr.appendChild(tdDel);
-    tbody.appendChild(tr);
-    inPort.focus();
-  }
-
-  async function loadAndRender(url, method) {
-    setLoading();
-    try {
-      const r = await fetch(url, { method: method || 'GET' });
-      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || r.statusText); }
-      const cfg = await r.json();
-      // buildRiskPortsModalHtml escapes all cfg values with escHtml() before HTML insertion
-      const modalWrap = document.createElement('div');
-      modalWrap.style.cssText = 'display:contents';
-      modalWrap.innerHTML = buildRiskPortsModalHtml(cfg);
-      overlay.replaceChildren(modalWrap.firstElementChild);
-      bindModalEvents();
-    } catch (e) {
-      setError(e.message);
-    }
-  }
-
-  function bindModalEvents() {
-    overlay.addEventListener('click', async e => {
-      if (e.target === overlay)                    { overlay.remove(); return; }
-      if (e.target.id === 'rp-close')              { overlay.remove(); return; }
-      if (e.target.classList.contains('rp-del'))   { e.target.closest('tr').remove(); return; }
-      if (e.target.classList.contains('rp-add'))   {
-        const sec = e.target.closest('.rp-section');
-        addNewRow(sec.querySelector('.rp-tbody'));
-        return;
-      }
-      if (e.target.id === 'rp-reset') {
-        if (!confirm('Réinitialiser aux ports par défaut ? Vos modifications seront perdues.')) return;
-        await loadAndRender('/api/risk-ports', 'DELETE');
-        return;
-      }
-      if (e.target.id === 'rp-save') {
-        const cfg = collectConfig();
-        const btn = e.target;
-        btn.disabled = true; btn.textContent = 'Sauvegarde…';
-        try {
-          const r = await fetch('/api/risk-ports', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(cfg),
-          });
-          if (!r.ok) { const err = await r.json().catch(() => ({})); throw new Error(err.error || r.statusText); }
-          overlay.remove();
-          if (deployState.riskPanelOpen) loadRiskPanel();
-        } catch (err) {
-          btn.textContent = 'Erreur : ' + err.message;
-          btn.disabled = false;
-        }
-      }
-    });
-  }
-
-  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
-  await loadAndRender('/api/risk-ports', 'GET');
-}
-
 function normalizeInternetMerge(policy) {
   const isInternet = policy.dstType === 'public' || policy.dstTarget === 'all' || policy._isWan;
   if (!isInternet) return policy;
@@ -7528,14 +6914,6 @@ function applyMerge(scope, strategy) {
     }
   }
 
-  // M3: la fusion/reset remplace analyzed → toute granularité de détail devient caduque.
-  // On repasse en mode base pour éviter un _detailOriginal pointant vers un état remplacé.
-  deployState.bruteMode = 'off';
-  deployState._detailOriginal = null;
-  const _bm = el('btn-brute-mode');
-  if (_bm) { _bm.textContent = 'Vue ▾'; _bm.classList.remove('btn-active'); }
-  document.querySelectorAll('.detail-mode-btn').forEach(b => b.classList.remove('btn-accent'));
-
   // Reset selection (hors scan policies)
   deployState.selected = defaultSelectedSet(deployState.analyzed);
   renderDeployPolicies(filterDeployPolicies());
@@ -7557,10 +6935,11 @@ function applyMerge(scope, strategy) {
 // ─── Policy analysis ──────────────────────────────────────────────────────────
 
 async function analyzeDeployPolicies() {
+  if (deployState.policyPreparationInProgress) return;
+  deployState.policyPreparationInProgress = true;
+  const finishPreparation = () => { deployState.policyPreparationInProgress = false; };
   // Show loading state
   const body = el('deploy-policy-body');
-  const btn  = el('btn-analyze');
-  if (btn) { btn.disabled = true; btn.textContent = 'Analyse en cours…'; }
   if (body) body.innerHTML = `
     <div class="deploy-loading">
       <div class="deploy-loading-bar"><div class="deploy-loading-fill" id="deploy-loading-fill"></div></div>
@@ -7581,9 +6960,9 @@ async function analyzeDeployPolicies() {
     }
     setLoadingText(`${rawPolicies.length} policies récupérées — analyse en cours…`);
     setLoadingPct(30);
-  } catch (err) { resetAnalyzeBtn(); alert(err.message); return; }
+  } catch (err) { finishPreparation(); alert(err.message); return; }
   if (!rawPolicies || rawPolicies.length === 0) {
-    resetAnalyzeBtn();
+    finishPreparation();
     alert('Aucune policy à analyser. Vérifiez que le fichier de trafic est bien chargé (étape 1).');
     if (body) body.innerHTML = '<div class="empty-state" style="padding:24px">Aucune policy disponible. Chargez un fichier de trafic en étape 1.</div>';
     return;
@@ -7612,7 +6991,7 @@ async function analyzeDeployPolicies() {
     if (!r.ok) {
       const text = await r.text();
       const msg  = (() => { try { return JSON.parse(text).error; } catch { return `HTTP ${r.status}`; } })();
-      resetAnalyzeBtn(); alert('Erreur analyse : ' + msg); return;
+      finishPreparation(); alert('Erreur analyse : ' + msg); return;
     }
     const respData = await r.json();
     analyzed = respData.analyzed;
@@ -7622,7 +7001,7 @@ async function analyzeDeployPolicies() {
     deployState.hostPairServices = respData.hostPairServices || {};
     setLoadingPct(95);
     setLoadingText('Enrichissement des données…');
-  } catch (err) { resetAnalyzeBtn(); alert(err.message); return; }
+  } catch (err) { finishPreparation(); alert(err.message); return; }
 
   const ifaces = deployState.interfaces?.interfaces || [];
   const zones  = deployState.interfaces?.zones || [];
@@ -7741,15 +7120,12 @@ async function analyzeDeployPolicies() {
 
   deployState.analyzed              = analyzed;
   deployState._analyzedOriginal     = null;
-  deployState._detailOriginal       = null;  // M3: base de détail, réinitialisée à chaque analyse
   deployState.baseAnalyzedPolicies  = analyzed.map(p => ({ ...p })); // snapshot for reset
   deployState.strategySourcePolicies = structuredClone(serializeAnalyzed(analyzed));
   deployState.strategyPreviews       = null;
   deployState.strategyMetrics        = null;
   deployState.strategyName           = 'balanced';
   deployState.strategyScope          = 'all';
-  deployState.bruteMode              = 'off';
-  deployState.viewPolicies           = null;
   deployState.generatedCli          = null;
   deployState.selected              = defaultSelectedSet(analyzed);
   _drawerHistory = [];  // clear undo history from previous session
@@ -7813,13 +7189,8 @@ async function analyzeDeployPolicies() {
   });
   document.querySelectorAll('.wizard-connector').forEach((c, i) => c.classList.toggle('done', i < 3));
 
-  resetAnalyzeBtn();
+  finishPreparation();
   renderDeployPolicies(filterDeployPolicies());
-}
-
-function resetAnalyzeBtn() {
-  const btn = el('btn-analyze');
-  if (btn) { btn.disabled = false; btn.textContent = '⚡ Analyser les policies'; }
 }
 
 function suggestAddrNameFE(cidr) {

@@ -29,7 +29,7 @@ test('la barre principale compare les trois stratégies par nombre final de poli
   const toolbar = functionBlock('renderStrategyToolbar', 'updateStrategyToolbar');
 
   assert.match(appSource, /id="deploy-strategy-toolbar"/);
-  for (const label of ['Équilibrée', 'Compacte', 'Synthétique', 'Recommandée', 'Tout', 'LAN', 'Internet', 'Synthèse', 'Services', 'IP à IP', 'Réseau → Serveur']) {
+  for (const label of ['Équilibrée', 'Compacte', 'Synthétique', 'Recommandée', 'Tout', 'LAN', 'Internet']) {
     assert.match(toolbar, new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
   for (const description of [
@@ -55,18 +55,19 @@ test('la barre principale compare les trois stratégies par nombre final de poli
   assert.doesNotMatch(appSource, /id="deploy-missing-bar"|id="no-rcvd-bar"/);
 });
 
-test('les cartes de stratégie restent compactes sur un écran très large', () => {
+test('les cartes de stratégie occupent trois colonnes équilibrées puis se replient', () => {
   const gridRule = styleSource.match(/\.strategy-preview-grid\s*\{[^}]+\}/)?.[0] || '';
 
-  assert.match(gridRule, /repeat\(auto-fit,\s*minmax\(190px,\s*280px\)\)/);
-  assert.doesNotMatch(gridRule, /minmax\(190px,\s*1fr\)/);
+  assert.match(gridRule, /repeat\(3,\s*minmax\(0,\s*1fr\)\)/);
+  assert.match(styleSource, /@media \(max-width: 900px\)[\s\S]*?\.strategy-preview-grid\s*\{\s*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
+  assert.match(styleSource, /@media \(max-width: 580px\)[\s\S]*?\.strategy-preview-grid\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\)/);
 });
 
 test('Périmètre et Stratégie appliquent immédiatement le dernier choix utilisateur', () => {
   const loadPreviews = functionBlock('loadPolicyStrategyPreviews', 'activatePolicyStrategyScope');
   const activateScope = functionBlock('activatePolicyStrategyScope', 'activatePolicyStrategy');
   const activateStrategy = functionBlock('activatePolicyStrategy', 'applyPolicyStrategyPreview');
-  const analyze = functionBlock('analyzeDeployPolicies', 'resetAnalyzeBtn');
+  const analyze = functionBlock('analyzeDeployPolicies', 'suggestAddrNameFE');
 
   assert.match(loadPreviews, /const requestId = \+\+deployState\.strategyPreviewRequest/);
   assert.match(loadPreviews, /requestId !== deployState\.strategyPreviewRequest/);
@@ -128,22 +129,26 @@ test('une réponse de périmètre obsolète ne remplace ni la preview ni la stra
   assert.deepEqual(applied, [{ name: 'balanced', scope: 'internet' }]);
 });
 
-test('Vue est un contrôle segmenté immédiat sans recalcul de stratégie', () => {
+test('Vue et Analyse disparaissent entièrement de cet écran', () => {
   const toolbar = functionBlock('renderStrategyToolbar', 'updateStrategyToolbar');
-  const applyView = functionBlock('refreshDeployViewPolicies', '_updateMergeSelectionBtn');
+  const deployView = functionBlock('deploy', 'uploadConf');
 
-  assert.match(toolbar, /strategy-view-options/);
-  assert.match(toolbar, /data-detail-mode="off"/);
-  assert.doesNotMatch(toolbar, /detail-dropdown-wrap|btn-brute-mode|data-detail-action/);
-  assert.match(appSource, /deployState\.bruteMode = detailModeBtn\.dataset\.detailMode[\s\S]{0,180}_applyDetailMode\(\)/);
-  assert.match(applyView, /deployState\.viewPolicies\s*=/);
-  assert.doesNotMatch(applyView, /deployState\.analyzed\s*=/);
+  assert.doesNotMatch(toolbar, /Vue|Synthèse|IP à IP|Réseau → Serveur|strategy-view|detail-mode/);
+  assert.doesNotMatch(toolbar, /Analyse|analyse-dropdown|btn-analyse|btn-risk/);
+  assert.doesNotMatch(deployView, /btn-analyze|Analyser les policies|deploy-risk-panel/);
+  for (const obsoleteUiSymbol of [
+    'bruteMode', 'viewPolicies', 'refreshDeployViewPolicies',
+    'splitPoliciesByService', 'splitPoliciesByHostAndService', 'splitPoliciesBySrcAggDstDetail',
+    'riskPanelOpen', 'renderRiskPanel', 'loadRiskPanel', 'showRiskPortsModal',
+  ]) {
+    assert.equal(appSource.includes(obsoleteUiSymbol), false, `logique UI obsolète conservée: ${obsoleteUiSymbol}`);
+  }
 });
 
 test('les actions secondaires restent câblées après chaque nouveau rendu de la toolbar', () => {
   const toolbar = functionBlock('renderStrategyToolbar', 'updateStrategyToolbar');
   const toolbarEvents = appSource.slice(
-    appSource.indexOf('// Strategy/view toolbar'),
+    appSource.indexOf('// Strategy toolbar'),
     appSource.indexOf('// Close dropdowns on outside click'),
   );
 
@@ -154,17 +159,14 @@ test('les actions secondaires restent câblées après chaque nouveau rendu de l
   assert.match(toolbarEvents, /closest\('#btn-merge-selection'\)[\s\S]{0,160}mergeSelectedDeployPolicies\(\)/);
 });
 
-test('Vue reste une projection indépendante de la stratégie et de la génération', () => {
-  const applyView = functionBlock('refreshDeployViewPolicies', '_updateMergeSelectionBtn');
+test('la préparation des policies devient automatique sans changer la génération', () => {
+  const deployView = functionBlock('deploy', 'uploadConf');
   const applyStrategy = functionBlock('applyPolicyStrategyPreview', 'collectMissingObjects');
   const generate = functionBlock('generateDeployConf');
 
-  assert.match(applyView, /deployState\.viewPolicies\s*=/);
-  assert.doesNotMatch(applyView, /deployState\.analyzed\s*=/);
+  assert.match(deployView, /ws === 4[\s\S]{0,220}analyzeDeployPolicies\(\)/);
   assert.match(applyStrategy, /preview\.strategies\[name\]\.policies/);
-  assert.doesNotMatch(applyStrategy, /bruteMode\s*=\s*'off'/);
   assert.match(generate, /deployState\.analyzed/);
-  assert.doesNotMatch(generate, /viewPolicies/);
   assert.match(appSource, /activatePolicyStrategyScope\(scopeBtn\.dataset\.strategyScope\)/);
 });
 

@@ -64,7 +64,7 @@ test('FF2-02 les fusions frontend conservent une dimension fixe sûre', () => {
 });
 
 test('FF2-02 la fusion par policyId ne mélange pas destinations et empreintes', () => {
-  const byPolicy = functionBlock('mergeByPolicyId', 'renderRiskPanel');
+  const byPolicy = functionBlock('mergeByPolicyId', 'normalizeInternetMerge');
   assert.match(byPolicy, /serviceSetKey\(p\)/);
   assert.match(byPolicy, /destinationKey/);
 });
@@ -72,7 +72,7 @@ test('FF2-02 la fusion par policyId ne mélange pas destinations et empreintes',
 test('les fusions multi-destination conservent tous les candidats détectés', () => {
   assert.ok(source.includes('function mergeDestinationDetectionCandidates'), 'fusion des candidats absente');
   const context = frontendContext(
-    functionBlock('mergeByPolicyId', 'renderRiskPanel'),
+    functionBlock('mergeByPolicyId', 'normalizeInternetMerge'),
     functionBlock('mergeDestinationDetectionCandidates', 'syncHostCell'),
     functionBlock('serviceSetKey', 'groupByInterfacePair'),
     functionBlock('mergeServices', 'syncMergedServiceMetadata'),
@@ -104,7 +104,7 @@ test('FF2-02 les fusions frontend restent séparées sur des tuples non rectangu
     functionBlock('normalizeInternetMerge', 'mergeByService'),
     functionBlock('mergeByService', 'mergeByDestination'),
     functionBlock('mergeByDestination', 'applyMerge'),
-    functionBlock('mergeByPolicyId', 'renderRiskPanel'),
+    functionBlock('mergeByPolicyId', 'normalizeInternetMerge'),
   );
   const aDnsX = policy('A', 'X', 'DNS', 'UDP/53');
   const bDnsY = policy('B', 'Y', 'DNS', 'UDP/53');
@@ -134,7 +134,7 @@ test('FF2-02 les fusions Internet produisent le contrat all explicite', () => {
     functionBlock('normalizeInternetMerge', 'mergeByService'),
     functionBlock('mergeByService', 'mergeByDestination'),
     functionBlock('mergeByDestination', 'applyMerge'),
-    functionBlock('mergeByPolicyId', 'renderRiskPanel'),
+    functionBlock('mergeByPolicyId', 'normalizeInternetMerge'),
   );
   const first = { ...policy('A', '203.0.113.10', 'HTTPS', 'TCP/443'), dstType: 'public', _isWan: true };
   const second = { ...policy('A', '198.51.100.20', 'HTTPS', 'TCP/443'), dstType: 'public', _isWan: true };
@@ -168,7 +168,7 @@ test('FF2-02 les fusions séparent actions et paires d’interfaces', () => {
     functionBlock('normalizeInternetMerge', 'mergeByService'),
     functionBlock('mergeByService', 'mergeByDestination'),
     functionBlock('mergeByDestination', 'applyMerge'),
-    functionBlock('mergeByPolicyId', 'renderRiskPanel'),
+    functionBlock('mergeByPolicyId', 'normalizeInternetMerge'),
   );
   const accept = { ...policy('A', 'X', 'HTTPS', 'TCP/443'), action: 'accept', _action: 'accept' };
   const deny = { ...policy('A', 'X', 'HTTPS', 'TCP/443'), action: 'deny', _action: 'deny' };
@@ -200,7 +200,7 @@ test('FF2-02 les fusions multi-subnet sans hôtes restent en mode subnet', () =>
     functionBlock('normalizeInternetMerge', 'mergeByService'),
     functionBlock('mergeByService', 'mergeByDestination'),
     functionBlock('mergeByDestination', 'applyMerge'),
-    functionBlock('mergeByPolicyId', 'renderRiskPanel'),
+    functionBlock('mergeByPolicyId', 'normalizeInternetMerge'),
   );
   const first = policy('10.0.0.0/24', '10.0.10.0/24', 'HTTPS', 'TCP/443');
   const second = policy('10.0.1.0/24', '10.0.10.0/24', 'HTTPS', 'TCP/443');
@@ -225,7 +225,7 @@ test('FF2-02 les fusions multi-scope conservent les modes hôtes valides', () =>
     functionBlock('normalizeInternetMerge', 'mergeByService'),
     functionBlock('mergeByService', 'mergeByDestination'),
     functionBlock('mergeByDestination', 'applyMerge'),
-    functionBlock('mergeByPolicyId', 'renderRiskPanel'),
+    functionBlock('mergeByPolicyId', 'normalizeInternetMerge'),
   );
   const first = { ...policy('10.0.0.0/24', '10.0.10.0/24', 'HTTPS', 'TCP/443'), srcHosts: ['10.0.0.10'], _srcMode: 'hosts' };
   const second = { ...policy('10.0.1.0/24', '10.0.10.0/24', 'HTTPS', 'TCP/443'), srcHosts: ['10.0.1.10'], _srcMode: 'hosts' };
@@ -257,7 +257,7 @@ test('FF2-02 les fusions conservent NAT et noms d’adresses décidés', () => {
     functionBlock('normalizeInternetMerge', 'mergeByService'),
     functionBlock('mergeByService', 'mergeByDestination'),
     functionBlock('mergeByDestination', 'applyMerge'),
-    functionBlock('mergeByPolicyId', 'renderRiskPanel'),
+    functionBlock('mergeByPolicyId', 'normalizeInternetMerge'),
   );
   const first = { ...policy('10.0.0.0/24', '10.0.10.0/24', 'HTTPS', 'TCP/443'), _nat: true, _srcAddrName: 'CUSTOM-SRC', _dstAddrName: 'CUSTOM-DST' };
   const second = { ...policy('10.0.1.0/24', '10.0.10.0/24', 'HTTPS', 'TCP/443'), _nat: true, _srcAddrName: 'CUSTOM-SRC', _dstAddrName: 'CUSTOM-DST' };
@@ -279,7 +279,7 @@ test('FF2-02 la fusion policyId sépare strictement LAN et WAN', () => {
     functionBlock('mergeServices', 'syncMergedServiceMetadata'),
     functionBlock('syncMergedServiceMetadata', 'updateNoRcvdToggleBtn'),
     functionBlock('normalizeInternetMerge', 'mergeByService'),
-    functionBlock('mergeByPolicyId', 'renderRiskPanel'),
+    functionBlock('mergeByPolicyId', 'normalizeInternetMerge'),
   );
   const lan = policy('10.0.0.0/24', '10.0.10.0/24', 'HTTPS', 'TCP/443');
   const wan = { ...policy('10.0.0.0/24', '203.0.113.10', 'HTTPS', 'TCP/443'), dstType: 'public', _isWan: true };
