@@ -1802,13 +1802,30 @@ function strategyMetadata(origins, side, values) {
       addrFound: side === 'src' ? !!policy.analysis?.srcAddr?.found : !!policy.analysis?.dstAddr?.found,
     });
   }
-  return values.map(value => ({
-    subnet: value,
-    hosts: [...new Set(index.get(value)?.hosts || [])].sort(),
-    useSubnet: index.get(value)?.useSubnet !== false,
-    addrName: index.get(value)?.addrName || '',
-    addrFound: !!index.get(value)?.addrFound,
-  }));
+  return values.map(value => {
+    const matchingOrigin = origins.find(origin => (side === 'src' ? origin.srcSubnet : origin.dstTarget) === value);
+    const template = matchingOrigin?._template || {};
+    const publicHost = side === 'dst'
+      && (template.dstType === 'public' || template._isWan === true)
+      && !String(value).includes('/')
+      && !!parseCidr(`${value}/32`);
+    if (publicHost) {
+      return {
+        subnet: value,
+        hosts: [value],
+        useSubnet: false,
+        addrName: template._dstHostNames?.[value] || '',
+        addrFound: (template._dstHostsFound || []).includes(value),
+      };
+    }
+    return {
+      subnet: value,
+      hosts: [...new Set(index.get(value)?.hosts || [])].sort(),
+      useSubnet: index.get(value)?.useSubnet !== false,
+      addrName: index.get(value)?.addrName || '',
+      addrFound: !!index.get(value)?.addrFound,
+    };
+  });
 }
 
 function strategyUmbrella(origins, strategy) {
@@ -1822,6 +1839,16 @@ function strategyUmbrella(origins, strategy) {
   const services = [...serviceMap].sort(([a], [b]) => a.localeCompare(b)).map(([, service]) => service);
   const sourceMetadata = strategyMetadata(origins, 'src', sources);
   const destinationMetadata = strategyMetadata(origins, 'dst', destinations);
+  const internetServiceSignatures = new Map();
+  for (const origin of origins) {
+    const signature = strategyServiceSetKey(origin.analysis?.services || []);
+    if (!internetServiceSignatures.has(origin.srcSubnet)) internetServiceSignatures.set(origin.srcSubnet, new Set());
+    internetServiceSignatures.get(origin.srcSubnet).add(signature);
+  }
+  const internetAllProven = [...internetServiceSignatures.values()].every(signatures => signatures.size === 1);
+  const internetAllExpansion = (base.dstType === 'public' || base._isWan === true)
+    && internetAllProven
+    && (base._dstUseAll === true || destinations.filter(destination => destination !== 'all').length > 10);
   const submittedOrigins = origins.map(origin => ({
     srcSubnet: origin.srcSubnet,
     dstTarget: origin.dstTarget,
@@ -1838,7 +1865,8 @@ function strategyUmbrella(origins, strategy) {
     dstTargets: destinations,
     _isMultiDst: destinations.length > 1,
     _multiDstSubnets: destinations.length > 1 ? destinationMetadata : undefined,
-    _dstUseAll: false,
+    _dstUseAll: internetAllExpansion,
+    _internetAllExpansion: internetAllExpansion,
     srcHosts: [...new Set(sourceMetadata.flatMap(item => item.hosts))].sort(),
     dstHosts: [...new Set(destinationMetadata.flatMap(item => item.hosts))].sort(),
     _use32Src: sources.length === 1 && sourceMetadata[0]?.useSubnet === false,
@@ -1996,6 +2024,7 @@ function strategyMetrics(originalPolicies, policies) {
     observed: observed.size,
     allowed: allowed.size,
     additional,
+    representationExpansions: policies.filter(policy => policy?._internetAllExpansion === true).length,
     expansion,
     expansionPercent: expansion * 100,
     examples: additionalKeys.slice(0, 6).map(key => {
@@ -2046,7 +2075,7 @@ function buildPolicyStrategyPreviews(policies, { scope = 'all' } = {}) {
 
 function strategyMetricsShapeValid(metrics) {
   if (!metrics || typeof metrics !== 'object' || Array.isArray(metrics)) return false;
-  const integerFields = ['before', 'after', 'observed', 'allowed', 'additional'];
+  const integerFields = ['before', 'after', 'observed', 'allowed', 'additional', 'representationExpansions'];
   if (integerFields.some(field => !Number.isInteger(metrics[field]) || metrics[field] < 0)) return false;
   if (!Number.isInteger(metrics.saved) || metrics.saved !== metrics.before - metrics.after) return false;
   if (typeof metrics.savedPercent !== 'number' || !Number.isFinite(metrics.savedPercent)) return false;
@@ -2063,7 +2092,7 @@ function strategyMetricsShapeValid(metrics) {
 
 function strategyMetricsEqual(left, right) {
   if (!strategyMetricsShapeValid(left) || !strategyMetricsShapeValid(right)) return false;
-  const fields = ['before', 'after', 'saved', 'observed', 'allowed', 'additional'];
+  const fields = ['before', 'after', 'saved', 'observed', 'allowed', 'additional', 'representationExpansions'];
   if (fields.some(field => left[field] !== right[field])) return false;
   return Math.abs(left.savedPercent - right.savedPercent) <= 1e-7
     && Math.abs(left.expansion - right.expansion) <= 1e-9
@@ -2164,6 +2193,7 @@ function validatePolicyStrategyBatch(policies, { scope, strategy, metrics } = {}
     observed: observed.size,
     allowed: allowed.size,
     additional: additional.length,
+    representationExpansions: list.filter(policy => policy?._internetAllExpansion === true).length,
     expansion: computedExpansion,
     expansionPercent: computedExpansion * 100,
   };
@@ -2187,6 +2217,7 @@ function validatePolicyStrategyBatch(policies, { scope, strategy, metrics } = {}
       && (authoritativeMetrics?.allowed !== computedMetrics.allowed
         || authoritativeMetrics?.observed !== computedMetrics.observed
         || authoritativeMetrics?.additional !== computedMetrics.additional
+        || authoritativeMetrics?.representationExpansions !== computedMetrics.representationExpansions
         || Math.abs(authoritativeMetrics?.expansion - computedMetrics.expansion) > 1e-9
         || Math.abs(authoritativeMetrics?.expansionPercent - computedMetrics.expansionPercent) > 1e-7)) {
     issues.push({ level: 'error', code: 'POLICY_STRATEGY_METRICS_INVALID', msg: 'Métriques de stratégie incompatibles avec les tuples recalculés' });
@@ -2208,11 +2239,18 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf, observedFlows 
     // Source address
     const srcAddrMatch = findAddress(p.srcSubnet, addresses);
     // Destination address
+    const publicHost = p.dstType === 'public'
+      && p.dstTarget !== 'all'
+      && !String(p.dstTarget).includes('/')
+      && !!parseCidr(`${p.dstTarget}/32`)
+      ? p.dstTarget : null;
+    const effectiveDstHosts = [...new Set([...(p.dstHosts || []), ...(publicHost ? [publicHost] : [])])];
+    const destinationCidr = publicHost ? `${publicHost}/32` : p.dstTarget;
     let dstAddrMatch;
-    if (p.dstType === 'public') {
+    if (p.dstType === 'public' && (p._dstUseAll === true || p.dstTarget === 'all')) {
       dstAddrMatch = { found: true, name: 'all', source: 'builtin' };
     } else {
-      dstAddrMatch = findAddress(p.dstTarget, addresses);
+      dstAddrMatch = findAddress(destinationCidr, addresses);
     }
     const dstDetectedSubnets = p.dstType === 'private'
       ? resolveDestinationSubnets(p.dstHosts, fortiConfig)
@@ -2502,7 +2540,7 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf, observedFlows 
     }
     const dstHostNames = {};
     const dstHostsFound = new Set();
-    for (const h of (p.dstHosts || [])) {
+    for (const h of effectiveDstHosts) {
       const m = findAddress(`${h}/32`, addresses);
       if (m.found) { dstHostNames[h] = m.name; dstHostsFound.add(h); }
     }
@@ -2527,16 +2565,17 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf, observedFlows 
 
     return {
       ...p,
+      dstHosts: effectiveDstHosts,
       _dstDetectedSubnets: dstDetectedSubnets,
       _dstMode: defaultDestinationMode,
-      _use32Dst: defaultDestinationMode === 'hosts' ? true : p._use32Dst,
+      _use32Dst: defaultDestinationMode === 'hosts' || !!publicHost ? true : p._use32Dst,
       _srcHostNames: Object.keys(srcHostNames).length ? { ...p._srcHostNames, ...srcHostNames } : (p._srcHostNames || undefined),
       _dstHostNames: Object.keys(dstHostNames).length ? { ...p._dstHostNames, ...dstHostNames } : (p._dstHostNames || undefined),
       _srcHostsFound: srcHostsFound.size ? [...srcHostsFound] : (p._srcHostsFound || undefined),
       _dstHostsFound: dstHostsFound.size ? [...dstHostsFound] : (p._dstHostsFound || undefined),
       analysis: {
         srcAddr:    { ...srcAddrMatch,  cidr: p.srcSubnet, suggestedName: suggestAddrName(p.srcSubnet) },
-        dstAddr:    { ...dstAddrMatch,  cidr: p.dstTarget, suggestedName: suggestAddrName(p.dstTarget) },
+        dstAddr:    { ...dstAddrMatch,  cidr: destinationCidr, suggestedName: suggestAddrName(destinationCidr) },
         services:   serviceItems,
         srcIface:       srcIfaceName   || null,
         srcIfaceSource: srcIfaceSource,
@@ -2857,7 +2896,9 @@ function policyRepresentationIssue(policy) {
   if ((policy.dstTarget === 'all' || policy._dstUseAll === true)
       && policy.dstType !== 'public' && policy._isWan !== true) return 'destination all interdite hors WAN';
   if (policy.dstTarget === 'all' && policy._dstUseAll !== true) return 'destination all non confirmée';
-  if (policy.dstTarget !== 'all' && policy._dstUseAll === true) return 'destination spécifique marquée all';
+  if (policy._internetAllExpansion !== undefined && typeof policy._internetAllExpansion !== 'boolean') {
+    return '_internetAllExpansion mal formé';
+  }
   const sourceScopes = policyAffinityScopeCount(policy, 'src');
   const destinationScopes = policyAffinityScopeCount(policy, 'dst');
   if (sourceScopes > 10000 || destinationScopes > 10000) return 'cardinalité de scope trop volumineuse';

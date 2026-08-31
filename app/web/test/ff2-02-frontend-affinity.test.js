@@ -148,11 +148,12 @@ test('FF2-02 les fusions Internet produisent le contrat all explicite', () => {
 
     const result = merge([structuredClone(first), structuredClone(second)]);
     assert.equal(result.length, 1);
-    assert.equal(result[0].dstTarget, 'all');
-    assert.deepEqual(Array.from(result[0].dstTargets), ['all']);
+    assert.ok(['203.0.113.10', '198.51.100.20'].includes(result[0].dstTarget));
+    assert.deepEqual(new Set(result[0].dstTargets), new Set(['203.0.113.10', '198.51.100.20']));
     assert.equal(result[0]._dstUseAll, true);
-    assert.equal(result[0]._isMultiDst, false);
-    assert.equal(result[0]._multiDstSubnets, undefined);
+    assert.equal(result[0]._internetAllExpansion, true);
+    assert.equal(result[0]._isMultiDst, true);
+    assert.equal(result[0]._multiDstSubnets.length, 2);
     assert.equal(result[0]._use32Dst, false);
     const shape = validatePolicyDecisionShapes(JSON.parse(JSON.stringify(result)));
     assert.equal(shape.ok, true, JSON.stringify(shape.issues));

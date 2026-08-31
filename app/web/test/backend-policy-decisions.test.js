@@ -313,7 +313,7 @@ test('la génération restitue les causes backend et marque uniquement les polic
   assert.doesNotMatch(source, /_acceptedRiskIssues/);
   assert.doesNotMatch(source, /À risque/);
   assert.doesNotMatch(source, /_backendValidated[\s\S]*Prête/);
-  assert.match(source, /Complète/);
+  assert.match(source, /Policy complète/);
   assert.match(source, /delete p\._backendIssues/);
 });
 
