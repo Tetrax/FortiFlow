@@ -15,6 +15,10 @@ function httpsService() {
   return { label: 'HTTPS', name: 'HTTPS', found: true, isNamed: true, reuseKeys: ['TCP/443'] };
 }
 
+function httpsUdpService() {
+  return { label: 'HTTPS_UDP', name: 'HTTPS_UDP', found: true, isNamed: true, reuseKeys: ['UDP/443'] };
+}
+
 function policy(destination, overrides = {}) {
   return {
     srcSubnet: '10.41.0.0/16',
@@ -81,6 +85,58 @@ test('LAN vers Internet générique conserve les IP observées mais recommande a
   assert.equal(balanced.metrics.additional, 0, 'Additional reste la métrique de fusion bornée');
   assert.equal(balanced.metrics.representationExpansions, 1, 'Internet/all est compté séparément');
   assert.equal(validatePolicyDecisionShapes([result]).ok, true);
+});
+
+test('HTTPS_UDP garde Internet/all entre Équilibrée et Compacte pour la même evidence destination', () => {
+  const observedDestinations = Array.from({ length: 12 }, (_, index) => `203.0.113.${index + 1}`);
+  const https = httpsService();
+  const httpsUdp = httpsUdpService();
+  const policies = Array.from({ length: 12 }, (_, index) => {
+    const services = index < 6 ? [httpsUdp] : [https, httpsUdp];
+    return policy(`198.51.100.${index + 1}/32`, {
+      dstHosts: observedDestinations,
+      services: services.map(service => service.label),
+      ports: [443],
+      protos: services.length === 1 ? ['UDP'] : ['TCP', 'UDP'],
+      analysis: { services },
+    });
+  });
+  const preview = buildPolicyStrategyPreviews(policies, { scope: 'internet' });
+  const exactHttpsUdp = strategy => strategy.policies.find(item =>
+    item.analysis.services.length === 1 && item.analysis.services[0].label === 'HTTPS_UDP');
+  const balanced = exactHttpsUdp(preview.strategies.balanced);
+  const compact = exactHttpsUdp(preview.strategies.compact);
+
+  assert.ok(balanced);
+  assert.ok(compact);
+  assert.deepEqual(compact.dstHosts, balanced.dstHosts);
+  assert.deepEqual(compact.dstHosts, [...observedDestinations].sort());
+  assert.equal(balanced.dstType, compact.dstType);
+  assert.equal(balanced._isWan, compact._isWan);
+  assert.equal(balanced._dstUseAll, true);
+  assert.equal(compact._dstUseAll, true);
+});
+
+test('HTTPS_UDP peut quitter Internet/all quand les destinations observées changent réellement', () => {
+  const httpsUdp = httpsUdpService();
+  const previewFor = count => {
+    const observedDestinations = Array.from({ length: count }, (_, index) => `203.0.113.${index + 1}`);
+    return buildPolicyStrategyPreviews(
+      observedDestinations.map((host, index) => policy(`198.51.100.${index + 1}/32`, {
+        dstHosts: observedDestinations,
+        services: ['HTTPS_UDP'], ports: [443], protos: ['UDP'],
+        analysis: { services: [httpsUdp] },
+      })),
+      { scope: 'internet' },
+    );
+  };
+  const genericInternet = previewFor(12);
+  const boundedInternet = previewFor(3);
+
+  for (const strategy of ['balanced', 'compact']) {
+    assert.equal(genericInternet.strategies[strategy].policies[0]._dstUseAll, true, strategy);
+    assert.equal(boundedInternet.strategies[strategy].policies[0]._dstUseAll, false, strategy);
+  }
 });
 
 test('un service Internet borné à quelques IP reste en destinations spécifiques /32', () => {

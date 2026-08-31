@@ -6101,23 +6101,27 @@ function dstTargetCell(p, idx) {
   if (p._isMultiDst && p._multiDstSubnets?.length) {
     const subs = p._multiDstSubnets;
     const firstTwo = subs.slice(0, 2).map(s => escHtml(s.subnet));
-    const more = subs.length > 2 ? ` <span class="dst-count-badge">+${subs.length - 2}</span>` : '';
-    return `<span class="mono" style="font-size:10px">${firstTwo.join(', ')}${more}</span>`;
+    const moreCount = subs.length - 2;
+    const more = moreCount > 0
+      ? ` <span class="dst-count-badge" title="${moreCount} destinations supplémentaires">+${moreCount}</span>`
+      : '';
+    return `<span class="policy-network-value">${firstTwo.join(', ')}${more}</span>`;
   }
 
   const label = p.dstTarget === 'all' ? 'all (internet)' : p.dstTarget;
   const ips   = p._dstIPs;
   const dstHosts = p.dstHosts || [];
-  const dstMode  = p._dstMode || (p._use32Dst ? 'hosts' : 'subnet');
 
   let modeBadge = '';
   if (p.dstType === 'private' && dstHosts.length > 0) {
-    modeBadge = ` <span class="dst-count-badge" title="${dstHosts.length} h\u00f4tes">${dstHosts.length}h</span>`;
+    modeBadge = ` <span class="dst-count-badge" title="${dstHosts.length} hôtes de destination observés">${dstHosts.length} hôte${dstHosts.length > 1 ? 's' : ''}</span>`;
   }
 
-  const ipsBadge = ips && ips.length > 0 ? ` <span class="dst-count-badge">${ips.length} IPs</span>` : '';
+  const ipsBadge = ips && ips.length > 0
+    ? ` <span class="dst-count-badge" title="${ips.length} IPs de destination associées">${ips.length} IPs</span>`
+    : '';
 
-  return `<span class="mono">${escHtml(label)}</span>${modeBadge}${ipsBadge}`;
+  return `<span class="policy-network-value">${escHtml(label)}</span>${modeBadge}${ipsBadge}`;
 }
 
 // Legacy dstTargetCell for contexts that still need full inline controls
@@ -8182,8 +8186,8 @@ function renderDeployPolicies(analyzed, resetPage = true) {
     // Interfaces — read-only text, editable in drawer
     let srcIntf, dstIntf;
     if (isAgg) {
-      srcIntf = `<span class="mono" style="font-size:10px;color:var(--accent2)">${escHtml((p._srcintfList || []).join(', ') || '—')}</span>`;
-      dstIntf = `<span class="mono" style="font-size:10px;color:var(--accent2)">${escHtml((p._dstintfList || []).join(', ') || '—')}</span>`;
+      srcIntf = `<span class="policy-interface-value is-aggregate">${escHtml((p._srcintfList || []).join(', ') || '—')}</span>`;
+      dstIntf = `<span class="policy-interface-value is-aggregate">${escHtml((p._dstintfList || []).join(', ') || '—')}</span>`;
     } else {
       const srcLabel = p._srcintf || 'auto';
       const dstLabel = p._dstintf || 'auto';
@@ -8192,8 +8196,8 @@ function renderDeployPolicies(analyzed, resetPage = true) {
       const dstIfSrc = p._dstIfaceSource || 'auto';
       const srcIfBadge = srcIfSrc === 'sdwan' ? '<span class="interface-provenance-dot sdwan" title="Interface SD-WAN"></span>' : '';
       const dstIfBadge = dstIfSrc === 'sdwan' ? '<span class="interface-provenance-dot sdwan" title="Interface SD-WAN"></span>' : '';
-      srcIntf = `<span class="mono" style="font-size:10px;color:${p._srcintf ? 'var(--text)' : 'var(--text2)'}">${escHtml(srcLabel)}${srcIfBadge}</span>`;
-      dstIntf = `<span class="mono" style="font-size:10px;color:${p._dstintf ? 'var(--text)' : 'var(--text2)'}">${escHtml(dstLabel)}${sameWarn}${dstIfBadge}</span>`;
+      srcIntf = `<span class="policy-interface-value${p._srcintf ? '' : ' is-auto'}">${escHtml(srcLabel)}${srcIfBadge}</span>`;
+      dstIntf = `<span class="policy-interface-value${p._dstintf ? '' : ' is-auto'}">${escHtml(dstLabel)}${sameWarn}${dstIfBadge}</span>`;
     }
 
     const actionBadge = (p._action === 'deny')
@@ -8217,13 +8221,17 @@ function renderDeployPolicies(analyzed, resetPage = true) {
 
     // Src subnet — compact
     const srcSubnetText = p.srcSubnets && p.srcSubnets.length > 1
-      ? `${escHtml(p.srcSubnets[0])} <span class="dst-count-badge">+${p.srcSubnets.length - 1}</span>`
+      ? `${escHtml(p.srcSubnets[0])} <span class="dst-count-badge" title="${p.srcSubnets.length - 1} sources supplémentaires">+${p.srcSubnets.length - 1}</span>`
       : `${escHtml(p.srcSubnet)}${mergeBadge}`;
 
     // Mode indicator
-    const srcMode = p._srcMode || (p._use32Src ? 'hosts' : 'subnet');
     const srcHostCount = (p.srcHosts || []).length;
-    const srcModeBadge = srcHostCount > 0 ? ` <span class="dst-count-badge">${srcHostCount}h</span>` : '';
+    const srcHostTitle = srcHostCount > 1
+      ? `${srcHostCount} hôtes source observés`
+      : '1 hôte source observé';
+    const srcModeBadge = srcHostCount > 0
+      ? ` <span class="dst-count-badge" title="${srcHostTitle}">${srcHostCount} hôte${srcHostCount > 1 ? 's' : ''}</span>`
+      : '';
 
     const backendIssues = p._backendIssues || [];
     const backendIncomplete = p._backendIssueKind === 'incomplete';
@@ -8244,7 +8252,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
           <input type="checkbox" ${mergeChkAttr} title="Sélectionner pour fusion">
           <button class="btn-del-item deploy-del-policy policy-row-secondary" data-idx="${idx}" ${isAgg ? `data-seq-members="${p._sequenceMembers.join(',')}"` : ''} title="Supprimer">✕</button>
         </td>
-        <td class="policy-main-cell"><div class="policy-primary-line">${actionBadge}${dirBadge}${warnBadge}${seqBadge}${isScan ? '<span class="scan-badge">⚠ silencieux</span>' : ''}<span class="policy-primary-value">${srcSubnetText}${srcModeBadge}</span><span class="policy-session-inline">${fmtNum(p.sessions || 0)}</span></div></td>
+        <td class="policy-main-cell"><div class="policy-primary-line">${actionBadge}${dirBadge}${warnBadge}${seqBadge}${isScan ? '<span class="scan-badge">⚠ silencieux</span>' : ''}<span class="policy-primary-value">${srcSubnetText}${srcModeBadge}</span><span class="policy-session-inline" title="${fmtNum(p.sessions || 0)} sessions observées">${fmtNum(p.sessions || 0)}</span></div></td>
         <td class="policy-main-cell">${dstTargetCell(p, idx)}</td>
         <td class="svc-cell policy-services-cell" data-svc-idx="${idx}">${svcCells}</td>
         <td class="policy-interfaces-cell">${interfaceSummary}</td>
@@ -8311,7 +8319,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
           ${thSort('Destination', 'dst')}
           ${thSort('Services', 'services')}
           <th>Interfaces</th>
-          <th>Objets FortiGate</th>
+          <th class="policy-objects-header">Objets FortiGate</th>
           </tr></thead>
         <tbody>${rows}</tbody>
       </table>

@@ -1839,6 +1839,12 @@ function strategyUmbrella(origins, strategy) {
   const services = [...serviceMap].sort(([a], [b]) => a.localeCompare(b)).map(([, service]) => service);
   const sourceMetadata = strategyMetadata(origins, 'src', sources);
   const destinationMetadata = strategyMetadata(origins, 'dst', destinations);
+  const observedInternetDestinations = [...new Set(
+    destinationMetadata.flatMap(item => item.hosts || []).filter(Boolean),
+  )];
+  const internetDestinationEvidenceCount = observedInternetDestinations.length > 0
+    ? observedInternetDestinations.length
+    : destinations.filter(destination => destination !== 'all').length;
   const internetServiceSignatures = new Map();
   for (const origin of origins) {
     const signature = strategyServiceSetKey(origin.analysis?.services || []);
@@ -1848,7 +1854,7 @@ function strategyUmbrella(origins, strategy) {
   const internetAllProven = [...internetServiceSignatures.values()].every(signatures => signatures.size === 1);
   const internetAllExpansion = (base.dstType === 'public' || base._isWan === true)
     && internetAllProven
-    && (base._dstUseAll === true || destinations.filter(destination => destination !== 'all').length > 10);
+    && (base._dstUseAll === true || internetDestinationEvidenceCount > 10);
   const submittedOrigins = origins.map(origin => ({
     srcSubnet: origin.srcSubnet,
     dstTarget: origin.dstTarget,

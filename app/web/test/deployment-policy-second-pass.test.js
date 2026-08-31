@@ -76,3 +76,41 @@ test('les preuves Internet incluent les cibles publiques des stratégies', () =>
 test('le passage manuel à all marque explicitement l’expansion de représentation', () => {
   assert.match(APP, /_internetAllExpansion\s*=\s*useAll/);
 });
+
+test('la table harmonise la typographie et réserve le monospace aux valeurs techniques', () => {
+  const render = sourceBlock('function renderDeployPolicies(', 'function syncNoRcvdInfoBtn(');
+  const destination = sourceBlock('function dstTargetCell(', 'function dstTargetCellFull(');
+
+  assert.match(destination, /class="policy-network-value"/);
+  assert.match(render, /class="policy-interface-value/);
+  assert.match(CSS, /\.deploy-policy-table td\s*{[^}]*font-size:\s*12px[^}]*line-height:\s*1\.4/);
+  assert.match(CSS, /\.service-summary-item\s*{[^}]*font-size:\s*12px/);
+  assert.match(CSS, /\.policy-interface-value\s*{[^}]*font-size:\s*12px/);
+  assert.match(CSS, /\.policy-session-inline\s*{[^}]*font-family:\s*inherit/);
+  assert.match(CSS, /\.policy-network-value\s*{[^}]*font-family:\s*var\(--mono\)[^}]*font-size:\s*12px/);
+  assert.match(CSS, /\.policy-object-pair\s*{[^}]*font-family:\s*var\(--mono\)[^}]*font-size:\s*12px/);
+});
+
+test('le groupe Objets FortiGate est centré sans centrer ses libellés longs', () => {
+  const render = sourceBlock('function renderDeployPolicies(', 'function syncNoRcvdInfoBtn(');
+
+  assert.match(render, /<th class="policy-objects-header">Objets FortiGate<\/th>/);
+  assert.match(CSS, /\.policy-objects-header\s*{[^}]*text-align:\s*center/);
+  assert.match(CSS, /\.policy-objects-cell\s*{[^}]*text-align:\s*center/);
+  assert.match(CSS, /\.policy-object-pair\s*{[^}]*width:\s*fit-content[^}]*max-width:\s*100%[^}]*margin-inline:\s*auto/);
+  assert.match(CSS, /\.policy-object-pair \.inline-editable\s*{[^}]*text-align:\s*left/);
+});
+
+test('les compteurs et finitions visuelles restent explicites et secondaires', () => {
+  const render = sourceBlock('function renderDeployPolicies(', 'function syncNoRcvdInfoBtn(');
+  const destination = sourceBlock('function dstTargetCell(', 'function dstTargetCellFull(');
+
+  assert.match(render, /hôtes source observés/);
+  assert.match(render, /\$\{srcHostCount\} hôte/);
+  assert.doesNotMatch(render, /\$\{srcHostCount\}h/);
+  assert.match(destination, /destinations supplémentaires/);
+  assert.match(CSS, /\.dir-badge\.wan\s*{[^}]*opacity:\s*\.72[^}]*padding:\s*1px 5px/);
+  assert.match(CSS, /\.object-provenance-dot,[\s\S]*?\.interface-provenance-dot\s*{[^}]*width:\s*6px[^}]*height:\s*6px/);
+  assert.match(CSS, /#btn-merge-selection\s*{[^}]*font-size:\s*10px/);
+  assert.match(CSS, /\.btn-merge-group\s*{[^}]*opacity:\s*\.55/);
+});
