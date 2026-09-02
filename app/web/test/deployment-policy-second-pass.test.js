@@ -83,13 +83,15 @@ test('les valeurs multi-IP restent tronquées sur une ligne sans modifier la hau
   assert.match(CSS, /\.policy-object-pair\s+\.inline-editable[^}]*overflow:\s*hidden/);
 });
 
-test('le compteur de sessions reste explicite sans ajouter de colonne', () => {
+test('le compteur de sessions occupe une micro-colonne centrée entre source et destination', () => {
   const render = sourceBlock('function renderDeployPolicies(', 'function syncNoRcvdInfoBtn(');
 
   assert.match(render, /const sessionCount = p\.sessions \|\| 0/);
   assert.match(render, /session\$\{sessionCount === 1 \? '' : 's'\} observée\$\{sessionCount === 1 \? '' : 's'\}/);
-  assert.match(render, />\$\{fmtNum\(sessionCount\)\} sess\.<\/span>/);
-  assert.doesNotMatch(render, /<th[^>]*>Sessions<\/th>/);
+  assert.match(render, /<th class="policy-session-header" title="Sessions observées">SESS\.<\/th>/);
+  assert.match(render, /<td class="policy-session-cell"><span class="policy-session-inline" title="\$\{sessionTitle\}">\$\{fmtNum\(sessionCount\)\}<\/span><\/td>/);
+  assert.doesNotMatch(render, /\$\{fmtNum\(sessionCount\)\} sess\./);
+  assert.match(CSS, /\.policy-session-header,\s*\.policy-session-cell\s*{[^}]*width:\s*52px[^}]*text-align:\s*center\s*!important[^}]*white-space:\s*nowrap/);
 });
 
 test('le passage manuel à all marque explicitement l’expansion de représentation', () => {

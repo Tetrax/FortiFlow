@@ -1052,7 +1052,9 @@ td.mono { font-family: var(--mono); }
 .policy-main-cell { min-width: 170px; white-space: nowrap !important; }
 .policy-primary-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .policy-primary-value { font-family: var(--mono); font-size: 12px; line-height: inherit; color: var(--text); }
-.policy-session-inline { margin-left: auto; color: var(--text2); font-family: inherit; font-size: 11px; line-height: inherit; }
+.policy-session-header,
+.policy-session-cell { width: 52px; min-width: 52px; max-width: 52px; padding-inline: 6px !important; text-align: center !important; white-space: nowrap; }
+.policy-session-inline { color: var(--text2); font-family: inherit; font-size: 11px; line-height: inherit; }
 .policy-network-value { font-family: var(--mono); font-size: 12px; line-height: inherit; color: var(--text); }
 .policy-services-cell { min-width: 250px; max-width: 390px; white-space: nowrap !important; overflow: hidden; text-overflow: ellipsis; line-height: 1.4; }
 .service-summary-item { color: var(--text); font-size: 12px; line-height: inherit; }

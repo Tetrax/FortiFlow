@@ -8254,7 +8254,8 @@ function renderDeployPolicies(analyzed, resetPage = true) {
           <input type="checkbox" ${mergeChkAttr} title="Sélectionner pour fusion">
           <button class="btn-del-item deploy-del-policy policy-row-secondary" data-idx="${idx}" ${isAgg ? `data-seq-members="${p._sequenceMembers.join(',')}"` : ''} title="Supprimer">✕</button>
         </td>
-        <td class="policy-main-cell"><div class="policy-primary-line">${actionBadge}${dirBadge}${warnBadge}${seqBadge}${isScan ? '<span class="scan-badge">⚠ silencieux</span>' : ''}<span class="policy-primary-value">${srcSubnetText}${srcModeBadge}</span><span class="policy-session-inline" title="${sessionTitle}">${fmtNum(sessionCount)} sess.</span></div></td>
+        <td class="policy-main-cell"><div class="policy-primary-line">${actionBadge}${dirBadge}${warnBadge}${seqBadge}${isScan ? '<span class="scan-badge">⚠ silencieux</span>' : ''}<span class="policy-primary-value">${srcSubnetText}${srcModeBadge}</span></div></td>
+        <td class="policy-session-cell"><span class="policy-session-inline" title="${sessionTitle}">${fmtNum(sessionCount)}</span></td>
         <td class="policy-main-cell">${dstTargetCell(p, idx)}</td>
         <td class="svc-cell policy-services-cell" data-svc-idx="${idx}">${svcCells}</td>
         <td class="policy-interfaces-cell">${interfaceSummary}</td>
@@ -8318,6 +8319,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
         <thead><tr>
           <th class="col-hdr-chk" title="Inclure toutes les policies"><input type="checkbox" id="chk-all-deploy" title="Tout cocher / décocher"></th>
           ${thSort('Source', 'source')}
+          <th class="policy-session-header" title="Sessions observées">SESS.</th>
           ${thSort('Destination', 'dst')}
           ${thSort('Services', 'services')}
           <th>Interfaces</th>
