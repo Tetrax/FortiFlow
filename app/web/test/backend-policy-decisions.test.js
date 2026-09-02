@@ -422,7 +422,7 @@ test('les profils de sécurité vides restent optionnels pour une policy complè
   assert.match(cli, /config firewall policy/);
 });
 
-test('FF2-01 refuse une interface utilisateur absente de la configuration', () => {
+test('FF2-01 refuse une interface utilisateur absente ou stale avec une cause structurée', () => {
   const config = fortiConfig();
   const authoritative = analyzePolicies([policy()], config);
   const submitted = structuredClone(authoritative);
@@ -437,7 +437,53 @@ test('FF2-01 refuse une interface utilisateur absente de la configuration', () =
   );
 
   assert.equal(decision.ok, false);
-  assert.ok(decision.issues.some(issue => issue.code === 'INTERFACE_DECISION_INVALID'));
+  const issue = decision.issues.find(item =>
+    item.code === 'INTERFACE_DECISION_INVALID'
+      && item.field === 'srcintf'
+      && item.reason === 'unknown'
+  );
+  assert.deepEqual(issue, {
+    level: 'error',
+    code: 'INTERFACE_DECISION_INVALID',
+    msg: 'Policy #1: interface source inconnue "FORGED-INTERFACE"',
+    policyIndex: 0,
+    field: 'srcintf',
+    reason: 'unknown',
+    submittedValue: 'FORGED-INTERFACE',
+    allowedCandidates: ['LAN'],
+    observedPairs: [{ srcintf: 'LAN', dstintf: 'DMZ' }],
+  });
+});
+
+test('FF2-01 distingue une interface destination manquante', () => {
+  const config = fortiConfig();
+  const missing = policy({
+    dstTarget: '10.99.99.0/24',
+    dstHosts: ['10.99.99.20'],
+    flowDstintf: null,
+    flowDstintfs: [],
+  });
+  const evidence = observedFlow({
+    dstip: '10.99.99.20',
+    dstSubnet: '10.99.99.0/24',
+    dstintf: '',
+  });
+  const authoritative = analyzePolicies([missing], config, undefined, [evidence]);
+  const decision = applyPolicyUserDecisions(
+    authoritative,
+    structuredClone(authoritative),
+    config,
+    [evidence],
+  );
+
+  assert.equal(decision.ok, false);
+  const issue = decision.issues.find(item =>
+    item.code === 'INTERFACE_DECISION_INVALID'
+      && item.field === 'dstintf'
+      && item.reason === 'missing'
+  );
+  assert.equal(issue?.submittedValue, null);
+  assert.deepEqual(issue?.allowedCandidates, []);
 });
 
 test('FF2-01 refuse les noms de service globaux, normalisés ou en collision', () => {
@@ -773,6 +819,7 @@ test('FF2-01 refuse deux définitions différentes portant le même nom', () => 
 
   assert.equal(decision.ok, false);
   assert.ok(decision.issues.some(issue => issue.code === 'SERVICE_NAME_CONFLICT'));
+  assert.ok(!decision.issues.some(issue => issue.code === 'INTERFACE_DECISION_INVALID'));
 });
 
 test('FF2-01 le générateur refuse toute policy sans service validé', () => {
@@ -967,6 +1014,7 @@ end
 
   assert.equal(decision.ok, false);
   assert.ok(decision.issues.some(issue => issue.code === 'ADDRESS_NAME_CONFLICT'));
+  assert.ok(!decision.issues.some(issue => issue.code === 'INTERFACE_DECISION_INVALID'));
 });
 
 test('FF2-01 refuse les métadonnées imbriquées d’adresse ou groupe forgées', () => {
@@ -1090,7 +1138,13 @@ test('FF2-01 refuse une paire d’interfaces existante mais hors du scope observ
   const decision = applyPolicyUserDecisions(authoritative, submitted, config, [observedFlow()]);
 
   assert.equal(decision.ok, false);
-  assert.ok(decision.issues.some(issue => issue.code === 'INTERFACE_DECISION_INVALID'));
+  const issue = decision.issues.find(item =>
+    item.code === 'INTERFACE_DECISION_INVALID'
+      && item.field === 'srcintf'
+      && item.reason === 'out-of-scope'
+  );
+  assert.equal(issue?.submittedValue, 'DMZ');
+  assert.deepEqual(issue?.allowedCandidates, ['LAN']);
 });
 
 test('FF2-01 refuse une paire croisée jamais observée', () => {
@@ -1107,7 +1161,19 @@ test('FF2-01 refuse une paire croisée jamais observée', () => {
   ]);
 
   assert.equal(decision.ok, false);
-  assert.ok(decision.issues.some(issue => issue.code === 'INTERFACE_DECISION_INVALID'));
+  const issue = decision.issues.find(item =>
+    item.code === 'INTERFACE_DECISION_INVALID'
+      && item.field === 'interfacePair'
+      && item.reason === 'pair-unproven'
+  );
+  assert.deepEqual(issue?.submittedValue, {
+    srcintf: ['LAN'],
+    dstintf: ['ALT-DST'],
+  });
+  assert.deepEqual(issue?.observedPairs, [
+    { srcintf: 'ALT-SRC', dstintf: 'ALT-DST' },
+    { srcintf: 'LAN', dstintf: 'DMZ' },
+  ]);
 });
 
 test('FF2-01 lie le label technique et le tuple au même flux observé', () => {

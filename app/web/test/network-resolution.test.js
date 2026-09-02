@@ -166,6 +166,79 @@ end
   assert.equal(analysis.flows[0].dstSubnet, '10.99.2.34/32');
 });
 
+test('résout une destination privée depuis l’interface unique observée sans route', () => {
+  const fortiConfig = parseFortiConfig(`
+config system interface
+    edit "LAN"
+        set ip 192.168.10.1 255.255.255.0
+    next
+    edit "Interco_MPLS"
+    next
+end
+config system zone
+    edit "Z-INTERSITE"
+        set interface "Interco_MPLS"
+    next
+end
+`);
+  const analysis = buildAnalysis([
+    acceptedFlow('192.168.10.10', '10.40.0.10', 'LAN', 'Interco_MPLS'),
+  ], extractKnownSubnets(fortiConfig));
+
+  assert.equal(analysis.policies[0].flowDstintf, 'Interco_MPLS');
+  assert.deepEqual(analysis.policies[0].flowDstintfs, ['Interco_MPLS']);
+
+  const [analyzed] = analyzePolicies(
+    analysis.policies,
+    fortiConfig,
+    undefined,
+    analysis.flows,
+  );
+  assert.equal(analyzed.analysis.dstIface, 'Interco_MPLS');
+  assert.equal(analyzed.analysis.dstZone, 'Z-INTERSITE');
+  assert.equal(analyzed.analysis.dstIfaceSource, 'log');
+  assert.ok(!analyzed.analysis.missingFields.includes('dstIface'));
+});
+
+test('ne choisit aucune interface quand plusieurs destinations sont observées', () => {
+  const fortiConfig = parseFortiConfig(`
+config system interface
+    edit "LAN"
+        set ip 192.168.10.1 255.255.255.0
+    next
+    edit "REMOTE-A"
+    next
+    edit "REMOTE-B"
+    next
+end
+config router static
+    edit 1
+        set dst 10.40.0.0 255.255.255.0
+        set device "REMOTE-A"
+    next
+end
+`);
+  const analysis = buildAnalysis([
+    acceptedFlow('192.168.10.10', '10.40.0.10', 'LAN', 'REMOTE-A'),
+    acceptedFlow('192.168.10.10', '10.40.0.10', 'LAN', 'REMOTE-B'),
+  ], extractKnownSubnets(fortiConfig));
+
+  assert.equal(analysis.policies.length, 1);
+  assert.equal(analysis.policies[0].flowDstintf, null);
+  assert.deepEqual(analysis.policies[0].flowDstintfs, ['REMOTE-A', 'REMOTE-B']);
+
+  const [analyzed] = analyzePolicies(
+    analysis.policies,
+    fortiConfig,
+    undefined,
+    analysis.flows,
+  );
+  assert.equal(analyzed.analysis.dstIface, null);
+  assert.equal(analyzed.analysis.dstZone, null);
+  assert.equal(analyzed.analysis.dstIfaceSource, 'auto');
+  assert.ok(analyzed.analysis.missingFields.includes('dstIface'));
+});
+
 test('exposes the most specific detected destination subnets without promoting a broad /8', () => {
   const fortiConfig = parseFortiConfig(`
 config firewall address

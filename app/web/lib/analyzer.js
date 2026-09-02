@@ -110,7 +110,7 @@ function buildAllSubnetGroupsAndPorts(flows, topN = 25, knownSubnets = []) {
     const dstType = isPrivate(flow.dstip) ? 'private' : 'public';
     if (!dstKey) return;
     if (!sg.dsts[dstKey]) {
-      sg.dsts[dstKey] = { key: dstKey, type: dstType, ports: new Set(), protos: new Set(), services: new Set(), policyIds: new Set(), dstIPs: new Set(), srcIPs: new Set(), count: 0, sentBytes: 0, rcvdBytes: 0, noRcvdFlows: 0, noRcvdSrcIPs: new Set() };
+      sg.dsts[dstKey] = { key: dstKey, type: dstType, ports: new Set(), protos: new Set(), services: new Set(), policyIds: new Set(), dstIPs: new Set(), srcIPs: new Set(), dstIntfs: new Set(), count: 0, sentBytes: 0, rcvdBytes: 0, noRcvdFlows: 0, noRcvdSrcIPs: new Set() };
     }
     const dst = sg.dsts[dstKey];
     const port = observedPort(flow.dstport);
@@ -120,6 +120,7 @@ function buildAllSubnetGroupsAndPorts(flows, topN = 25, knownSubnets = []) {
     if (flow.policyid) dst.policyIds.add(String(flow.policyid));
     if (flow.srcip)    dst.srcIPs.add(flow.srcip);
     if (flow.dstip)    dst.dstIPs.add(flow.dstip);
+    if (flow.dstintf)  dst.dstIntfs.add(flow.dstintf);
     dst.count      += flow.count;
     dst.sentBytes  += flow.sentBytes;
     dst.rcvdBytes  += flow.rcvdBytes;
@@ -330,6 +331,7 @@ function buildPolicies(subnetGroups) {
       const services  = [...dst.services].sort();
       const ports     = [...dst.ports].map(Number).sort((a, b) => a - b);
       const protos    = [...dst.protos];
+      const flowDstintfs = [...dst.dstIntfs].sort();
 
       // Human-readable service description
       let serviceDesc;
@@ -347,6 +349,8 @@ function buildPolicies(subnetGroups) {
         id: id++,
         srcSubnet,
         flowSrcintf,   // interface observed in logs — used by analyzePolicies for srcintf detection
+        flowDstintf: flowDstintfs.length === 1 ? flowDstintfs[0] : null,
+        flowDstintfs,
         dstTarget:   dstKey,
         dstType:     dst.type,
         services,

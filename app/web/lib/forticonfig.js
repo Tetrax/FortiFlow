@@ -2475,7 +2475,7 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf, observedFlows 
     // Auto-detect destination interface
     let dstIface = null;
     let dstIfaceName = null;
-    let dstIfaceSource = 'auto'; // 'route' | 'sdwan' | 'subnet' | 'wan-candidate'
+    let dstIfaceSource = 'auto'; // 'log' | 'route' | 'sdwan' | 'subnet' | 'wan-candidate'
 
     if (p.dstType === 'public') {
       // 1. User override (SD-WAN priority selection)
@@ -2505,16 +2505,25 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf, observedFlows 
         }
       }
     } else {
-      // 1. Route lookup (plus précis que le matching par subnet)
-      const routeDevice = findInterfaceByRoute(p.dstTarget, routes);
-      if (routeDevice) {
-        dstIfaceName   = routeDevice;
-        dstIfaceSource = 'route';
-      } else {
-        // 2. Fallback : subnet-to-interface matching
-        dstIface       = findInterfaceForSubnet(p.dstTarget, interfaces);
-        dstIfaceName   = dstIface?.name || null;
-        dstIfaceSource = 'subnet';
+      const observedDstInterfaces = [...new Set(
+        (Array.isArray(p.flowDstintfs) ? p.flowDstintfs : [p.flowDstintf])
+          .map(value => String(value || '').trim())
+          .filter(Boolean),
+      )];
+      if (observedDstInterfaces.length === 1) {
+        dstIfaceName   = observedDstInterfaces[0];
+        dstIfaceSource = 'log';
+      } else if (observedDstInterfaces.length === 0) {
+        // Route lookup, puis fallback subnet, uniquement sans preuve observée.
+        const routeDevice = findInterfaceByRoute(p.dstTarget, routes);
+        if (routeDevice) {
+          dstIfaceName   = routeDevice;
+          dstIfaceSource = 'route';
+        } else {
+          dstIface       = findInterfaceForSubnet(p.dstTarget, interfaces);
+          dstIfaceName   = dstIface?.name || null;
+          dstIfaceSource = 'subnet';
+        }
       }
     }
 
@@ -3438,6 +3447,26 @@ function applyPolicyUserDecisions(authoritativePolicies, submittedPolicies, fort
       srcintf: new Set(evidenceFlows.map(flow => flow.srcintf).filter(Boolean)),
       dstintf: new Set(evidenceFlows.map(flow => flow.dstintf).filter(Boolean)),
     };
+    const observedPairs = [...new Map(evidenceFlows
+      .filter(flow => flow.srcintf && flow.dstintf)
+      .map(flow => [
+        `${flow.srcintf}\u0000${flow.dstintf}`,
+        { srcintf: flow.srcintf, dstintf: flow.dstintf },
+      ])).values()]
+      .sort((a, b) => a.srcintf.localeCompare(b.srcintf) || a.dstintf.localeCompare(b.dstintf));
+    const addInterfaceIssue = (field, reason, submittedValue, allowedCandidates, msg) => {
+      issues.push({
+        level: 'error',
+        code: 'INTERFACE_DECISION_INVALID',
+        msg,
+        policyIndex: index,
+        field,
+        reason,
+        submittedValue,
+        allowedCandidates,
+        observedPairs,
+      });
+    };
     for (const [field, zoneField, ifaceField] of [
       ['srcintf', 'srcZone', 'srcIface'],
       ['dstintf', 'dstZone', 'dstIface'],
@@ -3464,7 +3493,16 @@ function applyPolicyUserDecisions(authoritativePolicies, submittedPolicies, fort
       if (values.length === 0 || values.some(value =>
         !validInterfaces.has(value) || !allowedInterfaces[field].has(value)
       )) {
-        issues.push({ level: 'error', code: 'INTERFACE_DECISION_INVALID', msg: `Policy #${index + 1}: interface ${label} inconnue "${values.join(', ')}"` });
+        const reason = values.length === 0
+          ? 'missing'
+          : values.some(value => !validInterfaces.has(value)) ? 'unknown' : 'out-of-scope';
+        addInterfaceIssue(
+          field,
+          reason,
+          values.length > 1 ? values : (values[0] || null),
+          [...allowedInterfaces[field]].sort(),
+          `Policy #${index + 1}: interface ${label} inconnue "${values.join(', ')}"`,
+        );
       } else {
         policy[field] = Array.isArray(submitted[field]) ? values : values[0];
       }
@@ -3485,7 +3523,16 @@ function applyPolicyUserDecisions(authoritativePolicies, submittedPolicies, fort
       ))
     );
     if (!pairProven) {
-      issues.push({ level: 'error', code: 'INTERFACE_DECISION_INVALID', msg: `Policy #${index + 1}: paire d’interfaces absente des flux observés` });
+      addInterfaceIssue(
+        'interfacePair',
+        'pair-unproven',
+        { srcintf: chosenSrcInterfaces, dstintf: chosenDstInterfaces },
+        {
+          srcintf: [...allowedInterfaces.srcintf].sort(),
+          dstintf: [...allowedInterfaces.dstintf].sort(),
+        },
+        `Policy #${index + 1}: paire d’interfaces absente des flux observés`,
+      );
     }
     for (const [field, zoneField, ifaceField, label] of [
       ['srcintf', 'srcZone', 'srcIface', 'source'],
@@ -3496,7 +3543,16 @@ function applyPolicyUserDecisions(authoritativePolicies, submittedPolicies, fort
       if (values.length === 0 || values.some(value =>
         !validInterfaces.has(value) || !allowedInterfaces[field].has(value)
       )) {
-        issues.push({ level: 'error', code: 'INTERFACE_DECISION_INVALID', msg: `Policy #${index + 1}: interface ${label} effective inconnue "${values.join(', ')}"` });
+        const reason = values.length === 0
+          ? 'missing'
+          : values.some(value => !validInterfaces.has(value)) ? 'unknown' : 'out-of-scope';
+        addInterfaceIssue(
+          field,
+          reason,
+          values.length > 1 ? values : (values[0] || null),
+          [...allowedInterfaces[field]].sort(),
+          `Policy #${index + 1}: interface ${label} effective inconnue "${values.join(', ')}"`,
+        );
       }
     }
     if (submitted.action != null) {
