@@ -4339,7 +4339,7 @@ function syncHostCell(idx, type) {
     const allNamed = (p.srcHosts || []).every(h => hFoundSet.has(h) || !!(cleanHostName(h, p._srcHostNames?.[h])));
     const hDisplay = hNames.join(', ');
     cell.title = hDisplay;
-    cell.innerHTML = escHtml(hDisplay) + (allNamed ? '' : ' ' + badgeHtml('auto'));
+    cell.innerHTML = `<span class="object-name">${escHtml(hDisplay)}</span>` + (allNamed ? '' : ' ' + badgeHtml('auto'));
     cell.className = `inline-editable ${allNamed ? 'found' : 'missing'}`;
   } else {
     const dhFoundSet = new Set(p._dstHostsFound || []);
@@ -4349,7 +4349,7 @@ function syncHostCell(idx, type) {
     const dhAllNamed = (p.dstHosts || []).every(h => dhFoundSet.has(h) || _hostNameOk(h, p._dstHostNames));
     const dhDisplay = dhNames.join(', ');
     cell.title = dhDisplay;
-    cell.innerHTML = escHtml(dhDisplay) + (dhAllNamed ? '' : ' ' + badgeHtml('auto'));
+    cell.innerHTML = `<span class="object-name">${escHtml(dhDisplay)}</span>` + (dhAllNamed ? '' : ' ' + badgeHtml('auto'));
     cell.className = `inline-editable ${dhAllNamed ? 'found' : 'missing'}`;
   }
   syncRowStatus(idx);
@@ -7270,8 +7270,8 @@ function _buildSrcAddrCell(p, idx) {
       return (s.hosts || []).map(h => cleanHostName(h, p._srcHostNames?.[h]) || h).join(', ');
     }).join(', ');
     return allDone
-      ? `<span class="inline-editable found" data-idx="${idx}" data-field="_srcAddrName" title="${escHtml(names)}">${escHtml(names)}</span>`
-      : `<span class="inline-editable missing" data-idx="${idx}" data-field="_srcAddrName" title="${escHtml(names)}">${escHtml(names)} ${badgeHtml('auto')}</span>`;
+      ? `<span class="inline-editable found" data-idx="${idx}" data-field="_srcAddrName" title="${escHtml(names)}"><span class="object-name">${escHtml(names)}</span></span>`
+      : `<span class="inline-editable missing" data-idx="${idx}" data-field="_srcAddrName" title="${escHtml(names)}"><span class="object-name">${escHtml(names)}</span> ${badgeHtml('auto')}</span>`;
   }
   if ((p._srcMode === 'hosts' || p._use32Src) && p.srcHosts?.length) {
     const hFoundSet = new Set(p._srcHostsFound || []);
@@ -7281,8 +7281,8 @@ function _buildSrcAddrCell(p, idx) {
     const allNamed = p.srcHosts.every(h => hFoundSet.has(h) || _hostNameOk(h));
     const hDisplay = hNames.join(', ');
     return allNamed
-      ? `<span class="inline-editable found" data-idx="${idx}" data-field="_srcAddrName" title="${escHtml(hDisplay)}">${escHtml(hDisplay)}</span>`
-      : `<span class="inline-editable missing" data-idx="${idx}" data-field="_srcAddrName" title="${escHtml(hDisplay)}">${escHtml(hDisplay)} ${badgeHtml('auto')}</span>`;
+      ? `<span class="inline-editable found" data-idx="${idx}" data-field="_srcAddrName" title="${escHtml(hDisplay)}"><span class="object-name">${escHtml(hDisplay)}</span></span>`
+      : `<span class="inline-editable missing" data-idx="${idx}" data-field="_srcAddrName" title="${escHtml(hDisplay)}"><span class="object-name">${escHtml(hDisplay)}</span> ${badgeHtml('auto')}</span>`;
   }
   return addrCell(p.analysis?.srcAddr, p._srcAddrName, idx, '_srcAddrName');
 }
@@ -7313,8 +7313,8 @@ function _buildDstAddrCell(p, idx) {
       return (s.hosts || []).map(h => cleanHostName(h, p._dstHostNames?.[h]) || h).filter(Boolean).join(', ');
     }).filter(Boolean).join(', ');
     return allDone
-      ? `<span class="inline-editable found" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(names)}">${escHtml(names)}</span>`
-      : `<span class="inline-editable missing" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(names)}">${escHtml(names)} ${badgeHtml('auto')}</span>`;
+      ? `<span class="inline-editable found" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(names)}"><span class="object-name">${escHtml(names)}</span></span>`
+      : `<span class="inline-editable missing" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(names)}"><span class="object-name">${escHtml(names)}</span> ${badgeHtml('auto')}</span>`;
   }
   // WAN + IPs spécifiques
   const isWan = p._isWan || p.dstType === 'public';
@@ -7326,8 +7326,8 @@ function _buildDstAddrCell(p, idx) {
     const dhAllNamed = p.dstHosts.every(h => dhFoundSet.has(h) || _hostNameOk(h));
     const dhDisplay = dhNames.join(', ');
     return dhAllNamed
-      ? `<span class="inline-editable found" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(dhDisplay)}">${escHtml(dhDisplay)}</span>`
-      : `<span class="inline-editable missing" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(dhDisplay)}">${escHtml(dhDisplay)} ${badgeHtml('auto')}</span>`;
+      ? `<span class="inline-editable found" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(dhDisplay)}"><span class="object-name">${escHtml(dhDisplay)}</span></span>`
+      : `<span class="inline-editable missing" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(dhDisplay)}"><span class="object-name">${escHtml(dhDisplay)}</span> ${badgeHtml('auto')}</span>`;
   }
   if (isWan && p._dstUseAll === false && p.dstTarget && p.dstTarget !== 'all') {
     const ip = p.dstTarget;
@@ -7344,8 +7344,8 @@ function _buildDstAddrCell(p, idx) {
     const dhAllNamed = p.dstHosts.every(h => dhFoundSet.has(h) || _hostNameOk(h));
     const dhDisplay = dhNames.join(', ');
     return dhAllNamed
-      ? `<span class="inline-editable found" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(dhDisplay)}">${escHtml(dhDisplay)}</span>`
-      : `<span class="inline-editable missing" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(dhDisplay)}">${escHtml(dhDisplay)} ${badgeHtml('auto')}</span>`;
+      ? `<span class="inline-editable found" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(dhDisplay)}"><span class="object-name">${escHtml(dhDisplay)}</span></span>`
+      : `<span class="inline-editable missing" data-idx="${idx}" data-field="_dstAddrName" title="${escHtml(dhDisplay)}"><span class="object-name">${escHtml(dhDisplay)}</span> ${badgeHtml('auto')}</span>`;
   }
   return addrCell(p.analysis?.dstAddr, p._dstAddrName, idx, '_dstAddrName');
 }

@@ -73,6 +73,16 @@ test('les preuves Internet incluent les cibles publiques des stratégies', () =>
   assert.match(evidence, /\/32/);
 });
 
+test('les valeurs multi-IP restent tronquées sur une ligne sans modifier la hauteur des policies', () => {
+  const srcObjects = sourceBlock('function _buildSrcAddrCell(', 'function _buildDstAddrCell(');
+  const dstObjects = sourceBlock('function _buildDstAddrCell(', 'function syncAddrCell(');
+
+  assert.match(srcObjects, /class=\"object-name\"/);
+  assert.match(dstObjects, /class=\"object-name\"/);
+  assert.match(CSS, /\.policy-interface-pair\s*>\s*span:not\(\.policy-interface-arrow\)[^}]*white-space:\s*nowrap/);
+  assert.match(CSS, /\.policy-object-pair\s+\.inline-editable[^}]*overflow:\s*hidden/);
+});
+
 test('le passage manuel à all marque explicitement l’expansion de représentation', () => {
   assert.match(APP, /_internetAllExpansion\s*=\s*useAll/);
 });

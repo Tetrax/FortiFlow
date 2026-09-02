@@ -1060,7 +1060,7 @@ td.mono { font-family: var(--mono); }
 .compact-more { display: inline-block; color: var(--text2); background: var(--bg3); border: 1px solid var(--border); border-radius: 10px; padding: 0 7px; font-family: inherit; font-size: 10px; white-space: nowrap; }
 .policy-interfaces-cell { min-width: 190px; white-space: normal !important; }
 .policy-interface-pair { display: grid; grid-template-columns: minmax(0,1fr) 18px minmax(0,1fr); align-items: center; gap: 4px; }
-.policy-interface-pair > span:not(.policy-interface-arrow) { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.policy-interface-pair > span:not(.policy-interface-arrow) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .policy-interface-value { font-family: inherit; font-size: 12px; line-height: 1.4; color: var(--text); }
 .policy-interface-value.is-auto { color: var(--text2); }
 .policy-interface-value.is-aggregate { color: var(--accent2); }
@@ -1072,7 +1072,7 @@ td.mono { font-family: var(--mono); }
   min-width: 0; width: fit-content; max-width: 100%; margin-inline: auto;
   font-family: var(--mono); font-size: 12px; line-height: 1.4;
 }
-.policy-object-pair .inline-editable { max-width: 170px; min-width: 0; display: flex; align-items: center; justify-content: flex-start; overflow: visible; text-align: left; }
+.policy-object-pair .inline-editable { max-width: 170px; min-width: 0; display: flex; align-items: center; justify-content: flex-start; overflow: hidden; text-align: left; white-space: nowrap; }
 .policy-object-pair .object-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .policy-object-pair .object-provenance-dot { flex-shrink: 0; }
 .object-provenance-dot,
