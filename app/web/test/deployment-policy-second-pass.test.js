@@ -83,6 +83,15 @@ test('les valeurs multi-IP restent tronquées sur une ligne sans modifier la hau
   assert.match(CSS, /\.policy-object-pair\s+\.inline-editable[^}]*overflow:\s*hidden/);
 });
 
+test('le compteur de sessions reste explicite sans ajouter de colonne', () => {
+  const render = sourceBlock('function renderDeployPolicies(', 'function syncNoRcvdInfoBtn(');
+
+  assert.match(render, /const sessionCount = p\.sessions \|\| 0/);
+  assert.match(render, /session\$\{sessionCount === 1 \? '' : 's'\} observée\$\{sessionCount === 1 \? '' : 's'\}/);
+  assert.match(render, />\$\{fmtNum\(sessionCount\)\} sess\.<\/span>/);
+  assert.doesNotMatch(render, /<th[^>]*>Sessions<\/th>/);
+});
+
 test('le passage manuel à all marque explicitement l’expansion de représentation', () => {
   assert.match(APP, /_internetAllExpansion\s*=\s*useAll/);
 });

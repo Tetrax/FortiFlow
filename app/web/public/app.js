@@ -8209,6 +8209,8 @@ function renderDeployPolicies(analyzed, resetPage = true) {
 
     // Impact
     const barW = Math.round(((p.sessions || 0) / maxSessions) * 100);
+    const sessionCount = p.sessions || 0;
+    const sessionTitle = `${fmtNum(sessionCount)} session${sessionCount === 1 ? '' : 's'} observée${sessionCount === 1 ? '' : 's'}`;
 
     // Warnings
     const rowWarnings = (deployState.warnings || []).filter(w => w.generatedIdx === idx);
@@ -8252,7 +8254,7 @@ function renderDeployPolicies(analyzed, resetPage = true) {
           <input type="checkbox" ${mergeChkAttr} title="Sélectionner pour fusion">
           <button class="btn-del-item deploy-del-policy policy-row-secondary" data-idx="${idx}" ${isAgg ? `data-seq-members="${p._sequenceMembers.join(',')}"` : ''} title="Supprimer">✕</button>
         </td>
-        <td class="policy-main-cell"><div class="policy-primary-line">${actionBadge}${dirBadge}${warnBadge}${seqBadge}${isScan ? '<span class="scan-badge">⚠ silencieux</span>' : ''}<span class="policy-primary-value">${srcSubnetText}${srcModeBadge}</span><span class="policy-session-inline" title="${fmtNum(p.sessions || 0)} sessions observées">${fmtNum(p.sessions || 0)}</span></div></td>
+        <td class="policy-main-cell"><div class="policy-primary-line">${actionBadge}${dirBadge}${warnBadge}${seqBadge}${isScan ? '<span class="scan-badge">⚠ silencieux</span>' : ''}<span class="policy-primary-value">${srcSubnetText}${srcModeBadge}</span><span class="policy-session-inline" title="${sessionTitle}">${fmtNum(sessionCount)} sess.</span></div></td>
         <td class="policy-main-cell">${dstTargetCell(p, idx)}</td>
         <td class="svc-cell policy-services-cell" data-svc-idx="${idx}">${svcCells}</td>
         <td class="policy-interfaces-cell">${interfaceSummary}</td>
