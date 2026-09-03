@@ -2425,77 +2425,69 @@ function collectMissingObjects() {
 
     const srcFoundHosts = new Set(p._srcHostsFound || []);
     const dstFoundHosts = new Set(p._dstHostsFound || []);
+    const srcMode = p._srcMode || (p._use32Src ? 'hosts' : 'subnet');
+    const dstMode = p._dstMode || (p._use32Dst ? 'hosts' : 'subnet');
+    const isWan = p._isWan || p.dstType === 'public';
+    const useAllDst = isWan && p._dstUseAll === true;
+    const addAddress = (cidr, name) => {
+      if (!cidr || cidr === 'all') return;
+      if (!addresses.has(cidr)) addresses.set(cidr, { cidr, name, policyCount: 0 });
+      addresses.get(cidr).policyCount++;
+    };
+    const addHost = (side, host, foundHosts) => {
+      if (foundHosts.has(host) || isDrawerObjectResolved(p, `host:${side}:${host}`)) return;
+      if (!hosts.has(host)) {
+        const names = side === 'src' ? p._srcHostNames : p._dstHostNames;
+        const suggested = cleanHostName(host, names?.[host]) || `FF_HOST_${host.replace(/\./g, '_')}`;
+        hosts.set(host, { ip: host, name: suggested, policyCount: 0 });
+      }
+      hosts.get(host).policyCount++;
+    };
 
-    // Src address manquante
-    if (a.srcAddr && !a.srcAddr.found) {
-      const cidr = a.srcAddr.cidr;
-      if (cidr) {
-        if (!addresses.has(cidr)) addresses.set(cidr, { cidr, name: p._srcAddrName || a.srcAddr.suggestedName, policyCount: 0 });
-        addresses.get(cidr).policyCount++;
-      }
+    if (!p._multiSrcSubnets?.length && srcMode === 'subnet'
+      && a.srcAddr && !a.srcAddr.found && !isDrawerObjectResolved(p, 'addr:src')) {
+      addAddress(a.srcAddr.cidr, p._srcAddrName || a.srcAddr.suggestedName);
     }
-    // Dst address manquante
-    if (p.dstType === 'private' && a.dstAddr && !a.dstAddr.found) {
-      const cidr = a.dstAddr.cidr;
-      if (cidr && cidr !== 'all') {
-        if (!addresses.has(cidr)) addresses.set(cidr, { cidr, name: p._dstAddrName || a.dstAddr.suggestedName, policyCount: 0 });
-        addresses.get(cidr).policyCount++;
-      }
+    if (!p._multiDstSubnets?.length && !useAllDst && dstMode === 'subnet'
+      && a.dstAddr && !a.dstAddr.found && !isDrawerObjectResolved(p, 'addr:dst')) {
+      addAddress(a.dstAddr.cidr, p._dstAddrName || a.dstAddr.suggestedName);
     }
-    // Multi-dst : collecter les subnets manquants (sauf si mode "all" activé sur policy WAN)
-    const _moIsWan = p._isWan || p.dstType === 'public';
-    if (p._isMultiDst && p._multiDstSubnets?.length && !(_moIsWan && p._dstUseAll === true)) {
-      for (const s of p._multiDstSubnets) {
-        if (!s.addrFound) {
-          const cidr = s.subnet;
-          if (cidr && cidr !== 'all') {
-            if (!addresses.has(cidr)) addresses.set(cidr, { cidr, name: s.addrName, policyCount: 0 });
-            addresses.get(cidr).policyCount++;
-          }
+    if (p._multiDstSubnets?.length && !useAllDst) {
+      for (const [index, subnet] of p._multiDstSubnets.entries()) {
+        if (subnet.useSubnet === false) {
+          for (const host of (subnet.hosts || [])) addHost('dst', host, dstFoundHosts);
+        } else if (!subnet.addrFound && !isDrawerObjectResolved(p, `multi-dst:${index}`)) {
+          addAddress(subnet.subnet, subnet.addrName || subnet.suggestedName);
         }
       }
     }
-    // Multi-src : collecter les subnets manquants
     if (p._multiSrcSubnets?.length) {
-      for (const s of p._multiSrcSubnets) {
-        if (!s.addrFound) {
-          const cidr = s.subnet;
-          if (cidr) {
-            if (!addresses.has(cidr)) addresses.set(cidr, { cidr, name: s.addrName, policyCount: 0 });
-            addresses.get(cidr).policyCount++;
-          }
+      for (const [index, subnet] of p._multiSrcSubnets.entries()) {
+        if (subnet.useSubnet === false) {
+          for (const host of (subnet.hosts || [])) addHost('src', host, srcFoundHosts);
+        } else if (!subnet.addrFound && !isDrawerObjectResolved(p, `multi-src:${index}`)) {
+          addAddress(subnet.subnet, subnet.addrName || subnet.suggestedName);
         }
       }
     }
-    // Hôtes /32 src — TOUS les hôtes non trouvés dans la config
-    if (p.srcHosts?.length > 0) {
-      for (const h of p.srcHosts) {
-        if (srcFoundHosts.has(h)) continue; // existe dans la config — ne pas lister
-        if (!hosts.has(h)) {
-          const suggested = cleanHostName(h, p._srcHostNames?.[h]) || `FF_HOST_${h.replace(/\./g, '_')}`;
-          hosts.set(h, { ip: h, name: suggested, policyCount: 0 });
-        }
-        hosts.get(h).policyCount++;
-      }
+    if (!p._multiSrcSubnets?.length && srcMode === 'hosts') {
+      for (const host of (p.srcHosts || [])) addHost('src', host, srcFoundHosts);
     }
-    // Hôtes /32 dst — TOUS les hôtes non trouvés dans la config
-    if (p.dstHosts?.length > 0) {
-      for (const h of p.dstHosts) {
-        if (dstFoundHosts.has(h)) continue; // existe dans la config
-        if (!hosts.has(h)) {
-          const suggested = cleanHostName(h, p._dstHostNames?.[h]) || `FF_HOST_${h.replace(/\./g, '_')}`;
-          hosts.set(h, { ip: h, name: suggested, policyCount: 0 });
-        }
-        hosts.get(h).policyCount++;
-      }
+    if (!p._multiDstSubnets?.length && !useAllDst && dstMode === 'hosts') {
+      for (const host of (p.dstHosts || [])) addHost('dst', host, dstFoundHosts);
     }
     // Services manquants
     for (const svc of a.services || []) {
-      if (!svc.found && !svc._isMerged && !isCompatibleServiceSelected(p, svc)) {
-        const key = svc.isNamed ? `label:${svc.label}` : `${svc.port}/${svc.proto}`;
+      const autoLabel = svc.isNamed ? svc.label : `FF_SVC_${svc.port}_${svc.proto}`;
+      const isPortNotation = /^(TCP|UDP)\/\d+$/i.test(svc.suggestedName || '');
+      const hasAcceptedName = svc.suggestedName
+        && !isPortNotation && svc.suggestedName !== autoLabel;
+      if (!svc.found && !svc._isMerged && !isCompatibleServiceSelected(p, svc)
+        && !isServiceDecisionResolved(p, svc) && !hasAcceptedName) {
+        const identityKey = serviceDecisionIdentityKey(svc);
         const defaultName = svc.isNamed ? (svc.suggestedName || svc.label) : (svc.suggestedName || `FF_SVC_${svc.port}_${svc.proto}`);
-        if (!services.has(key)) services.set(key, { key, port: svc.port, proto: svc.proto, label: svc.label, name: defaultName, policyCount: 0 });
-        services.get(key).policyCount++;
+        if (!services.has(identityKey)) services.set(identityKey, { key: identityKey, port: svc.port, proto: svc.proto, label: svc.label, name: defaultName, policyCount: 0 });
+        services.get(identityKey).policyCount++;
       }
     }
   }
@@ -2699,15 +2691,9 @@ function applyGlobalSvcMerge(selectedKeys, mergedSvc) {
   for (const p of deployState.analyzed) {
     const svcs = p.analysis?.services;
     if (!svcs) continue;
-    const matching = svcs.filter(s => {
-      const k = s.isNamed ? `label:${s.label}` : `${s.port}/${(s.proto||'tcp').toUpperCase()}`;
-      return selectedKeys.has(k);
-    });
+    const matching = svcs.filter(s => selectedKeys.has(serviceDecisionIdentityKey(s)));
     if (matching.length < 2) continue;
-    const remaining = svcs.filter(s => {
-      const k = s.isNamed ? `label:${s.label}` : `${s.port}/${(s.proto||'tcp').toUpperCase()}`;
-      return !selectedKeys.has(k);
-    });
+    const remaining = svcs.filter(s => !selectedKeys.has(serviceDecisionIdentityKey(s)));
     remaining.push({ ...mergedSvc });
     p.analysis.services = remaining;
   }
@@ -2748,7 +2734,7 @@ function applyObjectNames(addrMap, hostsMap, svcMap) {
     // Services
     for (const svc of a.services || []) {
       if (!svc.found) {
-        const key = svc.isNamed ? `label:${svc.label}` : `${svc.port}/${svc.proto}`;
+        const key = serviceDecisionIdentityKey(svc);
         if (svcMap[key]) svc.suggestedName = svcMap[key];
       }
     }
@@ -2994,34 +2980,42 @@ function mountDrawer() {
     const p = _drawerIdx !== null ? deployState.analyzed[_drawerIdx] : null;
     if (!p) return;
     _snapDrawer(p);
-    if (e.target.matches('.drawer-src-name'))  { p._srcAddrName = e.target.value; syncAddrCell(_drawerIdx, 'src'); }
-    if (e.target.matches('.drawer-dst-name'))  { p._dstAddrName = e.target.value; syncAddrCell(_drawerIdx, 'dst'); }
+    if (e.target.matches('.drawer-src-name'))  { p._srcAddrName = e.target.value; updateDrawerObjectResolution(p, 'addr:src', e.target.value); syncAddrCell(_drawerIdx, 'src'); }
+    if (e.target.matches('.drawer-dst-name'))  { p._dstAddrName = e.target.value; updateDrawerObjectResolution(p, 'addr:dst', e.target.value); syncAddrCell(_drawerIdx, 'dst'); }
     if (e.target.matches('.drawer-policy-name')) p._policyName = e.target.value;
     if (e.target.matches('.drawer-host-input')) {
       const host = e.target.dataset.host;
       const type = e.target.dataset.type;
       if (type === 'src') { if (!p._srcHostNames) p._srcHostNames = {}; p._srcHostNames[host] = e.target.value; }
       else { if (!p._dstHostNames) p._dstHostNames = {}; p._dstHostNames[host] = e.target.value; }
+      updateDrawerObjectResolution(p, `host:${type}:${host}`, e.target.value);
       syncAddrCell(_drawerIdx, type);
     }
     if (e.target.matches('.svc-merge-name')) { p._mergedSvcName = e.target.value; return; }
     if (e.target.matches('.svc-merge-range')) { p._mergeRange = e.target.value; return; }
     if (e.target.matches('.drawer-svc-name')) {
       setPolicyServiceSuggestedName(p, e.target.dataset.svcKey, e.target.value);
+      updateDrawerServiceResolutions(p, drawerServiceForKey(p, e.target.dataset.svcKey), e.target.value);
       syncSvcCell(_drawerIdx);
     }
     if (e.target.matches('.drawer-multidst-name')) {
       const si = +e.target.dataset.si;
       if (p._multiDstSubnets?.[si]) p._multiDstSubnets[si].addrName = e.target.value;
+      updateDrawerObjectResolution(p, `multi-dst:${si}`, e.target.value);
       syncAddrCell(_drawerIdx, 'dst');
     }
     if (e.target.matches('.drawer-destination-cidr')) {
       const si = +e.target.dataset.si;
       const item = destinationScopeForElement(p, e.target);
       if (item) {
+        const previousSubnet = item.subnet;
         item.subnet = e.target.value.trim();
         item.manual = true;
         item.addrName = '';
+        if (p._resolvedObjectKeys) {
+          delete p._resolvedObjectKeys[`multi-dst:${si}`];
+          delete p._resolvedObjectKeys[`multi-dst:${previousSubnet}`];
+        }
         item.addrFound = false;
         item.route = null;
         item.sources = [];
@@ -3039,6 +3033,7 @@ function mountDrawer() {
     if (e.target.matches('.drawer-destination-aggregate-cidr')) {
       p._dstAggregateSubnet = e.target.value.trim();
       p._dstAggregateManual = true;
+      if (p._resolvedObjectKeys) delete p._resolvedObjectKeys['addr:dst'];
       p._dstAggregateError = destinationCidrIssue(p._dstAggregateSubnet, destinationObservedHosts(p));
       const error = drawer.querySelector('[data-aggregate-cidr-error="true"]');
       if (error) error.textContent = p._dstAggregateError;
@@ -3051,14 +3046,17 @@ function mountDrawer() {
         p._multiSrcSubnets[si].addrName = e.target.value;
         if (p.srcAddrNames && p.srcAddrNames[si] !== undefined) p.srcAddrNames[si] = e.target.value;
       }
+      updateDrawerObjectResolution(p, `multi-src:${si}`, e.target.value);
       syncAddrCell(_drawerIdx, 'src');
     }
     if (e.target.matches('.drawer-grp-name')) {
       p._dstAddrName = e.target.value;
+      updateDrawerObjectResolution(p, 'group:dst', e.target.value);
       syncAddrCell(_drawerIdx, 'dst');
     }
     if (e.target.matches('.drawer-src-grp-name')) {
       p._srcAddrName = e.target.value;
+      updateDrawerObjectResolution(p, 'group:src', e.target.value);
       syncAddrCell(_drawerIdx, 'src');
     }
     syncRowStatus(_drawerIdx);
@@ -3275,6 +3273,7 @@ function mountDrawer() {
       _snapAndShow();
       const type = modeBtn.dataset.type;
       const mode = modeBtn.dataset.mode;
+      clearDrawerObjectResolutionsForSide(p, type);
       if (type === 'src') { p._srcMode = mode; p._use32Src = mode === 'hosts'; }
       else { p._dstMode = mode; p._use32Dst = mode === 'hosts'; }
       populateDrawer(_drawerIdx);
@@ -3308,6 +3307,7 @@ function mountDrawer() {
       const si = +mdBtn.dataset.si;
       if (p._multiDstSubnets?.[si]) {
         const cur = p._multiDstSubnets[si].useSubnet;
+        clearDrawerObjectResolutionsForSide(p, 'dst');
         p._multiDstSubnets[si].useSubnet = (cur === false) ? true : false;
         populateDrawer(_drawerIdx);
         syncAddrCell(_drawerIdx, 'dst');
@@ -3321,6 +3321,7 @@ function mountDrawer() {
       const si = +msBtn.dataset.si;
       if (p._multiSrcSubnets?.[si]) {
         const cur = p._multiSrcSubnets[si].useSubnet;
+        clearDrawerObjectResolutionsForSide(p, 'src');
         p._multiSrcSubnets[si].useSubnet = (cur === false) ? true : false;
         populateDrawer(_drawerIdx);
         syncAddrCell(_drawerIdx, 'src');
@@ -3335,21 +3336,27 @@ function mountDrawer() {
       const dt = delBtn.dataset.delType;
       if (dt === 'svc') {
         const k = delBtn.dataset.svcKey;
+        const removedService = drawerServiceForKey(p, k);
+        if (removedService) serviceReuseKeys(removedService).forEach(key => clearDrawerServiceResolution(p, key));
         p.analysis.services = (p.analysis.services || []).filter(s => {
-          const _m = s.label?.match(/^(TCP|UDP)\/(\d+)$/i);
-          const sk = _m ? `${parseInt(_m[2],10)}/${_m[1].toUpperCase()}` : (s.isNamed ? `label:${s.label}` : `${s.port}/${s.proto}`);
-          return sk !== k && s.label !== k;
+          return drawerServiceKey(s) !== k
+            && serviceDecisionIdentityKey(s) !== k
+            && s.label !== k;
         });
       } else if (dt === 'src-subnet') {
         const si = +delBtn.dataset.si;
+        clearDrawerObjectResolutionsForSide(p, 'src');
         p._multiSrcSubnets = (p._multiSrcSubnets || []).filter((_, i) => i !== si);
       } else if (dt === 'dst-subnet') {
         const si = +delBtn.dataset.si;
+        clearDrawerObjectResolutionsForSide(p, 'dst');
         p._multiDstSubnets = (p._multiDstSubnets || []).filter((_, i) => i !== si);
       } else if (dt === 'src-host') {
+        clearDrawerObjectResolutionsForSide(p, 'src');
         if (!p._excludedSrcHosts) p._excludedSrcHosts = new Set();
         p._excludedSrcHosts.add(delBtn.dataset.host);
       } else if (dt === 'dst-host') {
+        clearDrawerObjectResolutionsForSide(p, 'dst');
         if (!p._excludedDstHosts) p._excludedDstHosts = new Set();
         p._excludedDstHosts.add(delBtn.dataset.host);
       }
@@ -3497,11 +3504,7 @@ function mountDrawer() {
     const svcKey = e.target.dataset.svcKey;
     const newName = e.target.value.trim();
     if (!newName) return;
-    const svc = (p.analysis?.services || []).find(s => {
-      const _m = s.label?.match(/^(TCP|UDP)\/(\d+)$/i);
-      const k = _m ? `${parseInt(_m[2],10)}/${_m[1].toUpperCase()}` : (s.isNamed ? `label:${s.label}` : `${s.port}/${s.proto}`);
-      return k === svcKey;
-    });
+    const svc = drawerServiceForKey(p, svcKey);
     if (!svc) return;
     const identity = canonicalMonoServiceIdentity(svc);
     if (identity) {
@@ -3616,9 +3619,7 @@ function mountDrawer() {
     }
     const resolvedObjectKey = e.target.dataset.objectKey;
     const resolvedObjectName = typeof e.target.value === 'string' ? e.target.value.trim() : '';
-    if (resolvedObjectKey && resolvedObjectName) {
-      markDrawerObjectResolved(p, resolvedObjectKey, resolvedObjectName);
-    }
+    if (resolvedObjectKey) updateDrawerObjectResolution(p, resolvedObjectKey, e.target.value);
 
     // Mode /24 subnet
     let addrType = null;
@@ -3731,10 +3732,34 @@ function cleanHostName(h, name) {
   return name.startsWith(prefix) ? name.slice(prefix.length) : name;
 }
 
-function markDrawerObjectResolved(policy, objectKey, name) {
-  if (!objectKey || !name) return;
+function updateDrawerObjectResolution(policy, objectKey, name) {
+  if (!policy || !objectKey) return;
+  const value = String(name ?? '').trim();
+  if (!value) {
+    clearDrawerObjectResolution(policy, objectKey);
+    return;
+  }
   if (!policy._resolvedObjectKeys) policy._resolvedObjectKeys = {};
-  policy._resolvedObjectKeys[objectKey] = name;
+  policy._resolvedObjectKeys[objectKey] = value;
+}
+
+function clearDrawerObjectResolution(policy, objectKey) {
+  if (!policy?._resolvedObjectKeys || !objectKey) return;
+  delete policy._resolvedObjectKeys[objectKey];
+  if (Object.keys(policy._resolvedObjectKeys).length === 0) delete policy._resolvedObjectKeys;
+}
+
+function clearDrawerObjectResolutionsForSide(policy, side) {
+  if (!policy?._resolvedObjectKeys || !side) return;
+  const prefixes = [`addr:${side}`, `host:${side}:`, `multi-${side}:`, `group:${side}`];
+  for (const key of Object.keys(policy._resolvedObjectKeys)) {
+    if (prefixes.some(prefix => key === prefix || key.startsWith(prefix))) delete policy._resolvedObjectKeys[key];
+  }
+  if (Object.keys(policy._resolvedObjectKeys).length === 0) delete policy._resolvedObjectKeys;
+}
+
+function markDrawerObjectResolved(policy, objectKey, name) {
+  updateDrawerObjectResolution(policy, objectKey, name);
 }
 
 function isDrawerObjectResolved(policy, objectKey) {
@@ -3777,6 +3802,30 @@ function serviceReuseKeys(svc) {
   const port = notation ? parseInt(notation[2], 10) : svc?.port;
   if (!proto || !port) return [];
   return [`${String(proto).toUpperCase()}/${port}`];
+}
+
+function serviceDecisionIdentityKey(svc) {
+  const base = svc?.isNamed
+    ? `label:${svc.label}`
+    : (svc?.port ? `${svc.port}/${String(svc.proto || 'tcp').toUpperCase()}` : `label:${svc?.label || svc?.name || ''}`);
+  if (!svc?.isNamed) return base;
+  return `${base}|${serviceReuseKeys(svc).sort().join(',') || 'untyped'}`;
+}
+
+function drawerServiceKey(svc) {
+  const notation = svc?.label?.match(/^(TCP|UDP)\/(\d+)$/i);
+  if (notation) return `${parseInt(notation[2], 10)}/${notation[1].toUpperCase()}`;
+  if (svc?.isNamed) return serviceDecisionIdentityKey(svc);
+  return `${svc?.port}/${String(svc?.proto || '').toUpperCase()}`;
+}
+
+function drawerServiceForKey(policy, serviceKey) {
+  const wanted = String(serviceKey || '');
+  return (policy?.analysis?.services || []).find(service =>
+    drawerServiceKey(service) === wanted
+    || serviceDecisionIdentityKey(service) === wanted
+    || (service?.isNamed && `label:${service.label}` === wanted),
+  );
 }
 
 function serviceReuseKey(svc) {
@@ -3840,6 +3889,32 @@ function markServiceDecisionResolved(policy, serviceKey, decision) {
   clearSelectedServiceKey(policy, serviceKey);
 }
 
+function clearDrawerServiceResolution(policy, serviceKey) {
+  if (!policy || !serviceKey) return;
+  const canonicalKey = normalizeServiceDecisionKey(serviceKey);
+  if (policy._resolvedServiceKeys) {
+    delete policy._resolvedServiceKeys[serviceKey];
+    delete policy._resolvedServiceKeys[canonicalKey];
+    if (Object.keys(policy._resolvedServiceKeys).length === 0) delete policy._resolvedServiceKeys;
+  }
+  if (policy._serviceReuse) {
+    delete policy._serviceReuse[serviceKey];
+    delete policy._serviceReuse[canonicalKey];
+    if (Object.keys(policy._serviceReuse).length === 0) delete policy._serviceReuse;
+  }
+}
+
+function updateDrawerServiceResolutions(policy, service, name) {
+  if (!policy || !service) return;
+  const keys = serviceReuseKeys(service);
+  const value = String(name ?? '').trim();
+  if (!value) {
+    keys.forEach(key => clearDrawerServiceResolution(policy, key));
+    return;
+  }
+  keys.forEach(key => markServiceDecisionResolved(policy, key, 'specific'));
+}
+
 function normalizeServiceDecisionKey(rawKey) {
   const value = String(rawKey || '').trim().toUpperCase();
   let match = value.match(/^(TCP|UDP)\/(\d+)$/);
@@ -3860,8 +3935,14 @@ function canonicalMonoServiceIdentity(service) {
 
 function policyServiceIndexByCanonicalKey(policy, serviceKey) {
   const wanted = normalizeServiceDecisionKey(serviceKey);
-  return (policy?.analysis?.services || []).findIndex(service =>
+  const monoIndex = (policy?.analysis?.services || []).findIndex(service =>
     canonicalMonoServiceIdentity(service)?.key === wanted);
+  if (monoIndex >= 0) return monoIndex;
+  return (policy?.analysis?.services || []).findIndex(service =>
+    drawerServiceKey(service) === String(serviceKey || '')
+      || serviceDecisionIdentityKey(service) === String(serviceKey || '')
+      || (service?.isNamed && `label:${service.label}` === String(serviceKey || '')),
+  );
 }
 
 function cloneServiceDecision(service) {
@@ -3870,8 +3951,8 @@ function cloneServiceDecision(service) {
 }
 
 function setPolicyServiceSuggestedName(policy, serviceKey, serviceName) {
-  const canonicalKey = normalizeServiceDecisionKey(serviceKey);
-  const index = policyServiceIndexByCanonicalKey(policy, canonicalKey);
+  const rawKey = String(serviceKey || '');
+  const index = policyServiceIndexByCanonicalKey(policy, rawKey);
   if (index < 0) return false;
   const current = policy.analysis.services[index];
   if (current?.found) return false;
@@ -4266,6 +4347,14 @@ function setDestinationRepresentation(policy, mode) {
   if (!policy || !['hosts', 'detected-subnets', 'aggregate'].includes(mode)) return false;
   const detected = destinationDetectedForPolicy(policy);
   if (mode === 'detected-subnets' && detected.length === 0) return false;
+  if (policy._resolvedObjectKeys) {
+    for (const key of Object.keys(policy._resolvedObjectKeys)) {
+      if (key === 'addr:dst' || key.startsWith('host:dst:') || key.startsWith('multi-dst:')) {
+        delete policy._resolvedObjectKeys[key];
+      }
+    }
+    if (Object.keys(policy._resolvedObjectKeys).length === 0) delete policy._resolvedObjectKeys;
+  }
   const aggregate = destinationAggregateSubnet(policy);
   if (!policy._dstAggregateManual && aggregate) policy._dstAggregateSubnet = aggregate;
   policy._dstMode = mode;
@@ -4808,7 +4897,7 @@ function populateDrawer(idx) {
     const observedServiceLabel = _icmp
       ? `${_icmp[1].toUpperCase()}/${parseInt(_icmp[2], 10)}/${parseInt(_icmp[3], 10)}`
       : reuseKeys.length > 1 ? reuseKeys.join(', ') : `${svcProto}/${svcPort}`;
-    const svcKey = _pnm ? `${svcPort}/${svcProto}` : (svc.isNamed ? `label:${svc.label}` : `${svc.port}/${svc.proto}`);
+    const svcKey = _pnm ? `${svcPort}/${svcProto}` : drawerServiceKey(svc);
     const reuseKey = serviceReuseKey(svc);
     const compatibleMatch = svc.compatibleMatch;
     const usingCompatible = isCompatibleServiceSelected(p, svc);
@@ -7044,8 +7133,8 @@ async function analyzeDeployPolicies() {
       _dstAggregateManual: p._dstAggregateManual === true,
       _dstAggregateAddrName: p._dstAggregateAddrName
         || (aggregateAddressMatch ? p.analysis?.dstAddr?.name || '' : ''),
-      _srcAddrName:  p.analysis?.srcAddr?.name || '',
-      _dstAddrName:  p.analysis?.dstAddr?.name || '',
+      _srcAddrName:  p._srcAddrName || p.analysis?.srcAddr?.name || '',
+      _dstAddrName:  p._dstAddrName || p.analysis?.dstAddr?.name || '',
       _policyName:   '',
       _nat:          isWan,
       _isWan:        isWan,
@@ -7448,13 +7537,15 @@ function policyMissingMandatoryFields(p) {
   const a = p?.analysis || {};
   const missing = [];
   const add = field => { if (!missing.includes(field)) missing.push(field); };
-  const hostNameOk = (host, names) => {
+  const hostNameOk = (host, names, side) => {
     const name = String(names?.[host] || '').trim();
-    return name && name !== `FF_HOST_${host.replace(/\./g, '_')}`;
+    const autoName = `FF_HOST_${host.replace(/\./g, '_')}`;
+    return name && (name !== autoName
+      || p._resolvedObjectKeys?.[`host:${side}:${host}`] === name);
   };
-  const checkHosts = (hosts, foundHosts, names, field) => {
+  const checkHosts = (hosts, foundHosts, names, field, side) => {
     const found = new Set(foundHosts || []);
-    if ((hosts || []).some(host => !found.has(host) && !hostNameOk(host, names))) add(field);
+    if ((hosts || []).some(host => !found.has(host) && !hostNameOk(host, names, side))) add(field);
   };
 
   if (!p?._srcintf) add('interface source');
@@ -7465,13 +7556,13 @@ function policyMissingMandatoryFields(p) {
       if (scope.useSubnet !== false) {
         if (!scope.addrFound && !scope.addrName) add('source');
       } else {
-        checkHosts(scope.hosts, p._srcHostsFound, p._srcHostNames, 'source');
+        checkHosts(scope.hosts, p._srcHostsFound, p._srcHostNames, 'source', 'src');
       }
     }
   } else {
     const srcMode = p._srcMode || (p._use32Src ? 'hosts' : 'subnet');
     if (srcMode === 'hosts' && p.srcHosts?.length) {
-      checkHosts(p.srcHosts, p._srcHostsFound, p._srcHostNames, 'source');
+      checkHosts(p.srcHosts, p._srcHostsFound, p._srcHostNames, 'source', 'src');
     } else if (!a.srcAddr?.found && !p._srcAddrName) {
       add('source');
     }
@@ -7486,14 +7577,14 @@ function policyMissingMandatoryFields(p) {
         if (scope.useSubnet !== false) {
           if (!scope.addrFound && !scope.addrName) add('destination');
         } else {
-          checkHosts(scope.hosts, p._dstHostsFound, p._dstHostNames, 'destination');
+          checkHosts(scope.hosts, p._dstHostsFound, p._dstHostNames, 'destination', 'dst');
         }
       }
     } else {
       const dstMode = p._dstMode || (p._use32Dst ? 'hosts' : 'subnet');
       const isWanSpecific = isWan && p._dstUseAll === false;
       if ((dstMode === 'hosts' || isWanSpecific) && p.dstHosts?.length) {
-        checkHosts(p.dstHosts, p._dstHostsFound, p._dstHostNames, 'destination');
+        checkHosts(p.dstHosts, p._dstHostsFound, p._dstHostNames, 'destination', 'dst');
       } else if (!isWanSpecific && p.dstType !== 'public'
           && !a.dstAddr?.found && !p._dstAddrName) {
         add('destination');
@@ -7538,9 +7629,10 @@ function isPolicyComplete(p, _debug) {
 
   // Helper : un nom auto-généré FF_HOST_... non modifié = incomplet
   const autoHostName = h => `FF_HOST_${h.replace(/\./g, '_')}`;
-  const hostNameOk = (h, namesMap) => {
+  const hostNameOk = (h, namesMap, side) => {
     const n = cleanHostName(h, namesMap?.[h]);
-    return n && n !== autoHostName(h);
+    return n && (n !== autoHostName(h)
+      || p._resolvedObjectKeys?.[`host:${side}:${h}`] === n);
   };
 
   // Source addresses / hosts
@@ -7553,7 +7645,7 @@ function isPolicyComplete(p, _debug) {
         if (!s.addrFound && !s.addrName) { dbg(`FAIL: multiSrc subnet ${s.subnet} no addrName`); return false; }
       } else {
         for (const h of (s.hosts || [])) {
-          if (!srcFoundSet.has(h) && !hostNameOk(h, p._srcHostNames)) { dbg(`FAIL: multiSrc host ${h} not found/named`); return false; }
+          if (!srcFoundSet.has(h) && !hostNameOk(h, p._srcHostNames, 'src')) { dbg(`FAIL: multiSrc host ${h} not found/named`); return false; }
         }
       }
     }
@@ -7562,7 +7654,7 @@ function isPolicyComplete(p, _debug) {
     if (_srcModeResolved === 'hosts' && (p.srcHosts || []).length > 0) {
       const foundSet = new Set(p._srcHostsFound || []);
       for (const h of (p.srcHosts || [])) {
-        if (!foundSet.has(h) && !hostNameOk(h, p._srcHostNames)) { dbg(`FAIL: src host ${h} not found/named`); return false; }
+        if (!foundSet.has(h) && !hostNameOk(h, p._srcHostNames, 'src')) { dbg(`FAIL: src host ${h} not found/named`); return false; }
       }
     } else {
       if (!a.srcAddr?.found && !p._srcAddrName) { dbg('FAIL: srcAddr not found/named'); return false; }
@@ -7583,7 +7675,7 @@ function isPolicyComplete(p, _debug) {
         if (!s.addrFound && !s.addrName) { dbg(`FAIL: multiDst subnet ${s.subnet} no addrName`); return false; }
       } else {
         for (const h of (s.hosts || [])) {
-          if (!dstFoundSet.has(h) && !hostNameOk(h, p._dstHostNames)) { dbg(`FAIL: multiDst host ${h} not found/named`); return false; }
+          if (!dstFoundSet.has(h) && !hostNameOk(h, p._dstHostNames, 'dst')) { dbg(`FAIL: multiDst host ${h} not found/named`); return false; }
         }
       }
     }
@@ -7593,13 +7685,13 @@ function isPolicyComplete(p, _debug) {
     if (isWanSpecific && p.dstHosts?.length > 0) {
       const foundSet = new Set(p._dstHostsFound || []);
       for (const h of (p.dstHosts || [])) {
-        if (!foundSet.has(h) && !hostNameOk(h, p._dstHostNames)) { dbg(`FAIL: dst host ${h} not found/named (WAN specific)`); return false; }
+        if (!foundSet.has(h) && !hostNameOk(h, p._dstHostNames, 'dst')) { dbg(`FAIL: dst host ${h} not found/named (WAN specific)`); return false; }
       }
     } else if (!isWanSpecific) {
       if (_dstModeResolved === 'hosts' && (p.dstHosts || []).length > 0) {
         const foundSet = new Set(p._dstHostsFound || []);
         for (const h of (p.dstHosts || [])) {
-          if (!foundSet.has(h) && !hostNameOk(h, p._dstHostNames)) { dbg(`FAIL: dst host ${h} not found/named`); return false; }
+          if (!foundSet.has(h) && !hostNameOk(h, p._dstHostNames, 'dst')) { dbg(`FAIL: dst host ${h} not found/named`); return false; }
         }
       } else if (p.dstType !== 'public') {
         if (!a.dstAddr?.found && !p._dstAddrName) { dbg('FAIL: dstAddr not found/named'); return false; }

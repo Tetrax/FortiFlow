@@ -2606,6 +2606,279 @@ function analyzePolicies(policies, fortiConfig, preferredWanIntf, observedFlows 
   });
 }
 
+function autoFinalizeExactObjectDecisions(policies, fortiConfig, observedFlows = []) {
+  const finalized = structuredClone(Array.isArray(policies) ? policies : []);
+  const config = fortiConfig || {};
+  const existingAddressNames = new Map([
+    ...Object.entries(config.addresses || {}).map(([name, address]) => [
+      name.toLowerCase(), { type: 'address', cidr: parseCidr(address.cidr)?.cidr || address.cidr },
+    ]),
+    ...Object.keys(config.addressGroups || {}).map(name => [name.toLowerCase(), { type: 'group' }]),
+  ]);
+  const generatedAddressNames = new Map();
+  const generatedAddressTargets = new Map();
+  const generatedServiceNames = new Map();
+  const observedSideHosts = {
+    src: new Set(observedFlows.filter(isPolicyEvidenceFlow).map(flow => flow.srcip).filter(Boolean)),
+    dst: new Set(observedFlows.filter(isPolicyEvidenceFlow).map(flow => flow.dstip).filter(Boolean)),
+  };
+  const manualServiceLabels = new Set(['PING', 'ICMP/0/8', 'GOOGLE-ICMP']);
+  const validAddressName = name => !!name && name.length <= 79
+    && name.toLowerCase() !== 'all' && !/["\\?*#\u0000-\u001f\u007f]/.test(name);
+  const registerAddress = (name, cidr) => {
+    const parsed = parseCidr(cidr);
+    if (!parsed || parsed.cidr !== cidr || !validAddressName(name)) return false;
+    const normalizedName = name.toLowerCase();
+    const existing = existingAddressNames.get(normalizedName);
+    if (existing && (existing.type !== 'address' || existing.cidr !== cidr)) return false;
+    const previousTarget = generatedAddressNames.get(normalizedName);
+    const previousName = generatedAddressTargets.get(cidr);
+    if ((previousTarget && previousTarget !== cidr) || (previousName && previousName !== name)) return false;
+    generatedAddressNames.set(normalizedName, cidr);
+    generatedAddressTargets.set(cidr, name);
+    return true;
+  };
+  const registerService = (name, keys) => {
+    if (serviceNameDecisionIssue(name, config)) return false;
+    const definition = keys.join(',');
+    const normalizedName = name.toLowerCase();
+    const previous = generatedServiceNames.get(normalizedName);
+    if (previous && previous !== definition) return false;
+    generatedServiceNames.set(normalizedName, definition);
+    return true;
+  };
+  const exactServiceName = keys => {
+    const parts = keys.map(key => key.split('/'));
+    const protos = [...new Set(parts.map(([proto]) => proto))];
+    if (protos.length !== 1 || !['TCP', 'UDP'].includes(protos[0])) return '';
+    const ports = parts.map(([, port]) => Number(port));
+    if (ports.some(port => !Number.isInteger(port) || port < 1 || port > 65535)) return '';
+    const name = ports.length === 1
+      ? `FF_SVC_${ports[0]}_${protos[0]}`
+      : `FF_SVC_${protos[0]}_${ports.join('_')}`;
+    return name.length <= 79 ? name : '';
+  };
+
+  for (const policy of finalized) {
+    const evidenceFlows = observedFlows.filter(flow =>
+      isPolicyEvidenceFlow(flow) && flowMatchesPolicyScope(flow, policy));
+    const resolvedObjects = { ...(policy._resolvedObjectKeys || {}) };
+    for (const side of ['src', 'dst']) {
+      const multiField = side === 'src' ? '_multiSrcSubnets' : '_multiDstSubnets';
+      const modeField = side === 'src' ? '_srcMode' : '_dstMode';
+      const hostFlag = side === 'src' ? '_use32Src' : '_use32Dst';
+      const hostsField = side === 'src' ? 'srcHosts' : 'dstHosts';
+      const multi = policy[multiField];
+      const mode = policy[modeField] || (policy[hostFlag] ? 'hosts' : 'subnet');
+      const activeHosts = new Set(
+        Array.isArray(multi) && multi.length > 0
+          ? multi.filter(item => item?.useSubnet === false).flatMap(item => item.hosts || [])
+          : mode === 'hosts' ? (policy[hostsField] || []) : [],
+      );
+      for (const key of Object.keys(resolvedObjects)) {
+        if (key.startsWith(`multi-${side}:`)) {
+          delete resolvedObjects[key];
+        } else if (key.startsWith(`host:${side}:`)) {
+          const host = key.slice(`host:${side}:`.length);
+          if (!activeHosts.has(host) || !observedSideHosts[side].has(host)) delete resolvedObjects[key];
+        }
+      }
+      if ((Array.isArray(multi) && multi.length > 0) || mode === 'hosts') {
+        delete resolvedObjects[`addr:${side}`];
+      }
+    }
+    const resolveAddress = (cidr, name, objectKey, apply) => {
+      const exact = findAddress(cidr, config.addresses || {});
+      if (exact.found && exact.source !== 'config-range') {
+        delete resolvedObjects[objectKey];
+        return true;
+      }
+      const resolvedName = String(resolvedObjects[objectKey] || '').trim();
+      const selectedName = name || resolvedName;
+      if (!registerAddress(selectedName, cidr)) {
+        delete resolvedObjects[objectKey];
+        return false;
+      }
+      apply(selectedName);
+      resolvedObjects[objectKey] = selectedName;
+      return true;
+    };
+    const resolveHost = (side, host) => {
+      if (!observedSideHosts[side].has(host)) return;
+      const cidr = `${host}/32`;
+      if (!parseCidr(cidr)) return;
+      const objectKey = `host:${side}:${host}`;
+      const namesField = side === 'src' ? '_srcHostNames' : '_dstHostNames';
+      const foundField = side === 'src' ? '_srcHostsFound' : '_dstHostsFound';
+      const names = { ...(policy[namesField] || {}) };
+      const match = findAddress(cidr, config.addresses || {});
+      if (match.found && match.source !== 'config-range') {
+        names[host] = match.name;
+        policy[namesField] = names;
+        policy[foundField] = [...new Set([...(policy[foundField] || []), host])];
+        delete resolvedObjects[objectKey];
+        return;
+      }
+      const deterministicName = `FF_HOST_${host.replace(/\./g, '_')}`;
+      const name = String((match.source === 'config-range' ? deterministicName : names[host])
+        || resolvedObjects[objectKey]
+        || deterministicName).trim();
+      if (!registerAddress(name, cidr)) {
+        delete resolvedObjects[objectKey];
+        return;
+      }
+      names[host] = name;
+      policy[namesField] = names;
+      policy[foundField] = (policy[foundField] || []).filter(value => value !== host);
+      if (policy[foundField].length === 0) delete policy[foundField];
+      resolvedObjects[objectKey] = name;
+    };
+    const resolveSide = side => {
+      const multiField = side === 'src' ? '_multiSrcSubnets' : '_multiDstSubnets';
+      const modeField = side === 'src' ? '_srcMode' : '_dstMode';
+      const hostFlag = side === 'src' ? '_use32Src' : '_use32Dst';
+      const hostsField = side === 'src' ? 'srcHosts' : 'dstHosts';
+      const addressField = side === 'src' ? 'srcAddr' : 'dstAddr';
+      const nameField = side === 'src' ? '_srcAddrName' : '_dstAddrName';
+      const multi = policy[multiField];
+      if (Array.isArray(multi) && multi.length > 0) {
+        multi.forEach((item, index) => {
+          if (item.useSubnet === false) {
+            delete resolvedObjects[`multi-${side}:${item.subnet}`];
+            delete resolvedObjects[`multi-${side}:${index}`];
+            for (const host of (item.hosts || [])) resolveHost(side, host);
+            return;
+          }
+          const ipField = side === 'src' ? 'srcip' : 'dstip';
+          const subnetField = side === 'src' ? 'srcSubnet' : 'dstSubnet';
+          const retainedHostsBelongToSubnet = (item.hosts || []).every(host =>
+            destinationTargetContainsIp(item.subnet, host));
+          const itemProven = retainedHostsBelongToSubnet
+            && evidenceFlows.some(flow => flow[subnetField] === item.subnet);
+          const objectKey = `multi-${side}:${item.subnet}`;
+          const indexObjectKey = `multi-${side}:${index}`;
+          if (!itemProven || item.addrFound || !item.subnet) {
+            delete resolvedObjects[objectKey];
+            delete resolvedObjects[indexObjectKey];
+            return;
+          }
+          const currentName = String(item.addrName || '').trim();
+          const placeholderNames = new Set([
+            '',
+            String(item.suggestedName || '').trim(),
+            suggestNetworkName(item.subnet),
+            suggestAddrName(item.subnet),
+          ]);
+          const canonicalName = suggestAddrName(item.subnet);
+          const name = placeholderNames.has(currentName) ? canonicalName : currentName;
+          if (!resolveAddress(item.subnet, name, objectKey, value => { item.addrName = value; })) {
+            if (placeholderNames.has(currentName)) item.addrName = '';
+            delete resolvedObjects[indexObjectKey];
+            return;
+          }
+          if (resolvedObjects[objectKey]) resolvedObjects[indexObjectKey] = resolvedObjects[objectKey];
+        });
+        return;
+      }
+      const mode = policy[modeField] || (policy[hostFlag] ? 'hosts' : 'subnet');
+      if (mode === 'hosts' && Array.isArray(policy[hostsField])) {
+        for (const host of policy[hostsField]) resolveHost(side, host);
+        return;
+      }
+      if (!evidenceFlows.length || !policySideElementsProven(policy, evidenceFlows, side)) return;
+      const address = policy.analysis?.[addressField];
+      if (address?.cidr && (!address.found || address.source === 'config-range')) {
+        if (address.source === 'config-range') {
+          address.found = false;
+          address.name = null;
+        }
+        const objectKey = `addr:${side}`;
+        const currentName = String(policy[nameField] || '').trim();
+        const suggestedName = String(address.suggestedName || '').trim();
+        const parsedAddress = parseCidr(address.cidr);
+        const name = parsedAddress?.prefix === 32
+          ? `FF_HOST_${parsedAddress.cidr.slice(0, -3).replace(/\./g, '_')}`
+          : suggestAddrName(address.cidr);
+        const selectedName = currentName || name;
+        if (!resolveAddress(address.cidr, selectedName, objectKey, value => { policy[nameField] = value; })) {
+          if (!currentName || currentName === suggestedName || currentName === name) policy[nameField] = '';
+        }
+      }
+    };
+
+    resolveSide('src');
+    const usesInternetAll = (policy._isWan || policy.dstType === 'public') && policy._dstUseAll === true;
+    if (!usesInternetAll) resolveSide('dst');
+    if (Object.keys(resolvedObjects).length > 0) policy._resolvedObjectKeys = resolvedObjects;
+    else delete policy._resolvedObjectKeys;
+
+    const activeServiceKeys = new Set(
+      (policy.analysis?.services || []).flatMap(serviceTransportKeys)
+        .map(key => String(key).toUpperCase()),
+    );
+    const resolvedServices = { ...(policy._resolvedServiceKeys || {}) };
+    for (const key of Object.keys(resolvedServices)) {
+      const canonicalKey = String(key).toUpperCase();
+      if (!activeServiceKeys.has(canonicalKey)) {
+        delete resolvedServices[key];
+      } else if (canonicalKey !== key) {
+        const decision = resolvedServices[key];
+        delete resolvedServices[key];
+        resolvedServices[canonicalKey] = decision;
+      }
+    }
+    for (const service of (policy.analysis?.services || [])) {
+      const keys = serviceTransportKeys(service).sort();
+      if (service.found || service._isMerged || service.technicalConflict) {
+        keys.forEach(key => delete resolvedServices[key]);
+        continue;
+      }
+      if (keys.length === 0 || keys.some(key => !/^(TCP|UDP)\/\d+$/.test(key))) continue;
+      if (keys.some(key => resolvedServices[key] && resolvedServices[key] !== 'specific')) continue;
+      const label = String(service.label || '').toUpperCase();
+      if (manualServiceLabels.has(label)) continue;
+      const fullyProven = keys.every(key => evidenceFlows.some(flow =>
+        flowServiceTechnicalKey(flow) === key
+        && String(flow.service || '').toUpperCase() === label));
+      if (!fullyProven) continue;
+      const name = exactServiceName(keys);
+      const existingName = String(service.suggestedName || '').trim();
+      const legacyName = keys.length === 1
+        ? `FF_SVC_${keys[0].split('/')[1]}_${keys[0].split('/')[0]}` : '';
+      const autoNames = [service.label, name, legacyName]
+        .filter(Boolean).map(value => String(value).toLowerCase());
+      const isExplicitName = existingName
+        && !autoNames.includes(existingName.toLowerCase());
+      if (isExplicitName) {
+        if (!registerService(existingName, keys)) {
+          for (const key of keys) delete resolvedServices[key];
+        } else {
+          for (const key of keys) resolvedServices[key] = 'specific';
+        }
+        continue;
+      }
+      if (!name || !registerService(name, keys)) continue;
+      const proto = keys[0].split('/')[0];
+      const ports = keys.map(key => Number(key.split('/')[1])).sort((a, b) => a - b);
+      service.suggestedName = name;
+      service.proto = proto;
+      if (ports.length === 1) {
+        service.port = ports[0];
+        delete service.ports;
+        delete service.sourcePorts;
+      } else {
+        delete service.port;
+        service.ports = ports;
+        service.sourcePorts = [...ports];
+      }
+      for (const key of keys) resolvedServices[key] = 'specific';
+    }
+    if (Object.keys(resolvedServices).length > 0) policy._resolvedServiceKeys = resolvedServices;
+    else delete policy._resolvedServiceKeys;
+  }
+  return finalized;
+}
+
 function normalizedFlowProtocol(flow) {
   const value = String(flow?.protoName || flow?.proto || '').toUpperCase();
   if (value === '6' || value === 'TCP') return 'TCP';
@@ -2662,8 +2935,19 @@ function policySideElementsProven(policy, evidenceFlows, side) {
   const subnetField = side === 'src' ? 'srcSubnet' : 'dstSubnet';
   if (Array.isArray(multi) && multi.length > 0) {
     return multi.every(item => item?.useSubnet !== false
-      ? evidenceFlows.some(flow => flow[subnetField] === item?.subnet
-        || (item?.hosts || []).includes(flow[ipField]))
+      ? (() => {
+        const hosts = item?.hosts || [];
+        const exactObservedSubnet = evidenceFlows.some(flow => flow[subnetField] === item?.subnet);
+        const derivedDestinationSubnet = side === 'dst'
+          && (policy._dstDetectedSubnets || []).some(candidate => {
+            if (candidate?.subnet !== item?.subnet) return false;
+            const candidateHosts = new Set(candidate.hosts || []);
+            return candidateHosts.size === hosts.length && hosts.every(host => candidateHosts.has(host));
+          });
+        const explicitDestinationSubnet = side === 'dst' && item?.manual === true;
+        return hosts.every(host => destinationTargetContainsIp(item?.subnet, host))
+          && (exactObservedSubnet || derivedDestinationSubnet || explicitDestinationSubnet);
+      })()
       : Array.isArray(item?.hosts) && item.hosts.length > 0
         && item.hosts.every(host => evidenceFlows.some(flow => flow[ipField] === host)));
   }
@@ -2717,6 +3001,8 @@ function policyAffinityProven(policy, evidenceFlows) {
   const destinations = publicAll ? [{ publicAll: true }] : policyAffinityScopes(policy, 'dst');
   const serviceKeys = [...new Set((policy.analysis?.services || []).flatMap(serviceTransportKeys))];
   if (sources.length === 0 || destinations.length === 0 || serviceKeys.length === 0) return false;
+  if ([...sources, ...destinations].some(scope => scope.subnet
+      && (scope.hosts || []).some(host => !destinationTargetContainsIp(scope.subnet, host)))) return false;
   const indexScopes = scopes => ({
     hosts: new Map(scopes.flatMap(scope => scope.host
       ? [[scope.host, `h:${scope.host}`]]
@@ -3825,7 +4111,7 @@ function generateConfig(selectedPolicies, opts = {}) {
   function resolveHost32(ip, customNames) {
     const cidr = `${ip}/32`;
     const existing = findAddress(cidr, addresses);
-    if (existing.found) return { name: existing.name, isNew: false };
+    if (existing.found && existing.source !== 'config-range') return { name: existing.name, isNew: false };
     // Nettoyer le nom si corruption "IP=Nom" stockée par l'ancien import positionnel
     const raw = customNames?.[ip];
     const pfx = ip + '=';
@@ -4302,6 +4588,7 @@ module.exports = {
   buildPolicyStrategyPreviews,
   validatePolicyStrategyBatch,
   analyzePolicies,
+  autoFinalizeExactObjectDecisions,
   generateConfig,
   validateAgainstExisting,
   preflightValidation,

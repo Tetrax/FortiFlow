@@ -11,6 +11,7 @@ const { buildAnalysis, consolidatePolicies }             = require('./lib/analyz
 const { createSession, getSession, setSessionData, setFortiConfig,
         setSessionError, deleteSession, getStats, listSessions } = require('./lib/store');
 const { parseFortiConfig, extractKnownSubnets, preserveDestinationServiceAffinity, buildPolicyStrategyPreviews, validatePolicyStrategyBatch, analyzePolicies,
+        autoFinalizeExactObjectDecisions,
         generateConfig, validateAgainstExisting, applyPolicyUserDecisions, validateGenerationOptions, validatePolicyDecisionShapes,
         preflightValidation,
         parseFullRoutingTable, parseOspfRoutingTable, parseBgpNetworkTable,
@@ -184,10 +185,14 @@ function preparePolicyAnalysis(session, selectedPolicies, opts = {}) {
   }
   const analysisInput = structuredClone(submittedPolicies);
   for (const policy of analysisInput) delete policy._mergedServices;
-  const authoritativePolicies = analyzePolicies(
-    analysisInput,
+  const authoritativePolicies = autoFinalizeExactObjectDecisions(
+    analyzePolicies(
+      analysisInput,
+      fortiConfig,
+      normalizedOpts.preferredWanIntf,
+      session.data?.flows || [],
+    ),
     fortiConfig,
-    normalizedOpts.preferredWanIntf,
     session.data?.flows || [],
   );
   return {
@@ -1693,6 +1698,13 @@ app.post('/api/deploy/preview', (req, res) => {
 
   try {
     const preview = buildPolicyStrategyPreviews(selectedPolicies, { scope });
+    for (const strategy of Object.values(preview.strategies || {})) {
+      strategy.policies = autoFinalizeExactObjectDecisions(
+        strategy.policies,
+        s.fortiConfig,
+        s.data?.flows || [],
+      );
+    }
     res.json(preview);
   } catch (err) {
     res.status(422).json({ error: err.message });
