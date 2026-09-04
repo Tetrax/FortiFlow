@@ -299,7 +299,7 @@ function applyFlowFilters(flows, q) {
   return flows.filter(f => {
     if (q.srcip     && !ipTermMatches(f.srcip, q.srcip))                                         return false;
     if (q.dstip     && !ipTermMatches(f.dstip, q.dstip))                                         return false;
-    if (q.port      && f.dstport !== q.port && f.srcport !== q.port)                             return false;
+    if (q.port      && f.dstport !== q.port && f.srcport !== q.port && !(f.srcports || []).includes(q.port)) return false;
     if (q.proto     && f.proto !== q.proto && f.protoName?.toLowerCase() !== q.proto.toLowerCase()) return false;
     if (q.action    && f.action !== q.action)                                                     return false;
     if (q.src_type  && f.srcType !== q.src_type)                                                  return false;
@@ -863,7 +863,7 @@ app.get('/api/export/flows', (req, res) => {
     .sort((a, b) => b.count - a.count);
 
   const COLS = ['srcip','srcSubnet','srcType','dstip','dstSubnet','dstType',
-                'srcport','dstport','proto','protoName','action','service',
+                'srcport','srcports','srcportMissing','dstport','proto','protoName','action','service',
                 'srcintf','dstintf','policyid','count','sentBytes','rcvdBytes','totalBytes'];
   sendCsv(res, 'fortiflow_flows.csv', flows, COLS);
 });

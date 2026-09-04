@@ -90,12 +90,6 @@ const HEADER_MAP = {
   date: 'date', time: 'time', datetime: 'date', timestamp: 'date',
 };
 
-// Services UDP par défaut (quand le champ proto est absent)
-const UDP_SERVICES = new Set([
-  'DNS', 'DHCP', 'NTP', 'SNMP', 'SNMPTRAP', 'SYSLOG', 'TFTP',
-  'RIP', 'MDNS', 'LLMNR', 'BOOTP', 'RADIUS', 'ISAKMP', 'IKE',
-]);
-
 // ─── Format detection ─────────────────────────────────────────────────────────
 
 function detectFormat(firstLine) {
@@ -123,29 +117,43 @@ function isValidIPv4(ip) {
 
 // ─── Flow extraction ──────────────────────────────────────────────────────────
 
+const SUPPORTED_PROTOCOLS = new Set(['1', '6', '17', '47', '50', '58', '89']);
+const PROTOCOL_ALIASES = new Map([
+  ['TCP', '6'],
+  ['UDP', '17'],
+  ['ICMP', '1'],
+]);
+
+function normalizeProtocol(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return { proto: null, skipReason: 'missingProtocol' };
+  const alias = PROTOCOL_ALIASES.get(raw.toUpperCase());
+  const proto = alias || (/^\d+$/.test(raw) ? String(Number(raw)) : null);
+  return proto && SUPPORTED_PROTOCOLS.has(proto)
+    ? { proto, skipReason: null }
+    : { proto: null, skipReason: 'invalidProtocol' };
+}
+
 function extractFlow(fields) {
   const service = (fields.service || '').toUpperCase().trim();
-  let proto = (fields.proto || '').trim();
+  const protocol = normalizeProtocol(fields.proto);
 
-  // Normaliser les chaînes protocole → chiffres
-  if (/^tcp$/i.test(proto))  proto = '6';
-  if (/^udp$/i.test(proto))  proto = '17';
-  if (/^icmp$/i.test(proto)) proto = '1';
+  // Le nom du service n'est jamais une preuve du protocole observé.
+  if (!protocol.proto) return { flow: null, skipReason: protocol.skipReason };
 
-  // Proto absent : déduire depuis le service
-  if (!proto && service) {
-    proto = UDP_SERVICES.has(service) ? '17' : '6';
-  }
+  // NAT/trandisp et une éventuelle direction de log ne pilotent pas le moteur
+  // actuel : NAT est une décision de policy et le sens vient de srcintf/dstintf.
+  // Ne pas conserver arbitrairement la valeur du premier log agrégé.
 
   const srcip = (fields.srcip || '').trim();
   const dstip = (fields.dstip || '').trim();
 
-  return {
+  return { flow: {
     srcip:    isValidIPv4(srcip) ? srcip : '',
     dstip:    isValidIPv4(dstip) ? dstip : '',
-    srcport:  fields.srcport  || '',
+    srcport:  String(fields.srcport || '').trim(),
     dstport:  fields.dstport  || '',
-    proto,
+    proto: protocol.proto,
     action:   (fields.action  || '').toLowerCase().trim(),
     service,
     srcintf:    fields.srcintf    || '',
@@ -156,10 +164,45 @@ function extractFlow(fields) {
     time:     fields.time     || '',
     sentbyte: parseInt(fields.sentbyte || 0, 10) || 0,
     rcvdbyte: parseInt(fields.rcvdbyte || 0, 10) || 0,
-  };
+  }, skipReason: null };
 }
 
 // ─── Flow aggregation helper ──────────────────────────────────────────────────
+
+function mergeSourcePortEvidence(target, source) {
+  const values = Array.isArray(source.srcports)
+    ? source.srcports
+    : [source.srcport].filter(value => String(value || '').trim());
+  const srcportSet = target._srcportSet || new Set(target.srcports || []);
+  for (const value of values) srcportSet.add(String(value).trim());
+  target._srcportSet = srcportSet;
+  target.srcportMissing = target.srcportMissing === true
+    || source.srcportMissing === true
+    || (!Array.isArray(source.srcports) && !String(source.srcport || '').trim());
+}
+
+function compareSourcePortEvidence(a, b) {
+  const aIsPort = /^\d{1,5}$/.test(a) && Number(a) <= 65535;
+  const bIsPort = /^\d{1,5}$/.test(b) && Number(b) <= 65535;
+  if (aIsPort && bIsPort) {
+    const numericOrder = Number(a) - Number(b);
+    if (numericOrder) return numericOrder;
+  } else if (aIsPort !== bIsPort) {
+    return aIsPort ? -1 : 1;
+  }
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function finalizeSourcePortEvidence(flowMap) {
+  for (const flow of flowMap.values()) {
+    const srcportSet = flow._srcportSet || new Set(flow.srcports || []);
+    flow.srcports = [...srcportSet].sort(compareSourcePortEvidence);
+    flow.srcport = !flow.srcportMissing && flow.srcports.length === 1
+      ? flow.srcports[0]
+      : '';
+    delete flow._srcportSet;
+  }
+}
 
 function aggregateFlow(flowMap, flow) {
   if (!flow.srcip || !flow.dstip) return false;
@@ -167,13 +210,14 @@ function aggregateFlow(flowMap, flow) {
   if (!flowMap.has(key)) {
     flowMap.set(key, {
       srcip: flow.srcip, dstip: flow.dstip,
-      srcport: flow.srcport, dstport: flow.dstport,
+      srcport: '', srcports: [], srcportMissing: false, dstport: flow.dstport,
       proto: flow.proto, action: flow.action, service: flow.service,
       srcintf: flow.srcintf, dstintf: flow.dstintf, policyid: flow.policyid, policyname: flow.policyname,
       count: 0, sentBytes: 0, rcvdBytes: 0,
     });
   }
   const e = flowMap.get(key);
+  mergeSourcePortEvidence(e, flow);
   e.count++;
   e.sentBytes += flow.sentbyte;
   e.rcvdBytes += flow.rcvdbyte;
@@ -186,7 +230,7 @@ async function parseStream(inputStream, onProgress) {
   const flowMap = new Map();
   let lineCount = 0;
   let skipped   = 0;
-  const skipReasons = { nonTraffic: 0, invalidFlow: 0 };
+  const skipReasons = { nonTraffic: 0, invalidFlow: 0, missingProtocol: 0, invalidProtocol: 0 };
   let format    = null;
   let sep       = null;
   let csvHeaders = null;
@@ -230,10 +274,17 @@ async function parseStream(inputStream, onProgress) {
       }
     }
 
-    const flow = extractFlow(fields);
+    const extracted = extractFlow(fields);
+    if (!extracted.flow) {
+      skipped++;
+      skipReasons[extracted.skipReason]++;
+      continue;
+    }
+    const flow = extracted.flow;
     if (!aggregateFlow(flowMap, flow)) { skipped++; skipReasons.invalidFlow++; }
   }
 
+  finalizeSourcePortEvidence(flowMap);
   return { flowMap, lineCount, skipped, skipReasons };
 }
 
@@ -250,7 +301,8 @@ async function parseXLSX(filePath, onProgress) {
   const sheet = workbook.Sheets[sheetName];
   const rows  = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
 
-  if (rows.length < 2) return { flowMap: new Map(), lineCount: 0, skipped: 0 };
+  const skipReasons = { nonTraffic: 0, invalidFlow: 0, missingProtocol: 0, invalidProtocol: 0 };
+  if (rows.length < 2) return { flowMap: new Map(), lineCount: 0, skipped: 0, skipReasons };
 
   // First row = headers
   const rawHeaders = rows[0].map(h => String(h).toLowerCase().trim());
@@ -275,11 +327,20 @@ async function parseXLSX(filePath, onProgress) {
     for (let i = 0; i < headers.length; i++) {
       fields[headers[i]] = String(parts[i] ?? '').trim();
     }
-    const flow = extractFlow(fields);
-    if (!aggregateFlow(flowMap, flow)) skipped++;
+    const extracted = extractFlow(fields);
+    if (!extracted.flow) {
+      skipped++;
+      skipReasons[extracted.skipReason]++;
+      continue;
+    }
+    if (!aggregateFlow(flowMap, extracted.flow)) {
+      skipped++;
+      skipReasons.invalidFlow++;
+    }
   }
 
-  return { flowMap, lineCount, skipped };
+  finalizeSourcePortEvidence(flowMap);
+  return { flowMap, lineCount, skipped, skipReasons };
 }
 
 // ─── File entry point (GZ / ZIP / XLSX / plain) ───────────────────────────────
@@ -332,7 +393,7 @@ async function parseFile(filePath, onProgress) {
     const mergedFlowMap = new Map();
     let totalLines = 0;
     let totalSkipped = 0;
-    const totalSkipReasons = { nonTraffic: 0, invalidFlow: 0 };
+    const totalSkipReasons = { nonTraffic: 0, invalidFlow: 0, missingProtocol: 0, invalidProtocol: 0 };
 
     for (const entry of entries) {
       try {
@@ -344,13 +405,16 @@ async function parseFile(filePath, onProgress) {
         if (skipReasons) {
           totalSkipReasons.nonTraffic   += skipReasons.nonTraffic   || 0;
           totalSkipReasons.invalidFlow  += skipReasons.invalidFlow  || 0;
+          totalSkipReasons.missingProtocol += skipReasons.missingProtocol || 0;
+          totalSkipReasons.invalidProtocol += skipReasons.invalidProtocol || 0;
         }
         // Merge into combined flowMap
         for (const [key, flow] of flowMap) {
           if (!mergedFlowMap.has(key)) {
-            mergedFlowMap.set(key, { ...flow });
+            mergedFlowMap.set(key, { ...flow, srcports: [...(flow.srcports || [])] });
           } else {
             const e = mergedFlowMap.get(key);
+            mergeSourcePortEvidence(e, flow);
             e.count     += flow.count;
             e.sentBytes += flow.sentBytes;
             e.rcvdBytes += flow.rcvdBytes;
@@ -362,6 +426,7 @@ async function parseFile(filePath, onProgress) {
       }
     }
 
+    finalizeSourcePortEvidence(mergedFlowMap);
     return { flowMap: mergedFlowMap, lineCount: totalLines, skipped: totalSkipped, skipReasons: totalSkipReasons };
 
   } else {
